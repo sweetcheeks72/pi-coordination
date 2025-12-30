@@ -1,12 +1,12 @@
 import { randomUUID } from "node:crypto";
-import * as fs from "node:fs/promises";
+import * as fsSync from "node:fs";
 import * as path from "node:path";
 import { spawn, type ChildProcess } from "node:child_process";
 import { fileURLToPath } from "node:url";
 import type { CustomAgentTool, CustomToolFactory } from "@mariozechner/pi-coding-agent";
 import { Type } from "@sinclair/typebox";
 import { FileBasedStorage } from "../state.js";
-import type { WorkerState } from "../types.js";
+import type { WorkerStateFile } from "../types.js";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
@@ -32,7 +32,8 @@ function spawnWorkerProcess(
 	const reservationHookPath = path.join(__dirname, "..", "worker-hooks", "reservation.ts");
 
 	const workerId = randomUUID();
-	const identity = `worker:${config.agent}-${workerId.slice(0, 4)}`;
+	const shortId = workerId.slice(0, 4);
+	const identity = `worker:${config.agent}-${shortId}`;
 
 	const args = [
 		"--model", "claude-sonnet-4-20250514",
@@ -59,42 +60,51 @@ function spawnWorkerProcess(
 		throw new Error(`Failed to start worker process for ${config.agent}`);
 	}
 
-	let buffer = "";
-	proc.stdout?.on("data", (data) => {
-		buffer += data.toString();
-		const lines = buffer.split("\n");
-		buffer = lines.pop() || "";
-		for (const line of lines) {
-			if (!line.trim()) continue;
-			try {
-				const event = JSON.parse(line);
-				if (event.type === "message_end" && event.message?.role === "assistant") {
-					const text = event.message.content?.find((c: { type: string }) => c.type === "text")?.text;
-					if (text) {
-						storage.appendTUIMessage({
-							from: identity,
-							content: text.slice(0, 200) + (text.length > 200 ? "..." : ""),
-							timestamp: Date.now(),
-						}).catch(() => {});
-					}
-				}
-				if (event.type === "tool_execution_start") {
-					storage.appendTUIMessage({
-						from: identity,
-						content: `[tool] ${event.toolName}`,
-						timestamp: Date.now(),
-					}).catch(() => {});
-				}
-			} catch {}
-		}
-	});
+	const initialState: WorkerStateFile = {
+		id: workerId,
+		shortId,
+		identity,
+		agent: config.agent,
+		status: "working",
+		currentFile: null,
+		currentTool: null,
+		waitingFor: null,
+		assignedSteps: config.steps,
+		completedSteps: [],
+		currentStep: config.steps[0] || null,
+		handshakeSpec: config.handshakeSpec,
+		startedAt: Date.now(),
+		completedAt: null,
+		usage: { input: 0, output: 0, cost: 0, turns: 0 },
+		filesModified: [],
+		blockers: [],
+		errorType: null,
+		errorMessage: null,
+	};
+
+	try {
+		fsSync.writeFileSync(
+			path.join(coordDir, `worker-${workerId}.json`),
+			JSON.stringify(initialState, null, 2)
+		);
+	} catch (err) {
+		throw new Error(`Failed to create worker state file: ${err}`);
+	}
+
+	storage.appendEvent({
+		type: "worker_started",
+		workerId,
+		timestamp: Date.now(),
+	}).catch(() => {});
+
+	proc.stdout?.on("data", () => {});
 
 	proc.stderr?.on("data", (data) => {
 		const text = data.toString().trim();
 		if (text) {
-			storage.appendTUIMessage({
-				from: identity,
-				content: `[stderr] ${text.slice(0, 100)}`,
+			storage.appendEvent({
+				type: "coordinator",
+				message: `[${identity}] stderr: ${text.slice(0, 100)}`,
 				timestamp: Date.now(),
 			}).catch(() => {});
 		}
@@ -102,18 +112,6 @@ function spawnWorkerProcess(
 
 	const promise = new Promise<number>((resolve) => {
 		proc.on("close", (code) => {
-			if (buffer.trim()) {
-				try {
-					const event = JSON.parse(buffer);
-					if (event.type === "message_end") {
-						storage.appendTUIMessage({
-							from: identity,
-							content: "(completed)",
-							timestamp: Date.now(),
-						}).catch(() => {});
-					}
-				} catch {}
-			}
 			resolve(code ?? 0);
 		});
 		proc.on("error", () => resolve(1));
@@ -151,50 +149,33 @@ const factory: CustomToolFactory = (pi) => {
 				for (const w of params.workers) {
 					const handle = spawnWorkerProcess(w, coordDir, pi.cwd, storage);
 					handles.push(handle);
-
-					await storage.addWorker(handle.workerId, {
-						id: handle.workerId,
-						identity: handle.identity,
-						agent: w.agent,
-						pid: handle.pid,
-						status: "working",
-						assignedSteps: w.steps,
-						completedSteps: [],
-						currentStep: w.steps[0] || null,
-						blockers: [],
-						handshakeSpec: w.handshakeSpec,
-					});
 				}
-
-				await storage.appendTUIMessage({
-					from: identity,
-					content: `Spawned ${handles.length} workers: ${handles.map((h) => h.identity).join(", ")}`,
-					timestamp: Date.now(),
-				});
 
 				const exitCodes = await Promise.all(handles.map((h) => h.promise));
 
 				for (let i = 0; i < handles.length; i++) {
-					const handle = handles[i];
 					const exitCode = exitCodes[i];
-					await storage.updateWorker(handle.workerId, (w) => {
-						if (!w) return undefined;
-						if (w.status !== "complete") {
-							return { ...w, status: exitCode === 0 ? "complete" : "failed" };
-						}
-						return w;
-					});
+					if (exitCode !== 0) {
+						await storage.updateWorkerState(handles[i].workerId, (s) => ({
+							...s,
+							status: "failed",
+							completedAt: Date.now(),
+							errorType: "crash",
+							errorMessage: `exit code ${exitCode}`,
+						})).catch(() => {});
+
+						await storage.appendEvent({
+							type: "worker_failed",
+							workerId: handles[i].workerId,
+							error: `exit code ${exitCode}`,
+							timestamp: Date.now(),
+						});
+					}
 				}
 
-				await storage.appendTUIMessage({
-					from: identity,
-					content: `All ${handles.length} workers finished`,
-					timestamp: Date.now(),
-				});
-
-				const state = await storage.getState();
+				const workerStates = await storage.listWorkerStates();
 				const workerResults = handles.map((h, i) => {
-					const w = state.workers[h.workerId];
+					const w = workerStates.find(ws => ws.id === h.workerId);
 					return `- ${h.identity}: ${w?.status || "unknown"} (exit ${exitCodes[i]})`;
 				});
 
@@ -211,15 +192,17 @@ const factory: CustomToolFactory = (pi) => {
 			parameters: Type.Object({}),
 			async execute() {
 				const state = await storage.getState();
+				const workerStates = await storage.listWorkerStates();
 				const messages = await storage.getMessages({ since: Date.now() - 60000 });
 				const reservations = await storage.getActiveReservations();
 
-				const workerSummaries = Object.values(state.workers).map((w: WorkerState) => ({
+				const workerSummaries = workerStates.map(w => ({
 					identity: w.identity,
 					status: w.status,
 					currentStep: w.currentStep,
 					completedSteps: w.completedSteps,
 					blockers: w.blockers,
+					waitingFor: w.waitingFor,
 				}));
 
 				return {
@@ -239,7 +222,7 @@ const factory: CustomToolFactory = (pi) => {
 							),
 						},
 					],
-					details: { workers: state.workers, contracts: state.contracts, reservations, messages },
+					details: { workerStates, contracts: state.contracts, reservations, messages },
 				};
 			},
 		},
@@ -260,15 +243,15 @@ const factory: CustomToolFactory = (pi) => {
 					timestamp: Date.now(),
 				});
 
-				await storage.appendTUIMessage({
-					from: identity,
-					content: `Broadcast: ${params.message}`,
+				await storage.appendEvent({
+					type: "coordinator",
+					message: `Broadcast: ${params.message}`,
 					timestamp: Date.now(),
 				});
 
-				const state = await storage.getState();
+				const workerStates = await storage.listWorkerStates();
 				return {
-					content: [{ type: "text", text: `Broadcast sent to ${Object.keys(state.workers).length} workers` }],
+					content: [{ type: "text", text: `Broadcast sent to ${workerStates.length} workers` }],
 				};
 			},
 		},
@@ -344,9 +327,9 @@ const factory: CustomToolFactory = (pi) => {
 					expectedSignature: params.signature,
 				}));
 
-				await storage.appendTUIMessage({
-					from: identity,
-					content: `Contract created: ${params.item} (provider: ${params.provider}, waiters: ${params.waiters.join(", ")})`,
+				await storage.appendEvent({
+					type: "coordinator",
+					message: `Contract created: ${params.item}`,
 					timestamp: Date.now(),
 				});
 
@@ -380,9 +363,9 @@ const factory: CustomToolFactory = (pi) => {
 			}),
 			async execute(_toolCallId, params) {
 				const state = await storage.getState();
-				const workers = Object.values(state.workers);
+				const workerStates = await storage.listWorkerStates();
 
-				if (workers.length === 0) {
+				if (workerStates.length === 0) {
 					return {
 						content: [{
 							type: "text",
@@ -392,9 +375,9 @@ const factory: CustomToolFactory = (pi) => {
 					};
 				}
 
-				const incompleteWorkers = workers.filter((w) => w.status !== "complete");
+				const incompleteWorkers = workerStates.filter((w) => w.status !== "complete");
 				if (incompleteWorkers.length > 0) {
-					const workerStatus = workers.map((w) => `- ${w.identity}: ${w.status}`).join("\n");
+					const workerStatus = workerStates.map((w) => `- ${w.identity}: ${w.status}`).join("\n");
 					return {
 						content: [{
 							type: "text",
@@ -422,19 +405,11 @@ const factory: CustomToolFactory = (pi) => {
 					deviations: [...existingDeviations, ...deviations],
 				});
 
-				await storage.appendTUIMessage({
-					from: identity,
-					content: `Coordination complete: ${params.summary}`,
+				await storage.appendEvent({
+					type: "coordinator",
+					message: `Coordination complete: ${params.summary}`,
 					timestamp: Date.now(),
 				});
-
-				for (const worker of workers) {
-					if (worker.pid) {
-						try {
-							process.kill(worker.pid, "SIGTERM");
-						} catch {}
-					}
-				}
 
 				return {
 					content: [{ type: "text", text: params.summary }],

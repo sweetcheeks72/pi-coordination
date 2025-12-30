@@ -39,11 +39,6 @@ const factory: CustomToolFactory = (_pi) => {
 				};
 
 				await storage.sendMessage(msg);
-				await storage.appendTUIMessage({
-					from: identity,
-					content: `-> ${params.to}: ${params.content.slice(0, 100)}${params.content.length > 100 ? "..." : ""}`,
-					timestamp: Date.now(),
-				});
 
 				return {
 					content: [{ type: "text", text: `Message sent to ${params.to}` }],
@@ -100,12 +95,6 @@ const factory: CustomToolFactory = (_pi) => {
 				});
 
 				if (result.success) {
-					await storage.appendTUIMessage({
-						from: identity,
-						content: `Reserved: ${params.patterns.join(", ")}`,
-						timestamp: Date.now(),
-					});
-
 					return {
 						content: [{ type: "text", text: `Reserved: ${params.patterns.join(", ")}` }],
 						details: result,
@@ -136,12 +125,6 @@ const factory: CustomToolFactory = (_pi) => {
 			}),
 			async execute(_toolCallId, params) {
 				await storage.releaseFiles(identity, params.patterns);
-
-				await storage.appendTUIMessage({
-					from: identity,
-					content: `Released: ${params.patterns.join(", ")}`,
-					timestamp: Date.now(),
-				});
 
 				return {
 					content: [{ type: "text", text: `Released: ${params.patterns.join(", ")}` }],
@@ -190,12 +173,6 @@ const factory: CustomToolFactory = (_pi) => {
 					});
 				}
 
-				await storage.appendTUIMessage({
-					from: identity,
-					content: `Contract complete: ${params.item}`,
-					timestamp: Date.now(),
-				});
-
 				return {
 					content: [{ type: "text", text: `Contract ${params.item} marked ready, notified ${waiters.length} waiter(s)` }],
 				};
@@ -204,21 +181,21 @@ const factory: CustomToolFactory = (_pi) => {
 
 		{
 			name: "complete_task",
-			description: "Signal that this worker has completed all assigned steps. IMPORTANT: After calling this, do NOT generate any more responses - the process will exit.",
+			description: "Signal that this worker has completed all assigned steps. IMPORTANT: After calling this, do NOT generate any more responses.",
 			parameters: Type.Object({
 				result: Type.String({ description: "Summary of what was accomplished" }),
 				filesModified: Type.Optional(Type.Array(Type.String(), { description: "List of modified files" })),
 			}),
 			async execute(_toolCallId, params) {
-				await storage.updateWorker(workerId, (w) => {
-					if (!w) return undefined;
-					return {
-						...w,
-						status: "complete",
-						completedSteps: w.assignedSteps,
-						currentStep: null,
-					};
-				});
+				await storage.updateWorkerState(workerId, (w) => ({
+					...w,
+					status: "complete",
+					completedAt: Date.now(),
+					completedSteps: w.assignedSteps,
+					currentStep: null,
+					currentTool: null,
+					currentFile: null,
+				}));
 
 				await storage.sendMessage({
 					id: randomUUID(),
@@ -231,16 +208,14 @@ const factory: CustomToolFactory = (_pi) => {
 
 				await storage.releaseFiles(identity, ["**"]);
 
-				await storage.appendTUIMessage({
-					from: identity,
-					content: `Task complete: ${params.result}`,
+				await storage.appendEvent({
+					type: "worker_completed",
+					workerId,
 					timestamp: Date.now(),
 				});
 
-				setTimeout(() => process.exit(0), 100);
-
 				return {
-					content: [{ type: "text", text: "Task completed. Exiting." }],
+					content: [{ type: "text", text: "Task completed." }],
 					details: { result: params.result, filesModified: params.filesModified },
 				};
 			},
@@ -297,6 +272,87 @@ const factory: CustomToolFactory = (_pi) => {
 		},
 
 		{
+			name: "wait_for_contract",
+			description: "Wait for a contract to be ready. Blocks until the contract is signaled complete.",
+			parameters: Type.Object({
+				item: Type.String({ description: "Contract item name to wait for" }),
+				timeout: Type.Optional(Type.Number({ description: "Timeout in seconds (default: 300)" })),
+			}),
+			async execute(_toolCallId, params) {
+				const timeout = params.timeout || 300;
+				const deadline = Date.now() + timeout * 1000;
+
+				const state = await storage.getState();
+				const contract = state.contracts[params.item];
+				if (!contract) {
+					return {
+						content: [{ type: "text", text: `Contract not found: ${params.item}` }],
+						isError: true,
+					};
+				}
+
+				await storage.updateWorkerState(workerId, (s) => ({
+					...s,
+					status: "waiting",
+					waitingFor: { identity: contract.provider, item: params.item },
+				}));
+
+				await storage.appendEvent({
+					type: "waiting",
+					workerId,
+					waitingFor: contract.provider,
+					item: params.item,
+					timestamp: Date.now(),
+				});
+
+				while (Date.now() < deadline) {
+					const currentState = await storage.getState();
+					const currentContract = currentState.contracts[params.item];
+					if (currentContract?.status === "ready") {
+						await storage.updateWorkerState(workerId, (s) => ({
+							...s,
+							status: "working",
+							waitingFor: null,
+						}));
+						await storage.appendEvent({
+							type: "contract_received",
+							workerId,
+							from: currentContract.provider,
+							item: params.item,
+							timestamp: Date.now(),
+						});
+						return {
+							content: [{ type: "text", text: `Contract ready: ${params.item}` }],
+							details: { contract: currentContract },
+						};
+					}
+					await sleep(1000);
+				}
+
+				await storage.updateWorkerState(workerId, (s) => ({
+					...s,
+					status: "blocked",
+					waitingFor: null,
+					currentTool: null,
+					currentFile: null,
+					blockers: [...s.blockers, `Timeout waiting for contract: ${params.item}`],
+				}));
+
+				await storage.appendEvent({
+					type: "worker_failed",
+					workerId,
+					error: `Timeout waiting for contract: ${params.item}`,
+					timestamp: Date.now(),
+				});
+
+				return {
+					content: [{ type: "text", text: `Timeout waiting for contract: ${params.item}` }],
+					isError: true,
+				};
+			},
+		},
+
+		{
 			name: "update_step",
 			description: "Update the current step being worked on",
 			parameters: Type.Object({
@@ -304,8 +360,7 @@ const factory: CustomToolFactory = (_pi) => {
 				status: Type.Optional(Type.String({ description: "Status update message" })),
 			}),
 			async execute(_toolCallId, params) {
-				await storage.updateWorker(workerId, (w) => {
-					if (!w) return undefined;
+				await storage.updateWorkerState(workerId, (w) => {
 					const completedSteps = [...w.completedSteps];
 					if (w.currentStep !== null && !completedSteps.includes(w.currentStep)) {
 						completedSteps.push(w.currentStep);
@@ -318,9 +373,9 @@ const factory: CustomToolFactory = (_pi) => {
 				});
 
 				if (params.status) {
-					await storage.appendTUIMessage({
-						from: identity,
-						content: `Step ${params.step}: ${params.status}`,
+					await storage.appendEvent({
+						type: "coordinator",
+						message: `Step ${params.step}: ${params.status}`,
 						timestamp: Date.now(),
 					});
 				}

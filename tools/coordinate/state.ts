@@ -4,10 +4,11 @@ import * as path from "node:path";
 import type {
 	CoordinationMessage,
 	CoordinationState,
+	CoordinationEvent,
+	WorkerStateFile,
 	EscalationRequest,
 	EscalationResponse,
 	FileReservation,
-	TUIMessage,
 } from "./types.js";
 
 export class FileBasedStorage {
@@ -50,12 +51,12 @@ export class FileBasedStorage {
 		await fs.mkdir(path.join(this.coordDir, "messages"), { recursive: true });
 		await fs.mkdir(path.join(this.coordDir, "reservations"), { recursive: true });
 		await fs.mkdir(path.join(this.coordDir, "escalation-responses"), { recursive: true });
-		const tuiPath = path.join(this.coordDir, "tui-messages.jsonl");
+		const eventsPath = path.join(this.coordDir, "events.jsonl");
 		const escPath = path.join(this.coordDir, "escalations.jsonl");
 		try {
-			await fs.access(tuiPath);
+			await fs.access(eventsPath);
 		} catch {
-			await fs.writeFile(tuiPath, "");
+			await fs.writeFile(eventsPath, "");
 		}
 		try {
 			await fs.access(escPath);
@@ -80,14 +81,6 @@ export class FileBasedStorage {
 		});
 	}
 
-	async addWorker(workerId: string, worker: import("./types.js").WorkerState): Promise<void> {
-		await this.withLock("state", async () => {
-			const current = await this.getState();
-			current.workers[workerId] = worker;
-			await fs.writeFile(path.join(this.coordDir, "state.json"), JSON.stringify(current, null, 2));
-		});
-	}
-
 	async updateContract(
 		itemName: string,
 		updater: (contract: import("./types.js").Contract | undefined) => import("./types.js").Contract | undefined,
@@ -105,31 +98,70 @@ export class FileBasedStorage {
 		});
 	}
 
-	async updateWorker(
+	async readWorkerState(workerId: string): Promise<WorkerStateFile> {
+		const filePath = path.join(this.coordDir, `worker-${workerId}.json`);
+		const content = await fs.readFile(filePath, "utf-8");
+		return JSON.parse(content);
+	}
+
+	async writeWorkerState(workerId: string, state: WorkerStateFile): Promise<void> {
+		const filePath = path.join(this.coordDir, `worker-${workerId}.json`);
+		const tempPath = `${filePath}.tmp`;
+		await fs.writeFile(tempPath, JSON.stringify(state, null, 2));
+		await fs.rename(tempPath, filePath);
+	}
+
+	async updateWorkerState(
 		workerId: string,
-		updater: (worker: import("./types.js").WorkerState | undefined) => import("./types.js").WorkerState | undefined,
-	): Promise<import("./types.js").WorkerState | undefined> {
-		return this.withLock("state", async () => {
-			const current = await this.getState();
-			const updated = updater(current.workers[workerId]);
-			if (updated) {
-				current.workers[workerId] = updated;
-			} else if (current.workers[workerId]) {
-				delete current.workers[workerId];
-			}
-			await fs.writeFile(path.join(this.coordDir, "state.json"), JSON.stringify(current, null, 2));
+		updater: (state: WorkerStateFile) => WorkerStateFile
+	): Promise<WorkerStateFile> {
+		return this.withLock(`worker-${workerId}`, async () => {
+			const current = await this.readWorkerState(workerId);
+			const updated = updater(current);
+			await this.writeWorkerState(workerId, updated);
 			return updated;
 		});
 	}
 
-	async appendTUIMessage(msg: TUIMessage): Promise<void> {
-		await fs.appendFile(path.join(this.coordDir, "tui-messages.jsonl"), JSON.stringify(msg) + "\n");
+	async listWorkerStates(): Promise<WorkerStateFile[]> {
+		let files: string[];
+		try {
+			files = await fs.readdir(this.coordDir);
+		} catch {
+			return [];
+		}
+
+		const workerFiles = files.filter(f => f.startsWith("worker-") && f.endsWith(".json"));
+		const states: WorkerStateFile[] = [];
+
+		for (const file of workerFiles) {
+			try {
+				const content = await fs.readFile(path.join(this.coordDir, file), "utf-8");
+				states.push(JSON.parse(content));
+			} catch {}
+		}
+
+		return states;
 	}
 
-	async getTUIMessages(): Promise<TUIMessage[]> {
+	async appendEvent(event: CoordinationEvent): Promise<void> {
+		await fs.appendFile(
+			path.join(this.coordDir, "events.jsonl"),
+			JSON.stringify(event) + "\n"
+		);
+	}
+
+	async getEvents(): Promise<CoordinationEvent[]> {
 		try {
-			const content = await fs.readFile(path.join(this.coordDir, "tui-messages.jsonl"), "utf-8");
-			return content.trim().split("\n").filter(Boolean).map(line => JSON.parse(line));
+			const content = await fs.readFile(
+				path.join(this.coordDir, "events.jsonl"),
+				"utf-8"
+			);
+			return content
+				.trim()
+				.split("\n")
+				.filter(Boolean)
+				.map(line => JSON.parse(line));
 		} catch {
 			return [];
 		}

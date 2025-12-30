@@ -26,13 +26,6 @@ export interface CoordinationMessage {
 	inReplyTo?: string;
 }
 
-export interface TUIMessage {
-	from: string;
-	content: string;
-	timestamp: number;
-	type?: "info" | "warning" | "error";
-}
-
 export interface EscalationRequest {
 	id: string;
 	from: string;
@@ -77,20 +70,48 @@ export interface Contract {
 	completedAt?: number;
 }
 
-export type WorkerStatus = "working" | "waiting" | "blocked" | "complete" | "failed";
+export type WorkerStatus = "pending" | "working" | "waiting" | "blocked" | "complete" | "failed";
 
-export interface WorkerState {
+export interface WorkerStateFile {
 	id: string;
+	shortId: string;
 	identity: string;
 	agent: string;
-	pid: number;
 	status: WorkerStatus;
+	currentFile: string | null;
+	currentTool: string | null;
+	waitingFor: {
+		identity: string;
+		item: string;
+	} | null;
 	assignedSteps: number[];
 	completedSteps: number[];
 	currentStep: number | null;
-	blockers: string[];
 	handshakeSpec: string;
+	startedAt: number;
+	completedAt: number | null;
+	usage: {
+		input: number;
+		output: number;
+		cost: number;
+		turns: number;
+	};
+	filesModified: string[];
+	blockers: string[];
+	errorType: string | null;
+	errorMessage: string | null;
 }
+
+export type CoordinationEvent =
+	| { type: "tool_call"; workerId: string; tool: string; file?: string; timestamp: number }
+	| { type: "tool_result"; workerId: string; tool: string; file?: string; success: boolean; timestamp: number }
+	| { type: "waiting"; workerId: string; waitingFor: string; item: string; timestamp: number }
+	| { type: "contract_received"; workerId: string; from: string; item: string; timestamp: number }
+	| { type: "worker_started"; workerId: string; timestamp: number }
+	| { type: "worker_completed"; workerId: string; timestamp: number }
+	| { type: "worker_failed"; workerId: string; error: string; timestamp: number }
+	| { type: "cost_milestone"; threshold: number; totals: Record<string, number>; aggregate: number; timestamp: number }
+	| { type: "coordinator"; message: string; timestamp: number };
 
 export type CoordinationStatus = "analyzing" | "executing" | "reviewing" | "complete" | "failed";
 
@@ -105,7 +126,6 @@ export interface CoordinationState {
 	planPath: string;
 	planHash: string;
 	status: CoordinationStatus;
-	workers: Record<string, WorkerState>;
 	contracts: Record<string, Contract>;
 	deviations: Deviation[];
 	startedAt: number;
