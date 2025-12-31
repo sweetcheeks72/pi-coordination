@@ -9,6 +9,7 @@ Multi-agent coordination system for [pi](https://github.com/badlogic/pi-mono). E
 - **Contracts**: Workers coordinate via contracts, not file polling
 - **Real-time TUI**: Animated spinners, status updates, timestamped message stream
 - **Clean Completion**: Summary of what each worker accomplished
+- **Coordination Logs**: Automatic markdown logs for post-mortem review
 
 ## Installation
 
@@ -38,6 +39,20 @@ coordinate({
   agents: ["worker", "worker", "worker", "worker"]
 })
 ```
+
+### With custom log path
+
+```typescript
+coordinate({
+  plan: "./plan.md",
+  agents: ["worker", "worker"],
+  logPath: "./logs"  // Save log to ./logs/coordination-log-TIMESTAMP.md
+})
+```
+
+To disable logging, set `logPath: ""`.
+
+You can also set `PI_COORDINATION_LOG_DIR` environment variable to change the default log directory.
 
 ### Example prompt
 
@@ -97,6 +112,24 @@ Create `src/handlers.ts` with HTTP handlers. Imports from store.
 Create `src/routes.ts` with route definitions. Imports from handlers.
 ```
 
+## Coordination Log
+
+After each coordination session, a markdown log is saved containing:
+
+- **Summary**: Session status, duration, total cost, worker success/failure counts
+- **Plan**: The original plan content
+- **Workers Summary**: Table with each worker's status, duration, cost, and files modified
+- **Contracts**: Table showing dependency contracts between workers
+- **Event Timeline**: Chronological list of all events (tool calls, contract handoffs, etc.)
+- **Worker Details**: Per-worker breakdown including handshake specs and blockers
+- **Metadata**: Token counts, coordination directory path, etc.
+
+The log is useful for:
+- Debugging coordination failures
+- Understanding worker interactions
+- Reviewing cost breakdown
+- Auditing file modifications
+
 ## Architecture
 
 ```
@@ -119,6 +152,7 @@ coordinate tool
 tools/
 ├── coordinate/           # Main coordination tool
 │   ├── index.ts          # Tool entry point with TUI rendering
+│   ├── log-generator.ts  # Coordination log generation
 │   ├── state.ts          # FileBasedStorage for shared state
 │   ├── types.ts          # Type definitions
 │   ├── coordinator-tools/ # Tools available to coordinator

@@ -13,6 +13,7 @@ import { getFinalOutput } from "../subagent/render.js";
 import { runSingleAgent } from "../subagent/runner.js";
 import type { SingleResult, SubagentDetails } from "../subagent/types.js";
 import { FileBasedStorage } from "./state.js";
+import { generateCoordinationLog } from "./log-generator.js";
 import type { CoordinationState, CoordinationEvent, WorkerStateFile, WorkerStatus, CoordinationStatus } from "./types.js";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
@@ -53,6 +54,7 @@ type OnUpdateCallback = (partial: AgentToolResult<CoordinationDetails>) => void;
 const CoordinateParams = Type.Object({
 	plan: Type.String({ description: "Path to markdown plan file" }),
 	agents: Type.Array(Type.String(), { description: "Agent types to use (e.g. ['worker', 'worker'])" }),
+	logPath: Type.Optional(Type.String({ description: "Path for coordination log output. Defaults to cwd. Set to empty string to disable." })),
 });
 
 const factory: CustomToolFactory = (pi) => {
@@ -60,7 +62,7 @@ const factory: CustomToolFactory = (pi) => {
 		name: "coordinate",
 		label: "Coordinate",
 		description:
-			"Start multi-agent coordination session. Splits a plan across parallel workers, manages dependencies, and returns unified results.",
+			"Start multi-agent coordination session. Splits a plan across parallel workers, manages dependencies, and returns unified results. Saves a markdown log to the project directory (configurable via logPath parameter or PI_COORDINATION_LOG_DIR env var).",
 		parameters: CoordinateParams,
 
 		async execute(_toolCallId, params, signal, onUpdate) {
@@ -321,14 +323,52 @@ spawn_workers({
 				const finalState = await storage.getState();
 				const workerStates = await storage.listWorkerStates();
 				const events = await storage.getEvents();
+				const completedAt = Date.now();
 				const details = makeCoordDetails(result, finalState, workerStates, events, params.agents);
 				const isError = result.exitCode !== 0 || result.stopReason === "error" || result.stopReason === "aborted";
 
 				const summary = getFinalOutput(result.messages) ||
 					(finalState.status === "complete" ? "Coordination completed" : `Coordination ended: ${finalState.status}`);
 
+				let logFilePath: string | undefined;
+				if (params.logPath !== "") {
+					try {
+						const logContent = generateCoordinationLog({
+							sessionId: coordSessionId,
+							coordDir,
+							planPath,
+							planContent,
+							state: finalState,
+							workerStates,
+							events,
+							coordinatorResult: result,
+							startedAt: initialState.startedAt,
+							completedAt,
+						});
+
+						const logDir = params.logPath
+							? path.resolve(pi.cwd, params.logPath)
+							: process.env.PI_COORDINATION_LOG_DIR
+								? path.resolve(process.env.PI_COORDINATION_LOG_DIR)
+								: pi.cwd;
+						
+						const timestamp = new Date().toISOString().replace(/[:.]/g, "-").slice(0, 19);
+						const logFileName = `coordination-log-${timestamp}.md`;
+						logFilePath = path.join(logDir, logFileName);
+
+						await fs.mkdir(logDir, { recursive: true });
+						await fs.writeFile(logFilePath, logContent, "utf-8");
+					} catch (logErr) {
+						console.error(`Failed to write coordination log: ${logErr}`);
+					}
+				}
+
+				const summaryWithLog = logFilePath
+					? `${summary}\n\nLog saved to: ${logFilePath}`
+					: summary;
+
 				return {
-					content: [{ type: "text", text: summary }],
+					content: [{ type: "text", text: summaryWithLog }],
 					details,
 					isError,
 				};
