@@ -122,8 +122,13 @@ tools/
 │   ├── state.ts          # FileBasedStorage for shared state
 │   ├── types.ts          # Type definitions
 │   ├── coordinator-tools/ # Tools available to coordinator
-│   └── worker-tools/      # Tools available to workers
-└── runner.ts             # Shared agent runner (from subagent)
+│   ├── worker-tools/      # Tools available to workers
+│   └── worker-hooks/      # Hooks for worker file reservation
+└── subagent/             # Shared agent utilities
+    ├── agents.ts         # Agent discovery and configuration
+    ├── render.ts         # Result rendering utilities
+    ├── runner.ts         # Agent process spawning
+    └── types.ts          # Shared type definitions
 
 agents/
 ├── coordinator.md        # Coordinator agent definition

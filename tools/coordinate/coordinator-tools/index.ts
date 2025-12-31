@@ -139,6 +139,7 @@ const factory: CustomToolFactory = (pi) => {
 	const tools: CustomAgentTool[] = [
 		{
 			name: "spawn_workers",
+			label: "Spawn Workers",
 			description: "Spawn workers in parallel, wait for all to complete, and return results. This blocks until all workers finish.",
 			parameters: Type.Object({
 				workers: Type.Array(WorkerSpec, { description: "Worker specifications" }),
@@ -188,6 +189,7 @@ const factory: CustomToolFactory = (pi) => {
 
 		{
 			name: "check_status",
+			label: "Check Status",
 			description: "Get current status of all workers, contracts, and reservations",
 			parameters: Type.Object({}),
 			async execute() {
@@ -229,6 +231,7 @@ const factory: CustomToolFactory = (pi) => {
 
 		{
 			name: "broadcast",
+			label: "Broadcast",
 			description: "Send a message to all workers",
 			parameters: Type.Object({
 				message: Type.String({ description: "Message content" }),
@@ -258,6 +261,7 @@ const factory: CustomToolFactory = (pi) => {
 
 		{
 			name: "escalate_to_user",
+			label: "Escalate to User",
 			description: "Ask the user a question with timed auto-decision",
 			parameters: Type.Object({
 				question: Type.String({ description: "Question to ask" }),
@@ -308,6 +312,7 @@ const factory: CustomToolFactory = (pi) => {
 
 		{
 			name: "create_contract",
+			label: "Create Contract",
 			description: "Define a contract/interface between workers",
 			parameters: Type.Object({
 				item: Type.String({ description: "Contract item name (e.g., 'AuthUser type')" }),
@@ -341,6 +346,7 @@ const factory: CustomToolFactory = (pi) => {
 
 		{
 			name: "update_progress",
+			label: "Update Progress",
 			description: "Update the PROGRESS.md file in the coordination directory",
 			parameters: Type.Object({
 				content: Type.String({ description: "Markdown content for PROGRESS.md" }),
@@ -355,6 +361,7 @@ const factory: CustomToolFactory = (pi) => {
 
 		{
 			name: "done",
+			label: "Done",
 			description: "Signal that coordination is complete. VALIDATION: Fails if no workers were spawned or if any workers are not complete.",
 			parameters: Type.Object({
 				summary: Type.String({ description: "Summary of what was accomplished" }),

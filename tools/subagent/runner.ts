@@ -3,7 +3,7 @@ import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
 import type { Message } from "@mariozechner/pi-ai";
-import type { ToolAPI } from "@mariozechner/pi-coding-agent";
+import type { CustomToolAPI } from "@mariozechner/pi-coding-agent";
 import type { AgentConfig } from "./agents.js";
 import { getFinalOutput } from "./render.js";
 import type { OnUpdateCallback, SingleResult, SubagentDetails } from "./types.js";
@@ -17,7 +17,7 @@ function writePromptToTempFile(agentName: string, prompt: string): { dir: string
 }
 
 export async function runSingleAgent(
-	pi: ToolAPI,
+	pi: CustomToolAPI,
 	agents: AgentConfig[],
 	agentName: string,
 	task: string,
@@ -185,7 +185,7 @@ export async function runSingleAgent(
 }
 
 export async function runParallelAgents(
-	pi: ToolAPI,
+	pi: CustomToolAPI,
 	agents: AgentConfig[],
 	tasks: Array<{ agent: string; task: string; cwd?: string }>,
 	signal: AbortSignal | undefined,

@@ -22,6 +22,7 @@ const factory: CustomToolFactory = (_pi) => {
 	const tools: CustomAgentTool[] = [
 		{
 			name: "send_message",
+			label: "Send Message",
 			description: "Send a message to another agent or the coordinator",
 			parameters: Type.Object({
 				to: Type.String({ description: "Recipient: worker identity, 'coordinator', or 'all'" }),
@@ -48,6 +49,7 @@ const factory: CustomToolFactory = (_pi) => {
 
 		{
 			name: "check_messages",
+			label: "Check Messages",
 			description: "Check inbox for new messages addressed to this worker",
 			parameters: Type.Object({
 				since: Type.Optional(Type.Number({ description: "Only get messages since this timestamp" })),
@@ -76,6 +78,7 @@ const factory: CustomToolFactory = (_pi) => {
 
 		{
 			name: "reserve_files",
+			label: "Reserve Files",
 			description: "Reserve files for exclusive editing to prevent conflicts",
 			parameters: Type.Object({
 				patterns: Type.Array(Type.String(), { description: "File patterns to reserve (e.g., ['src/auth/**', 'src/types.ts'])" }),
@@ -119,6 +122,7 @@ const factory: CustomToolFactory = (_pi) => {
 
 		{
 			name: "release_files",
+			label: "Release Files",
 			description: "Release file reservations when done editing",
 			parameters: Type.Object({
 				patterns: Type.Array(Type.String(), { description: "File patterns to release" }),
@@ -134,6 +138,7 @@ const factory: CustomToolFactory = (_pi) => {
 
 		{
 			name: "signal_contract_complete",
+			label: "Signal Contract Complete",
 			description: "Signal that a contracted export/interface is ready for other workers",
 			parameters: Type.Object({
 				item: Type.String({ description: "Contract item name" }),
@@ -181,6 +186,7 @@ const factory: CustomToolFactory = (_pi) => {
 
 		{
 			name: "complete_task",
+			label: "Complete Task",
 			description: "Signal that this worker has completed all assigned steps. IMPORTANT: After calling this, do NOT generate any more responses.",
 			parameters: Type.Object({
 				result: Type.String({ description: "Summary of what was accomplished" }),
@@ -223,6 +229,7 @@ const factory: CustomToolFactory = (_pi) => {
 
 		{
 			name: "escalate_to_user",
+			label: "Escalate to User",
 			description: "Ask the user a question when you need clarification",
 			parameters: Type.Object({
 				question: Type.String({ description: "Question to ask" }),
@@ -273,6 +280,7 @@ const factory: CustomToolFactory = (_pi) => {
 
 		{
 			name: "wait_for_contract",
+			label: "Wait for Contract",
 			description: "Wait for a contract to be ready. Blocks until the contract is signaled complete.",
 			parameters: Type.Object({
 				item: Type.String({ description: "Contract item name to wait for" }),
@@ -354,6 +362,7 @@ const factory: CustomToolFactory = (_pi) => {
 
 		{
 			name: "update_step",
+			label: "Update Step",
 			description: "Update the current step being worked on",
 			parameters: Type.Object({
 				step: Type.Number({ description: "Step number now being worked on" }),
