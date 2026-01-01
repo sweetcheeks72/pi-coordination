@@ -14,7 +14,20 @@ import { runSingleAgent } from "../subagent/runner.js";
 import type { SingleResult, SubagentDetails } from "../subagent/types.js";
 import { FileBasedStorage } from "./state.js";
 import { generateCoordinationLog } from "./log-generator.js";
+import { CheckpointManager } from "./checkpoint.js";
+import {
+	type PipelineConfig,
+	type PipelineContext,
+	initializePipelineState,
+	initializeCostState,
+	updatePhaseStatus,
+	saveProgressDoc,
+	runScoutPhaseWrapper,
+	runReviewFixLoop,
+} from "./pipeline.js";
 import type { CoordinationState, CoordinationEvent, WorkerStateFile, WorkerStatus, CoordinationStatus, PipelinePhase, PhaseResult, CostState } from "./types.js";
+import type { ReviewResult } from "./phases/review.js";
+import { ObservabilityContext } from "./observability/index.js";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
@@ -71,80 +84,16 @@ const CoordinateParams = Type.Object({
 		pause: Type.Number({ description: "Cost threshold to pause and confirm ($)", default: 5.0 }),
 		hard: Type.Number({ description: "Cost threshold to abort ($)", default: 10.0 }),
 	})),
+	pauseOnCostThreshold: Type.Optional(Type.Boolean({ description: "Block and ask user when pause threshold is hit (default: false)" })),
 });
 
-const factory: CustomToolFactory = (pi) => {
-	const tool: CustomAgentTool<typeof CoordinateParams, CoordinationDetails> = {
-		name: "coordinate",
-		label: "Coordinate",
-		description:
-			"Start multi-agent coordination session. Splits a plan across parallel workers, manages dependencies, and returns unified results. Saves a markdown log to the project directory (configurable via logPath parameter or PI_COORDINATION_LOG_DIR env var).",
-		parameters: CoordinateParams,
-
-		async execute(_toolCallId, params, signal, onUpdate) {
-			const coordSessionId = randomUUID();
-			const sessionDir = process.env.PI_SESSION_DIR || path.join(os.homedir(), ".pi", "sessions", "default");
-			const coordDir = path.join(sessionDir, "coordination", coordSessionId);
-
-			const storage = new FileBasedStorage(coordDir);
-			await storage.initialize();
-
-			const planPath = path.resolve(pi.cwd, params.plan);
-			const planDir = path.dirname(planPath);
-			let planContent: string;
-			try {
-				planContent = await fs.readFile(planPath, "utf-8");
-			} catch (err) {
-				return {
-					content: [{ type: "text", text: `Failed to read plan file: ${planPath}\n${err}` }],
-					isError: true,
-				};
-			}
-
-			const initialState: CoordinationState = {
-				sessionId: coordSessionId,
-				planPath,
-				planHash: hash(planContent),
-				status: "analyzing",
-				contracts: {},
-				deviations: [],
-				startedAt: Date.now(),
-			};
-			await storage.setState(initialState);
-
-			process.env.PI_ACTIVE_COORDINATION_DIR = coordDir;
-			process.env.PI_COORDINATION_DIR = coordDir;
-			process.env.PI_AGENT_IDENTITY = "coordinator";
-
-			const coordinatorToolsPath = path.join(__dirname, "coordinator-tools", "index.ts");
-
-			const discovery = discoverAgents(pi.cwd, "user");
-			const agents = discovery.agents;
-
-			const coordinatorAgent = agents.find(a => a.name === "coordinator");
-			if (!coordinatorAgent) {
-				delete process.env.PI_ACTIVE_COORDINATION_DIR;
-				delete process.env.PI_COORDINATION_DIR;
-				delete process.env.PI_AGENT_IDENTITY;
-				return {
-					content: [{ type: "text", text: "Coordinator agent not found. Create ~/.pi/agent/agents/coordinator.md" }],
-					isError: true,
-				};
-			}
-
-			const augmentedAgents: AgentConfig[] = agents.map(a => {
-				if (a.name === "coordinator") {
-					return {
-						...a,
-						tools: [...(a.tools || []), coordinatorToolsPath],
-					};
-				}
-				return a;
-			});
-
-			const scoutContext = ""; 
-
-			const task = `## Coordination Session
+function buildCoordinatorTask(
+	planContent: string,
+	scoutContext: string,
+	agents: string[],
+	coordDir: string,
+): string {
+	return `## Coordination Session
 
 You are managing a coordination session. Your job is to spawn worker agents and summarize results.
 ${scoutContext ? `
@@ -157,7 +106,7 @@ ${planContent}
 \`\`\`
 
 ### Available Agent Types
-${params.agents.join(", ")}
+${agents.join(", ")}
 
 ### Coordination Directory
 ${coordDir}
@@ -250,6 +199,161 @@ spawn_workers({
 - Describe the expected implementation details
 - For providers: include "call signal_contract_complete({ item: 'X' }) when done"
 - For waiters: include "call wait_for_contract({ item: 'X' }) before starting work"`;
+}
+
+const factory: CustomToolFactory = (pi) => {
+	const tool: CustomAgentTool<typeof CoordinateParams, CoordinationDetails> = {
+		name: "coordinate",
+		label: "Coordinate",
+		description:
+			"Start multi-agent coordination session. Splits a plan across parallel workers, manages dependencies, and returns unified results. Saves a markdown log to the project directory (configurable via logPath parameter or PI_COORDINATION_LOG_DIR env var).",
+		parameters: CoordinateParams,
+
+		async execute(_toolCallId, params, signal, onUpdate) {
+			const coordSessionId = randomUUID();
+			const sessionDir = process.env.PI_SESSION_DIR || path.join(os.homedir(), ".pi", "sessions", "default");
+			const coordDir = path.join(sessionDir, "coordination", coordSessionId);
+
+			const storage = new FileBasedStorage(coordDir);
+			await storage.initialize();
+
+			const planPath = path.resolve(pi.cwd, params.plan);
+			const planDir = path.dirname(planPath);
+			let planContent: string;
+			try {
+				planContent = await fs.readFile(planPath, "utf-8");
+			} catch (err) {
+				return {
+					content: [{ type: "text", text: `Failed to read plan file: ${planPath}\n${err}` }],
+					isError: true,
+				};
+			}
+
+			const initialState: CoordinationState = {
+				sessionId: coordSessionId,
+				planPath,
+				planHash: hash(planContent),
+				status: "analyzing",
+				contracts: {},
+				deviations: [],
+				startedAt: Date.now(),
+			};
+			await storage.setState(initialState);
+
+			process.env.PI_ACTIVE_COORDINATION_DIR = coordDir;
+			process.env.PI_COORDINATION_DIR = coordDir;
+			process.env.PI_AGENT_IDENTITY = "coordinator";
+
+			const coordinatorToolsPath = path.join(__dirname, "coordinator-tools", "index.ts");
+
+			const discovery = discoverAgents(pi.cwd, "user");
+			const agents = discovery.agents;
+
+			const coordinatorAgent = agents.find(a => a.name === "coordinator");
+			if (!coordinatorAgent) {
+				delete process.env.PI_ACTIVE_COORDINATION_DIR;
+				delete process.env.PI_COORDINATION_DIR;
+				delete process.env.PI_AGENT_IDENTITY;
+				return {
+					content: [{ type: "text", text: "Coordinator agent not found. Create ~/.pi/agent/agents/coordinator.md" }],
+					isError: true,
+				};
+			}
+
+			const augmentedAgents: AgentConfig[] = agents.map(a => {
+				if (a.name === "coordinator") {
+					return {
+						...a,
+						tools: [...(a.tools || []), coordinatorToolsPath],
+					};
+				}
+				return a;
+			});
+
+			const checkpointManager = new CheckpointManager(coordDir);
+			
+			let pipelineState = initializePipelineState(
+				coordSessionId,
+				planPath,
+				hash(planContent),
+				params.maxFixCycles ?? 3,
+			);
+			let costState = initializeCostState(params.costThresholds);
+			let reviewHistory: ReviewResult[] = [];
+			let resumeFromPhase: PipelinePhase | null = null;
+
+			if (params.resume) {
+				try {
+					const restored = await checkpointManager.restoreFromCheckpoint(params.resume, storage);
+					pipelineState = restored.pipelineState;
+					resumeFromPhase = restored.nextPhase;
+					if (restored.costState) {
+						costState = restored.costState;
+					}
+					if (restored.reviewHistory) {
+						reviewHistory = restored.reviewHistory.map(issues => ({
+							issues,
+							summary: "(restored from checkpoint)",
+							allPassing: issues.length === 0,
+							filesReviewed: [],
+							duration: 0,
+							cost: 0,
+						}));
+					}
+				} catch (err) {
+					return {
+						content: [{ type: "text", text: `Failed to restore from checkpoint: ${params.resume}\n${err}` }],
+						isError: true,
+					};
+				}
+			}
+
+			const pipelineConfig: PipelineConfig = {
+				planPath,
+				planContent,
+				planDir,
+				coordDir,
+				sessionId: coordSessionId,
+				agents: params.agents,
+				maxFixCycles: params.maxFixCycles ?? 3,
+				sameIssueLimit: params.sameIssueLimit ?? 2,
+				reviewModel: params.reviewModel,
+				checkTests: params.checkTests ?? true,
+				costThresholds: costState.thresholds,
+				pauseOnCostThreshold: params.pauseOnCostThreshold ?? false,
+			};
+
+			const obs = await ObservabilityContext.create(
+				coordDir,
+				pi.cwd,
+				"coordinator",
+				"system",
+			);
+
+			process.env.PI_TRACE_ID = obs.getTraceId();
+
+			await obs.events.emit({
+				type: "session_started",
+				config: {
+					planPath,
+					agents: params.agents,
+					maxFixCycles: params.maxFixCycles ?? 3,
+					sameIssueLimit: params.sameIssueLimit ?? 2,
+					costThresholds: costState.thresholds,
+				},
+			});
+
+			const pipelineContext: PipelineContext = {
+				pi,
+				storage,
+				checkpointManager,
+				pipelineState,
+				costState,
+				reviewHistory,
+				signal,
+				onUpdate,
+				obs,
+			};
 
 			const makeDetails = (results: SingleResult[]): SubagentDetails => ({
 				mode: "single",
@@ -346,27 +450,114 @@ spawn_workers({
 			}
 
 			try {
-				const result = await runSingleAgent(
-					pi,
-					augmentedAgents,
-					"coordinator",
-					task,
-					planDir,
-					undefined,
-					signal,
-					coordOnUpdate,
-					makeDetails,
-				);
+				let coordExitError = false;
+				let coordinatorResult: SingleResult = lastCoordResult;
+
+				const shouldRunPhase = (phase: PipelinePhase): boolean => {
+					if (!resumeFromPhase) return true;
+					const phaseOrder: PipelinePhase[] = ["scout", "coordinator", "workers", "review", "fixes", "complete"];
+					const resumeIdx = phaseOrder.indexOf(resumeFromPhase);
+					const phaseIdx = phaseOrder.indexOf(phase);
+					return phaseIdx >= resumeIdx;
+				};
+
+				if (shouldRunPhase("scout")) {
+					await runScoutPhaseWrapper(pipelineContext, pipelineConfig);
+				}
+
+				const scoutContext = pipelineState.scoutContext || "";
+
+				if (shouldRunPhase("coordinator")) {
+					const coordSpan = obs.spans.startSpan("phase:coordinator", "phase");
+					await obs.snapshots.capture("phase_start", "coordinator");
+
+					const task = buildCoordinatorTask(planContent, scoutContext, params.agents, coordDir);
+
+					updatePhaseStatus("coordinator", "running", pipelineContext);
+					coordinatorResult = await runSingleAgent(
+						pi,
+						augmentedAgents,
+						"coordinator",
+						task,
+						planDir,
+						undefined,
+						signal,
+						coordOnUpdate,
+						makeDetails,
+					);
+					lastCoordResult = coordinatorResult;
+
+					const workerStatesAfterCoord = await storage.listWorkerStates();
+					const workerCost = workerStatesAfterCoord.reduce((sum, w) => sum + w.usage.cost, 0);
+					costState.byPhase.coordinator = coordinatorResult.usage.cost;
+					costState.byPhase.workers = workerCost;
+					costState.total += coordinatorResult.usage.cost + workerCost;
+
+					await obs.events.emit({
+						type: "cost_updated",
+						delta: coordinatorResult.usage.cost + workerCost,
+						total: costState.total,
+						breakdown: { byPhase: costState.byPhase, byWorker: costState.byWorker },
+					});
+
+					const checkpointId = await checkpointManager.saveCheckpoint(
+						"coordinator",
+						pipelineState,
+						costState,
+						reviewHistory.map(r => r.issues),
+					);
+					await obs.events.emit({ type: "checkpoint_saved", checkpointId, phase: "coordinator" });
+
+					await saveProgressDoc(pipelineContext);
+					await obs.snapshots.capture("phase_end", "coordinator");
+					obs.spans.endSpan(coordSpan.id, "ok", {
+						workerCount: workerStatesAfterCoord.length,
+					}, {
+						cost: coordinatorResult.usage.cost + workerCost,
+					});
+					updatePhaseStatus("coordinator", "complete", pipelineContext);
+					updatePhaseStatus("workers", "complete", pipelineContext);
+
+					coordExitError = coordinatorResult.exitCode !== 0 || coordinatorResult.stopReason === "error" || coordinatorResult.stopReason === "aborted";
+				}
+
+				if (!coordExitError && shouldRunPhase("review")) {
+					await runReviewFixLoop(pipelineContext, pipelineConfig);
+				}
+
+				updatePhaseStatus("complete", "complete", pipelineContext);
+				pipelineState.completedAt = Date.now();
 
 				const finalState = await storage.getState();
 				const workerStates = await storage.listWorkerStates();
 				const events = await storage.getEvents();
 				const completedAt = Date.now();
-				const details = makeCoordDetails(result, finalState, workerStates, events, params.agents);
-				const isError = result.exitCode !== 0 || result.stopReason === "error" || result.stopReason === "aborted";
 
-				const summary = getFinalOutput(result.messages) ||
-					(finalState.status === "complete" ? "Coordination completed" : `Coordination ended: ${finalState.status}`);
+				const detailsWithPipeline: CoordinationDetails = {
+					...makeCoordDetails(coordinatorResult, finalState, workerStates, events, params.agents),
+					pipeline: {
+						currentPhase: pipelineState.currentPhase,
+						phases: pipelineState.phases,
+						fixCycle: pipelineState.fixCycle,
+					},
+					cost: costState,
+				};
+
+				const isError = coordExitError || pipelineState.exitReason === "cost_abort" || pipelineState.exitReason === "stuck";
+
+				let summary: string;
+				if (pipelineState.exitReason === "clean") {
+					summary = "Coordination completed successfully - all review checks passed";
+				} else if (pipelineState.exitReason === "stuck") {
+					summary = `Coordination completed with unresolved issues after ${pipelineState.fixCycle} fix cycles`;
+				} else if (pipelineState.exitReason === "max_cycles") {
+					summary = `Coordination completed - max fix cycles (${pipelineState.maxFixCycles}) reached`;
+				} else if (pipelineState.exitReason === "cost_abort") {
+					summary = `Coordination aborted - cost threshold exceeded ($${costState.total.toFixed(2)})`;
+				} else {
+					summary = getFinalOutput(coordinatorResult.messages) ||
+						(finalState.status === "complete" ? "Coordination completed" : `Coordination ended: ${finalState.status}`);
+				}
 
 				let logFilePath: string | undefined;
 				if (params.logPath !== "") {
@@ -379,9 +570,12 @@ spawn_workers({
 							state: finalState,
 							workerStates,
 							events,
-							coordinatorResult: result,
+							coordinatorResult,
 							startedAt: initialState.startedAt,
 							completedAt,
+							pipelineState,
+							reviewHistory,
+							costState,
 						});
 
 						const logDir = params.logPath
@@ -405,12 +599,53 @@ spawn_workers({
 					? `${summary}\n\nLog saved to: ${logFilePath}`
 					: summary;
 
+				await obs.events.emit({
+					type: "session_completed",
+					summary: {
+						status: isError ? "failed" : "complete",
+						duration: completedAt - initialState.startedAt,
+						totalCost: costState.total,
+						workersSpawned: workerStates.length,
+						workersCompleted: workerStates.filter(w => w.status === "complete").length,
+						workersFailed: workerStates.filter(w => w.status === "failed").length,
+						filesModified: [...new Set(workerStates.flatMap(w => w.filesModified))],
+						reviewCycles: pipelineState.fixCycle,
+						exitReason: pipelineState.exitReason,
+					},
+				});
+
 				return {
 					content: [{ type: "text", text: summaryWithLog }],
-					details,
+					details: detailsWithPipeline,
 					isError,
 				};
 			} catch (err) {
+				await obs.errors.capture(err, {
+					category: "system_error",
+					severity: "fatal",
+					actor: "coordinator",
+					phase: pipelineState.currentPhase,
+					spanId: "root",
+					recoverable: false,
+				});
+
+				const failedWorkerStates = await storage.listWorkerStates().catch(() => []);
+				await obs.events.emit({
+					type: "session_completed",
+					summary: {
+						status: "failed",
+						duration: Date.now() - initialState.startedAt,
+						totalCost: costState.total,
+						workersSpawned: failedWorkerStates.length,
+						workersCompleted: failedWorkerStates.filter(w => w.status === "complete").length,
+						workersFailed: failedWorkerStates.filter(w => w.status === "failed").length,
+						filesModified: [...new Set(failedWorkerStates.flatMap(w => w.filesModified))],
+						reviewCycles: pipelineState.fixCycle,
+						exitReason: "error",
+					},
+				});
+
+				updatePhaseStatus("failed", "failed", pipelineContext, String(err));
 				return {
 					content: [{ type: "text", text: `Coordination failed: ${err}` }],
 					isError: true,
@@ -422,6 +657,7 @@ spawn_workers({
 				delete process.env.PI_ACTIVE_COORDINATION_DIR;
 				delete process.env.PI_COORDINATION_DIR;
 				delete process.env.PI_AGENT_IDENTITY;
+				delete process.env.PI_TRACE_ID;
 			}
 		},
 

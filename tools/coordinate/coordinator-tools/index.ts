@@ -10,6 +10,7 @@ import { Type } from "@sinclair/typebox";
 import { discoverAgents } from "../../subagent/agents.js";
 import { FileBasedStorage } from "../state.js";
 import type { WorkerStateFile, IdentityMapping, PreAssignment } from "../types.js";
+import { createWorkerObservability, type ObservabilityContext } from "../observability/index.js";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
@@ -48,6 +49,7 @@ export function spawnWorkerProcess(
 	cwd: string,
 	storage: FileBasedStorage,
 	modelOverride?: string,
+	obs?: ObservabilityContext,
 ): WorkerHandle {
 	const { agents } = discoverAgents(cwd, "user");
 	const workerAgent = agents.find(a => a.name === "worker");
@@ -78,6 +80,19 @@ export function spawnWorkerProcess(
 
 	args.push(`Task: ${config.handshakeSpec}`);
 
+	obs?.events.emit({
+		type: "worker_spawning",
+		workerId,
+		config: {
+			agent: config.agent,
+			logicalName: config.logicalName,
+			steps: config.steps,
+			handshakeSpec: config.handshakeSpec.slice(0, 200),
+		},
+	}).catch(() => {});
+
+	const traceId = obs?.getTraceId() || process.env.PI_TRACE_ID;
+
 	const proc = spawn("pi", args, {
 		cwd,
 		env: {
@@ -85,6 +100,7 @@ export function spawnWorkerProcess(
 			PI_COORDINATION_DIR: coordDir,
 			PI_AGENT_IDENTITY: identity,
 			PI_WORKER_ID: workerId,
+			...(traceId ? { PI_TRACE_ID: traceId } : {}),
 		},
 		stdio: ["ignore", "pipe", "pipe"],
 	});
@@ -95,6 +111,17 @@ export function spawnWorkerProcess(
 		}
 		throw new Error(`Failed to start worker process for ${config.agent}`);
 	}
+
+	obs?.events.emit({
+		type: "worker_started",
+		workerId,
+		pid: proc.pid,
+	}).catch(() => {});
+
+	obs?.resources.trackCreation("process", workerId, identity, {
+		pid: proc.pid,
+		agent: config.agent,
+	}, 600000).catch(() => {});
 
 	const initialState: WorkerStateFile = {
 		id: workerId,
@@ -151,12 +178,14 @@ export function spawnWorkerProcess(
 			if (tmpPromptDir) {
 				try { fsSync.rmSync(tmpPromptDir, { recursive: true }); } catch {}
 			}
+			obs?.resources.trackRelease(workerId).catch(() => {});
 			resolve(code ?? 0);
 		});
 		proc.on("error", () => {
 			if (tmpPromptDir) {
 				try { fsSync.rmSync(tmpPromptDir, { recursive: true }); } catch {}
 			}
+			obs?.resources.trackRelease(workerId).catch(() => {});
 			resolve(1);
 		});
 	});
@@ -182,6 +211,7 @@ const factory: CustomToolFactory = (pi) => {
 	}
 
 	const storage = new FileBasedStorage(coordDir);
+	const obs = createWorkerObservability(coordDir, process.env.PI_TRACE_ID, identity, pi.cwd, "coordinator");
 
 	const tools: CustomAgentTool[] = [
 		{
@@ -223,7 +253,14 @@ const factory: CustomToolFactory = (pi) => {
 					workerPreps.push({ spec: w, workerId, shortId, identity: workerIdentity, preAssignment });
 
 					if (preAssignment) {
+						const preAssignIdentity = `pre:${w.logicalName}`;
 						await storage.transferReservation(preAssignment.reservationId, workerIdentity);
+						await obs?.events.emit({
+							type: "reservation_transferred",
+							reservationId: preAssignment.reservationId,
+							from: preAssignIdentity,
+							to: workerIdentity,
+						});
 					}
 				}
 
@@ -262,6 +299,7 @@ ${planContent ? `## Full Plan\n\`\`\`markdown\n${planContent}\n\`\`\`` : ""}
 						pi.cwd,
 						storage,
 						w.model,
+						obs || undefined,
 					);
 					handles.push(handle);
 				}
@@ -270,8 +308,11 @@ ${planContent ? `## Full Plan\n\`\`\`markdown\n${planContent}\n\`\`\`` : ""}
 
 				for (let i = 0; i < handles.length; i++) {
 					const exitCode = exitCodes[i];
+					const handle = handles[i];
+					const workerState = await storage.readWorkerState(handle.workerId).catch(() => null);
+
 					if (exitCode !== 0) {
-						await storage.updateWorkerState(handles[i].workerId, (s) => ({
+						await storage.updateWorkerState(handle.workerId, (s) => ({
 							...s,
 							status: "failed",
 							completedAt: Date.now(),
@@ -281,9 +322,53 @@ ${planContent ? `## Full Plan\n\`\`\`markdown\n${planContent}\n\`\`\`` : ""}
 
 						await storage.appendEvent({
 							type: "worker_failed",
-							workerId: handles[i].workerId,
+							workerId: handle.workerId,
 							error: `exit code ${exitCode}`,
 							timestamp: Date.now(),
+						});
+
+						const structuredError = {
+							id: `error-${handle.workerId}`,
+							traceId: obs?.getTraceId() || "",
+							spanId: "root",
+							timestamp: Date.now(),
+							category: "worker_crash" as const,
+							severity: "error" as const,
+							message: `Worker crashed with exit code ${exitCode}`,
+							actor: handle.identity,
+							phase: "workers" as const,
+							recoverable: false,
+							relatedWorkerId: handle.workerId,
+						};
+
+						await obs?.events.emit({
+							type: "worker_failed",
+							workerId: handle.workerId,
+							error: structuredError,
+						});
+
+						await obs?.errors.capture(
+							new Error(`Worker crashed with exit code ${exitCode}`),
+							{
+								category: "worker_crash",
+								severity: "error",
+								actor: handle.identity,
+								phase: "workers",
+								spanId: "root",
+								recoverable: false,
+								relatedWorkerId: handle.workerId,
+							},
+						);
+					} else {
+						await obs?.events.emit({
+							type: "worker_completed",
+							workerId: handle.workerId,
+							result: {
+								filesModified: workerState?.filesModified || [],
+								stepsCompleted: workerState?.completedSteps || [],
+								cost: workerState?.usage.cost || 0,
+								turns: workerState?.usage.turns || 0,
+							},
 						});
 					}
 				}
@@ -313,6 +398,13 @@ ${planContent ? `## Full Plan\n\`\`\`markdown\n${planContent}\n\`\`\`` : ""}
 				const reservationId = randomUUID();
 				const preAssignIdentity = `pre:${params.workerLogicalName}`;
 
+				await obs?.events.emit({
+					type: "reservation_requested",
+					reservationId,
+					patterns: params.files,
+					exclusive: true,
+				});
+
 				const result = await storage.reserveFiles({
 					id: reservationId,
 					agent: preAssignIdentity,
@@ -324,6 +416,15 @@ ${planContent ? `## Full Plan\n\`\`\`markdown\n${planContent}\n\`\`\`` : ""}
 				});
 
 				if (!result.success) {
+					await obs?.events.emit({
+						type: "reservation_denied",
+						reservationId,
+						conflict: {
+							agent: result.conflict?.agent || "unknown",
+							patterns: result.conflict?.patterns || [],
+						},
+					});
+
 					return {
 						content: [{
 							type: "text",
@@ -332,6 +433,11 @@ ${planContent ? `## Full Plan\n\`\`\`markdown\n${planContent}\n\`\`\`` : ""}
 						isError: true,
 					};
 				}
+
+				await obs?.events.emit({
+					type: "reservation_granted",
+					reservationId,
+				});
 
 				const state = await storage.getState();
 				await storage.setState({
@@ -376,6 +482,12 @@ ${planContent ? `## Full Plan\n\`\`\`markdown\n${planContent}\n\`\`\`` : ""}
 					type: "plan_deviation",
 					description: params.deviation,
 					timestamp: Date.now(),
+				});
+
+				await obs?.events.emit({
+					type: "deviation_broadcast",
+					deviation: params.deviation,
+					affectedWorkers: params.affectedWorkers,
 				});
 
 				return {
@@ -480,10 +592,25 @@ ${planContent ? `## Full Plan\n\`\`\`markdown\n${planContent}\n\`\`\`` : ""}
 					createdAt: Date.now(),
 				});
 
+				await obs?.events.emit({
+					type: "escalation_created",
+					escalationId: id,
+					question: params.question,
+					options: params.options,
+					timeout,
+				});
+
 				const deadline = Date.now() + timeout * 1000;
 				while (Date.now() < deadline) {
 					const response = await storage.getEscalationResponse(id);
 					if (response) {
+						await obs?.events.emit({
+							type: "escalation_responded",
+							escalationId: id,
+							choice: response.choice,
+							wasTimeout: false,
+						});
+
 						return {
 							content: [{ type: "text", text: `User chose: ${response.choice}${response.wasTimeout ? " (auto-selected)" : ""}` }],
 							details: response,
@@ -498,6 +625,13 @@ ${planContent ? `## Full Plan\n\`\`\`markdown\n${planContent}\n\`\`\`` : ""}
 					choice,
 					wasTimeout: true,
 					respondedAt: Date.now(),
+				});
+
+				await obs?.events.emit({
+					type: "escalation_responded",
+					escalationId: id,
+					choice,
+					wasTimeout: true,
 				});
 
 				return {
@@ -519,20 +653,29 @@ ${planContent ? `## Full Plan\n\`\`\`markdown\n${planContent}\n\`\`\`` : ""}
 				signature: Type.Optional(Type.String({ description: "Expected signature" })),
 			}),
 			async execute(_toolCallId, params) {
-				await storage.updateContract(params.item, () => ({
-					id: randomUUID(),
+				const contractId = randomUUID();
+				const contract = {
+					id: contractId,
 					item: params.item,
 					type: params.type as "type" | "function" | "file",
 					provider: params.provider,
-					status: "pending",
+					status: "pending" as const,
 					waiters: params.waiters,
 					expectedSignature: params.signature,
-				}));
+				};
+
+				await storage.updateContract(params.item, () => contract);
 
 				await storage.appendEvent({
 					type: "coordinator",
 					message: `Contract created: ${params.item}`,
 					timestamp: Date.now(),
+				});
+
+				await obs?.events.emit({
+					type: "contract_created",
+					contract,
+					creator: identity,
 				});
 
 				return {

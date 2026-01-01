@@ -241,6 +241,8 @@ export interface Checkpoint {
 	pipelineState: PipelineState;
 	coordinationState: CoordinationState;
 	workerStates: WorkerStateFile[];
+	costState?: CostState;
+	reviewHistory?: ReviewIssue[][];
 }
 
 export interface ModelConfig {

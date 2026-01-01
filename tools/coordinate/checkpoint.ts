@@ -1,6 +1,6 @@
 import * as fs from "node:fs/promises";
 import * as path from "node:path";
-import type { PipelinePhase, PipelineState, Checkpoint } from "./types.js";
+import type { PipelinePhase, PipelineState, Checkpoint, CostState, ReviewIssue } from "./types.js";
 import { FileBasedStorage } from "./state.js";
 
 export const PHASE_ORDER: PipelinePhase[] = ["scout", "coordinator", "workers", "review", "fixes", "complete"];
@@ -14,7 +14,12 @@ export function getNextPhase(currentPhase: PipelinePhase): PipelinePhase {
 export class CheckpointManager {
 	constructor(private coordDir: string) {}
 
-	async saveCheckpoint(phase: PipelinePhase, pipelineState: PipelineState): Promise<string> {
+	async saveCheckpoint(
+		phase: PipelinePhase,
+		pipelineState: PipelineState,
+		costState?: CostState,
+		reviewHistory?: ReviewIssue[][],
+	): Promise<string> {
 		const storage = new FileBasedStorage(this.coordDir);
 		const coordState = await storage.getState();
 		const workerStates = await storage.listWorkerStates();
@@ -26,6 +31,8 @@ export class CheckpointManager {
 			pipelineState,
 			coordinationState: coordState,
 			workerStates,
+			costState,
+			reviewHistory,
 		};
 
 		const checkpointId = `${phase}-${Date.now()}`;
@@ -66,7 +73,12 @@ export class CheckpointManager {
 	async restoreFromCheckpoint(
 		checkpointId: string,
 		storage: FileBasedStorage,
-	): Promise<{ pipelineState: PipelineState; nextPhase: PipelinePhase }> {
+	): Promise<{
+		pipelineState: PipelineState;
+		nextPhase: PipelinePhase;
+		costState?: CostState;
+		reviewHistory?: ReviewIssue[][];
+	}> {
 		const checkpoint = await this.loadCheckpoint(checkpointId);
 
 		await storage.setState(checkpoint.coordinationState);
@@ -80,6 +92,11 @@ export class CheckpointManager {
 			currentPhase: nextPhase,
 		};
 
-		return { pipelineState, nextPhase };
+		return {
+			pipelineState,
+			nextPhase,
+			costState: checkpoint.costState,
+			reviewHistory: checkpoint.reviewHistory,
+		};
 	}
 }

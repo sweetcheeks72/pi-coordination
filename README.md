@@ -12,6 +12,7 @@ Multi-agent coordination system for [pi](https://github.com/badlogic/pi-mono). E
 - **Checkpointing**: Save/restore at phase boundaries for resumable sessions
 - **Real-time TUI**: Phase timeline, worker status, and event stream
 - **Coordination Logs**: Comprehensive markdown logs with executive summary
+- **Full Observability**: Events, spans, causality tracking, snapshots, structured errors
 
 ## Installation
 
@@ -209,12 +210,44 @@ coordinate tool
         └── Repeat review/fix until clean or stuck
 ```
 
+## Observability
+
+The coordination system includes comprehensive observability for debugging, replay, and analysis:
+
+### Data Captured
+
+| Layer | File | Description |
+|-------|------|-------------|
+| Events | `events.jsonl` | Enhanced events with trace/span correlation |
+| Spans | `traces/spans.jsonl` | Hierarchical timing (phase, worker, tool) |
+| Causality | `causality.jsonl` | Cause-effect relationships between events |
+| Errors | `errors.jsonl` | Structured errors with category/severity |
+| Resources | `resources.jsonl` | Process/reservation lifecycle tracking |
+| Snapshots | `snapshots/*.json` | Git/file/coordination state at phase boundaries |
+| Decisions | `decisions.jsonl` | Decision audit trail with outcomes |
+
+### Event Types
+
+- **Session**: `session_started`, `session_completed`
+- **Phase**: `phase_started`, `phase_completed`
+- **Worker**: `worker_spawning`, `worker_started`, `worker_completed`, `worker_failed`
+- **Contract**: `contract_created`, `contract_signaled`, `contract_waiting`, `contract_received`
+- **Reservation**: `reservation_requested`, `reservation_granted`, `reservation_denied`, `reservation_transferred`, `reservation_released`
+- **Review**: `review_started`, `review_completed`, `fix_started`, `fix_completed`
+- **Cost**: `cost_updated`, `cost_threshold_crossed`
+- **Other**: `message_sent`, `deviation_reported`, `deviation_broadcast`, `escalation_created`, `escalation_responded`, `checkpoint_saved`
+
+### Trace Correlation
+
+All events and spans share a `traceId` for session-wide correlation. Workers receive the trace ID via `PI_TRACE_ID` environment variable, enabling cross-process tracing.
+
 ## Files
 
 ```
 tools/
 ├── coordinate/              # Main coordination tool
 │   ├── index.ts             # Tool entry point with TUI rendering
+│   ├── pipeline.ts          # Multi-phase pipeline orchestration
 │   ├── types.ts             # Type definitions
 │   ├── state.ts             # FileBasedStorage for shared state
 │   ├── log-generator.ts     # Coordination log generation
@@ -226,10 +259,20 @@ tools/
 │   │   └── index.ts
 │   ├── worker-hooks/        # Hooks for worker file reservation
 │   │   └── reservation.ts
-│   └── phases/              # Phase runners
-│       ├── scout.ts         # Scout phase (codebase analysis)
-│       ├── review.ts        # Review phase (code-reviewer)
-│       └── fix.ts           # Fix phase (spawn fix workers)
+│   ├── phases/              # Phase runners
+│   │   ├── scout.ts         # Scout phase (codebase analysis)
+│   │   ├── review.ts        # Review phase (code-reviewer)
+│   │   └── fix.ts           # Fix phase (spawn fix workers)
+│   └── observability/       # Observability system
+│       ├── index.ts         # ObservabilityContext (unified interface)
+│       ├── types.ts         # Event, span, error type definitions
+│       ├── events.ts        # EventEmitter with span stack
+│       ├── spans.ts         # SpanTracer for hierarchical timing
+│       ├── causality.ts     # CausalityTracker for cause-effect links
+│       ├── errors.ts        # ErrorTracker for structured errors
+│       ├── resources.ts     # ResourceTracker for lifecycle tracking
+│       ├── snapshots.ts     # SnapshotManager for state capture
+│       └── decisions.ts     # DecisionLogger for audit trails
 └── subagent/                # Shared agent utilities
     ├── agents.ts            # Agent discovery and configuration
     ├── render.ts            # Result rendering utilities
@@ -244,14 +287,6 @@ skills/
 └── coordination/
     └── SKILL.md             # Skill documentation
 ```
-
-## Current Limitations
-
-1. **Pipeline not fully integrated**: The new parameters (resume, maxFixCycles, etc.) are defined but the main execute() still only runs the coordinator phase. Scout/review/fix phases need manual integration.
-
-2. **Scout context unused**: Scout phase exists but isn't automatically invoked before coordination.
-
-3. **Checkpoints saved but not auto-resumed**: Checkpoints are created but resume logic needs to be wired into the main loop.
 
 ## License
 

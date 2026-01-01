@@ -3,6 +3,7 @@ import type { ReviewIssue, WorkerStateFile } from "../types.js";
 import type { CustomToolAPI } from "@mariozechner/pi-coding-agent";
 import { FileBasedStorage } from "../state.js";
 import { spawnWorkerProcess, type WorkerHandle } from "../coordinator-tools/index.js";
+import type { ObservabilityContext } from "../observability/index.js";
 
 function groupBy<T, K extends string>(items: T[], keyFn: (item: T) => K): Record<K, T[]> {
 	const result = {} as Record<K, T[]>;
@@ -35,6 +36,7 @@ export async function runFixPhase(
 	config: FixConfig,
 	cycleNumber: number,
 	_signal?: AbortSignal,
+	obs?: ObservabilityContext,
 ): Promise<FixResult> {
 	const startTime = Date.now();
 	const storage = new FileBasedStorage(coordDir);
@@ -92,6 +94,8 @@ export async function runFixPhase(
 			coordDir,
 			pi.cwd,
 			storage,
+			undefined,
+			obs,
 		);
 		handles.push(handle);
 	}

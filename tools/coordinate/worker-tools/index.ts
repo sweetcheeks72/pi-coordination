@@ -3,12 +3,13 @@ import * as fs from "node:fs/promises";
 import type { CustomAgentTool, CustomToolFactory } from "@mariozechner/pi-coding-agent";
 import { Type } from "@sinclair/typebox";
 import { FileBasedStorage } from "../state.js";
+import { createWorkerObservability } from "../observability/index.js";
 
 function sleep(ms: number): Promise<void> {
 	return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
-const factory: CustomToolFactory = (_pi) => {
+const factory: CustomToolFactory = (pi) => {
 	const coordDir = process.env.PI_COORDINATION_DIR;
 	const identity = process.env.PI_AGENT_IDENTITY;
 	const workerId = process.env.PI_WORKER_ID;
@@ -18,6 +19,7 @@ const factory: CustomToolFactory = (_pi) => {
 	}
 
 	const storage = new FileBasedStorage(coordDir);
+	const obs = createWorkerObservability(coordDir, process.env.PI_TRACE_ID, identity, pi.cwd);
 	let lastMessageCheck = Date.now();
 
 	const tools: CustomAgentTool[] = [
@@ -31,16 +33,26 @@ const factory: CustomToolFactory = (_pi) => {
 				type: Type.String({ description: "Message type: 'handover', 'clarification', 'response', 'status', or 'conflict'" }),
 			}),
 			async execute(_toolCallId, params) {
+				const msgId = randomUUID();
+				const msgType = params.type as "handover" | "clarification" | "response" | "status" | "conflict";
 				const msg = {
-					id: randomUUID(),
+					id: msgId,
 					from: identity,
 					to: params.to,
-					type: params.type as "handover" | "clarification" | "response" | "status" | "conflict",
+					type: msgType,
 					content: params.content,
 					timestamp: Date.now(),
 				};
 
 				await storage.sendMessage(msg);
+
+				await obs?.events.emit({
+					type: "message_sent",
+					messageId: msgId,
+					from: identity,
+					to: params.to,
+					messageType: msgType,
+				});
 
 				return {
 					content: [{ type: "text", text: `Message sent to ${params.to}` }],
@@ -88,8 +100,17 @@ const factory: CustomToolFactory = (_pi) => {
 				reason: Type.String({ description: "Why you need these files" }),
 			}),
 			async execute(_toolCallId, params) {
+				const reservationId = randomUUID();
+
+				await obs?.events.emit({
+					type: "reservation_requested",
+					reservationId,
+					patterns: params.patterns,
+					exclusive: params.exclusive,
+				});
+
 				const result = await storage.reserveFiles({
-					id: randomUUID(),
+					id: reservationId,
 					agent: identity,
 					patterns: params.patterns,
 					exclusive: params.exclusive,
@@ -99,11 +120,25 @@ const factory: CustomToolFactory = (_pi) => {
 				});
 
 				if (result.success) {
+					await obs?.events.emit({
+						type: "reservation_granted",
+						reservationId,
+					});
+
 					return {
 						content: [{ type: "text", text: `Reserved: ${params.patterns.join(", ")}` }],
 						details: result,
 					};
 				}
+
+				await obs?.events.emit({
+					type: "reservation_denied",
+					reservationId,
+					conflict: {
+						agent: result.conflict?.agent || "unknown",
+						patterns: result.conflict?.patterns || [],
+					},
+				});
 
 				return {
 					content: [
@@ -129,7 +164,17 @@ const factory: CustomToolFactory = (_pi) => {
 				patterns: Type.Array(Type.String(), { description: "File patterns to release" }),
 			}),
 			async execute(_toolCallId, params) {
+				const reservations = await storage.getActiveReservations();
+				const myReservations = reservations.filter(r => r.agent === identity);
+
 				await storage.releaseFiles(identity, params.patterns);
+
+				for (const res of myReservations) {
+					await obs?.events.emit({
+						type: "reservation_released",
+						reservationId: res.id,
+					});
+				}
 
 				return {
 					content: [{ type: "text", text: `Released: ${params.patterns.join(", ")}` }],
@@ -148,10 +193,12 @@ const factory: CustomToolFactory = (_pi) => {
 			}),
 			async execute(_toolCallId, params) {
 				let waiters: string[] = [];
+				let contractId: string | undefined;
 
 				const contract = await storage.updateContract(params.item, (c) => {
 					if (!c) return undefined;
 					waiters = c.waiters;
+					contractId = c.id;
 					return {
 						...c,
 						status: "ready",
@@ -167,6 +214,13 @@ const factory: CustomToolFactory = (_pi) => {
 						isError: true,
 					};
 				}
+
+				await obs?.events.emit({
+					type: "contract_signaled",
+					contractId: contractId || params.item,
+					provider: identity,
+					signature: params.signature,
+				});
 
 				for (const waiter of waiters) {
 					await storage.sendMessage({
@@ -213,7 +267,17 @@ const factory: CustomToolFactory = (_pi) => {
 					timestamp: Date.now(),
 				});
 
+				const reservations = await storage.getActiveReservations();
+				const myReservations = reservations.filter(r => r.agent === identity);
+
 				await storage.releaseFiles(identity, ["**"]);
+
+				for (const res of myReservations) {
+					await obs?.events.emit({
+						type: "reservation_released",
+						reservationId: res.id,
+					});
+				}
 
 				await storage.appendEvent({
 					type: "worker_completed",
@@ -252,10 +316,25 @@ const factory: CustomToolFactory = (_pi) => {
 					createdAt: Date.now(),
 				});
 
+				await obs?.events.emit({
+					type: "escalation_created",
+					escalationId: id,
+					question: params.question,
+					options: params.options,
+					timeout,
+				});
+
 				const deadline = Date.now() + timeout * 1000;
 				while (Date.now() < deadline) {
 					const response = await storage.getEscalationResponse(id);
 					if (response) {
+						await obs?.events.emit({
+							type: "escalation_responded",
+							escalationId: id,
+							choice: response.choice,
+							wasTimeout: false,
+						});
+
 						return {
 							content: [{ type: "text", text: `User chose: ${response.choice}${response.wasTimeout ? " (auto-selected)" : ""}` }],
 							details: response,
@@ -270,6 +349,13 @@ const factory: CustomToolFactory = (_pi) => {
 					choice,
 					wasTimeout: true,
 					respondedAt: Date.now(),
+				});
+
+				await obs?.events.emit({
+					type: "escalation_responded",
+					escalationId: id,
+					choice,
+					wasTimeout: true,
 				});
 
 				return {
@@ -290,6 +376,7 @@ const factory: CustomToolFactory = (_pi) => {
 			async execute(_toolCallId, params) {
 				const timeout = params.timeout || 300;
 				const deadline = Date.now() + timeout * 1000;
+				const waitStartTime = Date.now();
 
 				const state = await storage.getState();
 				const contract = state.contracts[params.item];
@@ -299,6 +386,12 @@ const factory: CustomToolFactory = (_pi) => {
 						isError: true,
 					};
 				}
+
+				await obs?.events.emit({
+					type: "contract_waiting",
+					contractId: contract.id,
+					waiter: identity,
+				});
 
 				await storage.updateWorkerState(workerId, (s) => ({
 					...s,
@@ -330,6 +423,15 @@ const factory: CustomToolFactory = (_pi) => {
 							item: params.item,
 							timestamp: Date.now(),
 						});
+
+						const waitDuration = Date.now() - waitStartTime;
+						await obs?.events.emit({
+							type: "contract_received",
+							contractId: currentContract.id,
+							waiter: identity,
+							waitDuration,
+						});
+
 						return {
 							content: [{ type: "text", text: `Contract ready: ${params.item}` }],
 							details: { contract: currentContract },
@@ -353,6 +455,20 @@ const factory: CustomToolFactory = (_pi) => {
 					error: `Timeout waiting for contract: ${params.item}`,
 					timestamp: Date.now(),
 				});
+
+				await obs?.errors.capture(
+					new Error(`Timeout waiting for contract: ${params.item}`),
+					{
+						category: "contract_timeout",
+						severity: "error",
+						actor: identity,
+						phase: "workers",
+						spanId: "root",
+						recoverable: false,
+						relatedWorkerId: workerId,
+						relatedContractId: contract.id,
+					},
+				);
 
 				return {
 					content: [{ type: "text", text: `Timeout waiting for contract: ${params.item}` }],
@@ -406,14 +522,23 @@ const factory: CustomToolFactory = (_pi) => {
 				affectsOthers: Type.Boolean({ description: "Could this affect other workers?" }),
 			}),
 			async execute(_toolCallId, params) {
+				const deviationObj = {
+					description: params.deviation,
+					reason: params.reason,
+					timestamp: Date.now(),
+				};
+
 				await storage.updateWorkerState(workerId, (s) => ({
 					...s,
-					deviations: [...(s.deviations || []), {
-						description: params.deviation,
-						reason: params.reason,
-						timestamp: Date.now(),
-					}],
+					deviations: [...(s.deviations || []), deviationObj],
 				}));
+
+				await obs?.events.emit({
+					type: "deviation_reported",
+					workerId,
+					deviation: deviationObj,
+					affectsOthers: params.affectsOthers,
+				});
 
 				if (params.affectsOthers) {
 					await storage.sendMessage({

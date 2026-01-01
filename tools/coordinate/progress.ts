@@ -18,6 +18,7 @@ export function generateProgressDoc(
 	workerStates: WorkerStateFile[],
 	events: CoordinationEvent[],
 	reviewHistory?: ReviewResult[],
+	config: ProgressConfig = { includeDetailedHistory: true, maxHistoryEntries: 50 },
 ): string {
 	const lines: string[] = [];
 
@@ -48,38 +49,42 @@ export function generateProgressDoc(
 	}
 	lines.push(``);
 
-	lines.push(`---`);
-	lines.push(``);
-	lines.push(`## Full History`);
-	lines.push(``);
-
-	for (const [phase, result] of Object.entries(pipelineState.phases)) {
-		if (result.status === "pending") continue;
-		lines.push(`### Phase: ${phase}`);
-		lines.push(`- Status: ${result.status}`);
-		if (result.startedAt) lines.push(`- Started: ${new Date(result.startedAt).toISOString()}`);
-		if (result.completedAt) lines.push(`- Completed: ${new Date(result.completedAt).toISOString()}`);
-		if (result.error) lines.push(`- Error: ${result.error}`);
+	if (config.includeDetailedHistory) {
+		lines.push(`---`);
 		lines.push(``);
-	}
+		lines.push(`## Full History`);
+		lines.push(``);
 
-	if (reviewHistory && reviewHistory.length > 0) {
-		lines.push(`## Review History`);
-		for (let i = 0; i < reviewHistory.length; i++) {
-			const review = reviewHistory[i];
-			lines.push(`### Review Cycle ${i + 1}`);
-			lines.push(`- **All Passing:** ${review.allPassing}`);
-			lines.push(`- **Summary:** ${review.summary}`);
-			lines.push(`- **Issues Found:** ${review.issues.length}`);
-			lines.push(`- **Duration:** ${(review.duration / 1000).toFixed(1)}s`);
-			lines.push(`- **Cost:** $${review.cost.toFixed(4)}`);
+		for (const [phase, result] of Object.entries(pipelineState.phases)) {
+			if (result.status === "pending") continue;
+			lines.push(`### Phase: ${phase}`);
+			lines.push(`- Status: ${result.status}`);
+			if (result.startedAt) lines.push(`- Started: ${new Date(result.startedAt).toISOString()}`);
+			if (result.completedAt) lines.push(`- Completed: ${new Date(result.completedAt).toISOString()}`);
+			if (result.error) lines.push(`- Error: ${result.error}`);
 			lines.push(``);
+		}
+
+		if (reviewHistory && reviewHistory.length > 0) {
+			lines.push(`## Review History`);
+			const historyToShow = reviewHistory.slice(-config.maxHistoryEntries);
+			for (let i = 0; i < historyToShow.length; i++) {
+				const review = historyToShow[i];
+				const cycleNum = reviewHistory.length - historyToShow.length + i + 1;
+				lines.push(`### Review Cycle ${cycleNum}`);
+				lines.push(`- **All Passing:** ${review.allPassing}`);
+				lines.push(`- **Summary:** ${review.summary}`);
+				lines.push(`- **Issues Found:** ${review.issues.length}`);
+				lines.push(`- **Duration:** ${(review.duration / 1000).toFixed(1)}s`);
+				lines.push(`- **Cost:** $${review.cost.toFixed(4)}`);
+				lines.push(``);
+			}
 		}
 	}
 
 	if (events.length > 0) {
 		lines.push(`## Recent Events`);
-		const recentEvents = events.slice(-20);
+		const recentEvents = events.slice(-config.maxHistoryEntries);
 		for (const ev of recentEvents) {
 			const time = new Date(ev.timestamp).toISOString().slice(11, 19);
 			let desc = "";

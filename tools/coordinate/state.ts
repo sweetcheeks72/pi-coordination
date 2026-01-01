@@ -16,15 +16,19 @@ import type {
 } from "./types.js";
 
 export class FileBasedStorage {
-	constructor(private coordDir: string) {}
+	constructor(private _coordDir: string) {}
+
+	get coordDir(): string {
+		return this._coordDir;
+	}
 
 	private async withLock<T>(lockName: string, fn: () => Promise<T>): Promise<T> {
-		const lockPath = path.join(this.coordDir, `${lockName}.lock`);
+		const lockPath = path.join(this._coordDir, `${lockName}.lock`);
 		const maxRetries = 50;
 		const retryDelay = 100;
 
 		try {
-			fsSync.mkdirSync(this.coordDir, { recursive: true });
+			fsSync.mkdirSync(this._coordDir, { recursive: true });
 		} catch {}
 
 		for (let i = 0; i < maxRetries; i++) {
@@ -52,11 +56,11 @@ export class FileBasedStorage {
 	}
 
 	async initialize(): Promise<void> {
-		await fs.mkdir(path.join(this.coordDir, "messages"), { recursive: true });
-		await fs.mkdir(path.join(this.coordDir, "reservations"), { recursive: true });
-		await fs.mkdir(path.join(this.coordDir, "escalation-responses"), { recursive: true });
-		const eventsPath = path.join(this.coordDir, "events.jsonl");
-		const escPath = path.join(this.coordDir, "escalations.jsonl");
+		await fs.mkdir(path.join(this._coordDir, "messages"), { recursive: true });
+		await fs.mkdir(path.join(this._coordDir, "reservations"), { recursive: true });
+		await fs.mkdir(path.join(this._coordDir, "escalation-responses"), { recursive: true });
+		const eventsPath = path.join(this._coordDir, "events.jsonl");
+		const escPath = path.join(this._coordDir, "escalations.jsonl");
 		try {
 			await fs.access(eventsPath);
 		} catch {
@@ -70,18 +74,18 @@ export class FileBasedStorage {
 	}
 
 	async getState(): Promise<CoordinationState> {
-		const content = await fs.readFile(path.join(this.coordDir, "state.json"), "utf-8");
+		const content = await fs.readFile(path.join(this._coordDir, "state.json"), "utf-8");
 		return JSON.parse(content);
 	}
 
 	async setState(state: CoordinationState): Promise<void> {
-		await fs.writeFile(path.join(this.coordDir, "state.json"), JSON.stringify(state, null, 2));
+		await fs.writeFile(path.join(this._coordDir, "state.json"), JSON.stringify(state, null, 2));
 	}
 
 	async updateState(updates: Partial<CoordinationState>): Promise<void> {
 		await this.withLock("state", async () => {
 			const current = await this.getState();
-			await fs.writeFile(path.join(this.coordDir, "state.json"), JSON.stringify({ ...current, ...updates }, null, 2));
+			await fs.writeFile(path.join(this._coordDir, "state.json"), JSON.stringify({ ...current, ...updates }, null, 2));
 		});
 	}
 
@@ -97,19 +101,19 @@ export class FileBasedStorage {
 			} else if (current.contracts[itemName]) {
 				delete current.contracts[itemName];
 			}
-			await fs.writeFile(path.join(this.coordDir, "state.json"), JSON.stringify(current, null, 2));
+			await fs.writeFile(path.join(this._coordDir, "state.json"), JSON.stringify(current, null, 2));
 			return updated;
 		});
 	}
 
 	async readWorkerState(workerId: string): Promise<WorkerStateFile> {
-		const filePath = path.join(this.coordDir, `worker-${workerId}.json`);
+		const filePath = path.join(this._coordDir, `worker-${workerId}.json`);
 		const content = await fs.readFile(filePath, "utf-8");
 		return JSON.parse(content);
 	}
 
 	async writeWorkerState(workerId: string, state: WorkerStateFile): Promise<void> {
-		const filePath = path.join(this.coordDir, `worker-${workerId}.json`);
+		const filePath = path.join(this._coordDir, `worker-${workerId}.json`);
 		const tempPath = `${filePath}.tmp`;
 		await fs.writeFile(tempPath, JSON.stringify(state, null, 2));
 		await fs.rename(tempPath, filePath);
@@ -130,7 +134,7 @@ export class FileBasedStorage {
 	async listWorkerStates(): Promise<WorkerStateFile[]> {
 		let files: string[];
 		try {
-			files = await fs.readdir(this.coordDir);
+			files = await fs.readdir(this._coordDir);
 		} catch {
 			return [];
 		}
@@ -140,7 +144,7 @@ export class FileBasedStorage {
 
 		for (const file of workerFiles) {
 			try {
-				const content = await fs.readFile(path.join(this.coordDir, file), "utf-8");
+				const content = await fs.readFile(path.join(this._coordDir, file), "utf-8");
 				states.push(JSON.parse(content));
 			} catch {}
 		}
@@ -150,7 +154,7 @@ export class FileBasedStorage {
 
 	async appendEvent(event: CoordinationEvent): Promise<void> {
 		await fs.appendFile(
-			path.join(this.coordDir, "events.jsonl"),
+			path.join(this._coordDir, "events.jsonl"),
 			JSON.stringify(event) + "\n"
 		);
 	}
@@ -158,7 +162,7 @@ export class FileBasedStorage {
 	async getEvents(): Promise<CoordinationEvent[]> {
 		try {
 			const content = await fs.readFile(
-				path.join(this.coordDir, "events.jsonl"),
+				path.join(this._coordDir, "events.jsonl"),
 				"utf-8"
 			);
 			return content
@@ -172,12 +176,12 @@ export class FileBasedStorage {
 	}
 
 	async appendEscalation(req: EscalationRequest): Promise<void> {
-		await fs.appendFile(path.join(this.coordDir, "escalations.jsonl"), JSON.stringify(req) + "\n");
+		await fs.appendFile(path.join(this._coordDir, "escalations.jsonl"), JSON.stringify(req) + "\n");
 	}
 
 	async getEscalationResponse(id: string): Promise<EscalationResponse | null> {
 		try {
-			const content = await fs.readFile(path.join(this.coordDir, "escalation-responses", `${id}.json`), "utf-8");
+			const content = await fs.readFile(path.join(this._coordDir, "escalation-responses", `${id}.json`), "utf-8");
 			return JSON.parse(content);
 		} catch {
 			return null;
@@ -186,18 +190,18 @@ export class FileBasedStorage {
 
 	async writeEscalationResponse(response: EscalationResponse): Promise<void> {
 		await fs.writeFile(
-			path.join(this.coordDir, "escalation-responses", `${response.id}.json`),
+			path.join(this._coordDir, "escalation-responses", `${response.id}.json`),
 			JSON.stringify(response),
 		);
 	}
 
 	async sendMessage(msg: CoordinationMessage): Promise<void> {
 		const filename = `${msg.timestamp}-${msg.id}.json`;
-		await fs.writeFile(path.join(this.coordDir, "messages", filename), JSON.stringify(msg));
+		await fs.writeFile(path.join(this._coordDir, "messages", filename), JSON.stringify(msg));
 	}
 
 	async getMessages(filter?: { to?: string; since?: number }): Promise<CoordinationMessage[]> {
-		const dir = path.join(this.coordDir, "messages");
+		const dir = path.join(this._coordDir, "messages");
 		let files: string[];
 		try {
 			files = await fs.readdir(dir);
@@ -234,7 +238,7 @@ export class FileBasedStorage {
 			}
 
 			await fs.writeFile(
-				path.join(this.coordDir, "reservations", `${reservation.id}.json`),
+				path.join(this._coordDir, "reservations", `${reservation.id}.json`),
 				JSON.stringify(reservation),
 			);
 
@@ -253,7 +257,7 @@ export class FileBasedStorage {
 	}
 
 	async getActiveReservations(): Promise<FileReservation[]> {
-		const dir = path.join(this.coordDir, "reservations");
+		const dir = path.join(this._coordDir, "reservations");
 		let files: string[];
 		try {
 			files = await fs.readdir(dir);
@@ -278,7 +282,7 @@ export class FileBasedStorage {
 
 	async releaseFiles(agentIdentity: string, _patterns: string[]): Promise<void> {
 		await this.withLock("reservations", async () => {
-			const dir = path.join(this.coordDir, "reservations");
+			const dir = path.join(this._coordDir, "reservations");
 			let files: string[];
 			try {
 				files = await fs.readdir(dir);
@@ -300,12 +304,12 @@ export class FileBasedStorage {
 	}
 
 	async updateProgress(content: string): Promise<void> {
-		await fs.writeFile(path.join(this.coordDir, "PROGRESS.md"), content);
+		await fs.writeFile(path.join(this._coordDir, "PROGRESS.md"), content);
 	}
 
 	async getProgress(): Promise<string | null> {
 		try {
-			return await fs.readFile(path.join(this.coordDir, "PROGRESS.md"), "utf-8");
+			return await fs.readFile(path.join(this._coordDir, "PROGRESS.md"), "utf-8");
 		} catch {
 			return null;
 		}
@@ -313,7 +317,7 @@ export class FileBasedStorage {
 
 	async transferReservation(reservationId: string, newAgent: string): Promise<void> {
 		return this.withLock("reservations", async () => {
-			const filePath = path.join(this.coordDir, "reservations", `${reservationId}.json`);
+			const filePath = path.join(this._coordDir, "reservations", `${reservationId}.json`);
 			try {
 				const content = await fs.readFile(filePath, "utf-8");
 				const reservation: FileReservation = JSON.parse(content);
@@ -333,7 +337,7 @@ export class FileBasedStorage {
 
 	async updatePhaseCost(phase: PipelinePhase, amount: number): Promise<void> {
 		await this.withLock("cost", async () => {
-			const costPath = path.join(this.coordDir, "cost.json");
+			const costPath = path.join(this._coordDir, "cost.json");
 			let costState: CostState;
 			try {
 				costState = JSON.parse(await fs.readFile(costPath, "utf-8"));
@@ -356,7 +360,7 @@ export class FileBasedStorage {
 	}
 
 	async getCostState(): Promise<CostState> {
-		const costPath = path.join(this.coordDir, "cost.json");
+		const costPath = path.join(this._coordDir, "cost.json");
 		try {
 			return JSON.parse(await fs.readFile(costPath, "utf-8"));
 		} catch {
@@ -381,7 +385,7 @@ export class FileBasedStorage {
 
 	async trackIssue(issue: ReviewIssue): Promise<void> {
 		await this.withLock("issues", async () => {
-			const historyPath = path.join(this.coordDir, "issue-history.json");
+			const historyPath = path.join(this._coordDir, "issue-history.json");
 			let history: Record<string, { cycle: number; status: string }[]> = {};
 			try {
 				history = JSON.parse(await fs.readFile(historyPath, "utf-8"));
@@ -395,7 +399,7 @@ export class FileBasedStorage {
 	}
 
 	async isIssuePersistent(issueId: string, threshold: number): Promise<boolean> {
-		const historyPath = path.join(this.coordDir, "issue-history.json");
+		const historyPath = path.join(this._coordDir, "issue-history.json");
 		try {
 			const history = JSON.parse(await fs.readFile(historyPath, "utf-8"));
 			return (history[issueId]?.length || 0) >= threshold;
