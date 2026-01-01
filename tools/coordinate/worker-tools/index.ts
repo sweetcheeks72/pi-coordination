@@ -1,4 +1,5 @@
 import { randomUUID } from "node:crypto";
+import * as fs from "node:fs/promises";
 import type { CustomAgentTool, CustomToolFactory } from "@mariozechner/pi-coding-agent";
 import { Type } from "@sinclair/typebox";
 import { FileBasedStorage } from "../state.js";
@@ -391,6 +392,56 @@ const factory: CustomToolFactory = (_pi) => {
 
 				return {
 					content: [{ type: "text", text: `Now working on step ${params.step}` }],
+				};
+			},
+		},
+
+		{
+			name: "report_deviation",
+			label: "Report Deviation",
+			description: "Report when you need to deviate from the plan approach (not scope)",
+			parameters: Type.Object({
+				deviation: Type.String({ description: "What you're changing from the plan" }),
+				reason: Type.String({ description: "Why this deviation is necessary" }),
+				affectsOthers: Type.Boolean({ description: "Could this affect other workers?" }),
+			}),
+			async execute(_toolCallId, params) {
+				await storage.updateWorkerState(workerId, (s) => ({
+					...s,
+					deviations: [...(s.deviations || []), {
+						description: params.deviation,
+						reason: params.reason,
+						timestamp: Date.now(),
+					}],
+				}));
+
+				if (params.affectsOthers) {
+					await storage.sendMessage({
+						id: randomUUID(),
+						from: identity,
+						to: "coordinator",
+						type: "status",
+						content: `DEVIATION (affects others): ${params.deviation}\nReason: ${params.reason}`,
+						timestamp: Date.now(),
+					});
+				}
+
+				return {
+					content: [{ type: "text", text: "Deviation recorded" }],
+				};
+			},
+		},
+
+		{
+			name: "read_plan",
+			label: "Read Plan",
+			description: "Read the full implementation plan (if not already in your context)",
+			parameters: Type.Object({}),
+			async execute() {
+				const state = await storage.getState();
+				const content = await fs.readFile(state.planPath, "utf-8");
+				return {
+					content: [{ type: "text", text: content }],
 				};
 			},
 		},

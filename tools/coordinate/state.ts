@@ -9,6 +9,10 @@ import type {
 	EscalationRequest,
 	EscalationResponse,
 	FileReservation,
+	CostState,
+	CostThresholds,
+	PipelinePhase,
+	ReviewIssue,
 } from "./types.js";
 
 export class FileBasedStorage {
@@ -304,6 +308,99 @@ export class FileBasedStorage {
 			return await fs.readFile(path.join(this.coordDir, "PROGRESS.md"), "utf-8");
 		} catch {
 			return null;
+		}
+	}
+
+	async transferReservation(reservationId: string, newAgent: string): Promise<void> {
+		return this.withLock("reservations", async () => {
+			const filePath = path.join(this.coordDir, "reservations", `${reservationId}.json`);
+			try {
+				const content = await fs.readFile(filePath, "utf-8");
+				const reservation: FileReservation = JSON.parse(content);
+				reservation.agent = newAgent;
+				await fs.writeFile(filePath, JSON.stringify(reservation, null, 2));
+			} catch {}
+		});
+	}
+
+	async appendDeviation(deviation: import("./types.js").Deviation): Promise<void> {
+		await this.withLock("state", async () => {
+			const state = await this.getState();
+			state.deviations = [...(state.deviations || []), deviation];
+			await this.setState(state);
+		});
+	}
+
+	async updatePhaseCost(phase: PipelinePhase, amount: number): Promise<void> {
+		await this.withLock("cost", async () => {
+			const costPath = path.join(this.coordDir, "cost.json");
+			let costState: CostState;
+			try {
+				costState = JSON.parse(await fs.readFile(costPath, "utf-8"));
+			} catch {
+				costState = {
+					total: 0,
+					byPhase: {} as Record<PipelinePhase, number>,
+					byWorker: {},
+					warnings: 0,
+					pauseCount: 0,
+					thresholds: { warn: 1, pause: 5, hard: 10 },
+				};
+			}
+
+			costState.byPhase[phase] = (costState.byPhase[phase] || 0) + amount;
+			costState.total += amount;
+
+			await fs.writeFile(costPath, JSON.stringify(costState, null, 2));
+		});
+	}
+
+	async getCostState(): Promise<CostState> {
+		const costPath = path.join(this.coordDir, "cost.json");
+		try {
+			return JSON.parse(await fs.readFile(costPath, "utf-8"));
+		} catch {
+			return {
+				total: 0,
+				byPhase: {} as Record<PipelinePhase, number>,
+				byWorker: {},
+				warnings: 0,
+				pauseCount: 0,
+				thresholds: { warn: 1, pause: 5, hard: 10 },
+			};
+		}
+	}
+
+	async checkThresholds(thresholds: CostThresholds): Promise<"ok" | "warn" | "pause" | "abort"> {
+		const state = await this.getCostState();
+		if (state.total >= thresholds.hard) return "abort";
+		if (state.total >= thresholds.pause) return "pause";
+		if (state.total >= thresholds.warn) return "warn";
+		return "ok";
+	}
+
+	async trackIssue(issue: ReviewIssue): Promise<void> {
+		await this.withLock("issues", async () => {
+			const historyPath = path.join(this.coordDir, "issue-history.json");
+			let history: Record<string, { cycle: number; status: string }[]> = {};
+			try {
+				history = JSON.parse(await fs.readFile(historyPath, "utf-8"));
+			} catch {}
+
+			history[issue.id] = history[issue.id] || [];
+			history[issue.id].push({ cycle: issue.fixAttempts, status: "found" });
+
+			await fs.writeFile(historyPath, JSON.stringify(history, null, 2));
+		});
+	}
+
+	async isIssuePersistent(issueId: string, threshold: number): Promise<boolean> {
+		const historyPath = path.join(this.coordDir, "issue-history.json");
+		try {
+			const history = JSON.parse(await fs.readFile(historyPath, "utf-8"));
+			return (history[issueId]?.length || 0) >= threshold;
+		} catch {
+			return false;
 		}
 	}
 

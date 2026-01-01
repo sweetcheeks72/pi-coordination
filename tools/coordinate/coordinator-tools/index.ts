@@ -1,12 +1,15 @@
 import { randomUUID } from "node:crypto";
 import * as fsSync from "node:fs";
+import * as fs from "node:fs/promises";
+import * as os from "node:os";
 import * as path from "node:path";
 import { spawn, type ChildProcess } from "node:child_process";
 import { fileURLToPath } from "node:url";
 import type { CustomAgentTool, CustomToolFactory } from "@mariozechner/pi-coding-agent";
 import { Type } from "@sinclair/typebox";
+import { discoverAgents } from "../../subagent/agents.js";
 import { FileBasedStorage } from "../state.js";
-import type { WorkerStateFile } from "../types.js";
+import type { WorkerStateFile, IdentityMapping, PreAssignment } from "../types.js";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
@@ -14,7 +17,15 @@ function sleep(ms: number): Promise<void> {
 	return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
-interface WorkerHandle {
+function writePromptToTempFile(agentName: string, prompt: string): { dir: string; filePath: string } {
+	const tmpDir = fsSync.mkdtempSync(path.join(os.tmpdir(), "pi-worker-"));
+	const safeName = agentName.replace(/[^\w.-]+/g, "_");
+	const filePath = path.join(tmpDir, `prompt-${safeName}.md`);
+	fsSync.writeFileSync(filePath, prompt, { encoding: "utf-8", mode: 0o600 });
+	return { dir: tmpDir, filePath };
+}
+
+export interface WorkerHandle {
 	workerId: string;
 	identity: string;
 	pid: number;
@@ -22,28 +33,50 @@ interface WorkerHandle {
 	promise: Promise<number>;
 }
 
-function spawnWorkerProcess(
-	config: { agent: string; handshakeSpec: string; steps: number[] },
+export interface WorkerConfig {
+	agent: string;
+	handshakeSpec: string;
+	steps: number[];
+	logicalName: string;
+	workerId: string;
+	identity: string;
+}
+
+export function spawnWorkerProcess(
+	config: WorkerConfig,
 	coordDir: string,
 	cwd: string,
 	storage: FileBasedStorage,
+	modelOverride?: string,
 ): WorkerHandle {
+	const { agents } = discoverAgents(cwd, "user");
+	const workerAgent = agents.find(a => a.name === "worker");
+
 	const workerToolsPath = path.join(__dirname, "..", "worker-tools", "index.ts");
 	const reservationHookPath = path.join(__dirname, "..", "worker-hooks", "reservation.ts");
 
-	const workerId = randomUUID();
+	const { workerId, identity } = config;
 	const shortId = workerId.slice(0, 4);
-	const identity = `worker:${config.agent}-${shortId}`;
 
-	const args = [
-		"--model", "claude-sonnet-4-20250514",
+	const model = modelOverride || workerAgent?.model || "claude-sonnet-4-20250514";
+
+	const args: string[] = [
+		"--model", model,
 		"--mode", "json",
 		"-p",
 		"--no-session",
 		"--tool", workerToolsPath,
 		"--hook", reservationHookPath,
-		`Task: ${config.handshakeSpec}`,
 	];
+
+	let tmpPromptDir: string | null = null;
+	if (workerAgent?.systemPrompt) {
+		const tmp = writePromptToTempFile("worker", workerAgent.systemPrompt);
+		tmpPromptDir = tmp.dir;
+		args.push("--append-system-prompt", tmp.filePath);
+	}
+
+	args.push(`Task: ${config.handshakeSpec}`);
 
 	const proc = spawn("pi", args, {
 		cwd,
@@ -57,6 +90,9 @@ function spawnWorkerProcess(
 	});
 
 	if (!proc.pid) {
+		if (tmpPromptDir) {
+			try { fsSync.rmSync(tmpPromptDir, { recursive: true }); } catch {}
+		}
 		throw new Error(`Failed to start worker process for ${config.agent}`);
 	}
 
@@ -112,9 +148,17 @@ function spawnWorkerProcess(
 
 	const promise = new Promise<number>((resolve) => {
 		proc.on("close", (code) => {
+			if (tmpPromptDir) {
+				try { fsSync.rmSync(tmpPromptDir, { recursive: true }); } catch {}
+			}
 			resolve(code ?? 0);
 		});
-		proc.on("error", () => resolve(1));
+		proc.on("error", () => {
+			if (tmpPromptDir) {
+				try { fsSync.rmSync(tmpPromptDir, { recursive: true }); } catch {}
+			}
+			resolve(1);
+		});
 	});
 
 	return { workerId, identity, pid: proc.pid, proc, promise };
@@ -122,8 +166,11 @@ function spawnWorkerProcess(
 
 const WorkerSpec = Type.Object({
 	agent: Type.String({ description: "Agent type name" }),
+	logicalName: Type.String({ description: "Logical name like 'worker-A'" }),
 	handshakeSpec: Type.String({ description: "Detailed task specification for the worker" }),
 	steps: Type.Array(Type.Number(), { description: "Step numbers assigned to this worker" }),
+	adjacentWorkers: Type.Optional(Type.Array(Type.String(), { description: "Logical names of workers this one interacts with" })),
+	model: Type.Optional(Type.String({ description: "Model override for this worker" })),
 });
 
 const factory: CustomToolFactory = (pi) => {
@@ -143,12 +190,79 @@ const factory: CustomToolFactory = (pi) => {
 			description: "Spawn workers in parallel, wait for all to complete, and return results. This blocks until all workers finish.",
 			parameters: Type.Object({
 				workers: Type.Array(WorkerSpec, { description: "Worker specifications" }),
+				includePlan: Type.Optional(Type.Boolean({ description: "Include full plan in worker context (default: true)" })),
 			}),
 			async execute(_toolCallId, params) {
+				const state = await storage.getState();
+				let planContent = "";
+				if (params.includePlan !== false) {
+					try {
+						planContent = await fs.readFile(state.planPath, "utf-8");
+					} catch {}
+				}
+
+				interface WorkerPrep {
+					spec: typeof params.workers[0];
+					workerId: string;
+					shortId: string;
+					identity: string;
+					preAssignment?: PreAssignment;
+				}
+
+				const workerPreps: WorkerPrep[] = [];
+				const identityMap: IdentityMapping[] = [];
 				const handles: WorkerHandle[] = [];
 
 				for (const w of params.workers) {
-					const handle = spawnWorkerProcess(w, coordDir, pi.cwd, storage);
+					const workerId = randomUUID();
+					const shortId = workerId.slice(0, 4);
+					const workerIdentity = `worker:${w.agent}-${shortId}`;
+					const preAssignment = state.preAssignments?.[w.logicalName];
+
+					identityMap.push({ logical: w.logicalName, actual: workerIdentity });
+					workerPreps.push({ spec: w, workerId, shortId, identity: workerIdentity, preAssignment });
+
+					if (preAssignment) {
+						await storage.transferReservation(preAssignment.reservationId, workerIdentity);
+					}
+				}
+
+				for (const prep of workerPreps) {
+					const { spec: w, workerId, identity: workerIdentity, preAssignment } = prep;
+
+					const adjacentMappings = w.adjacentWorkers?.map(ln => {
+						const mapping = identityMap.find(m => m.logical === ln);
+						return mapping ? `${ln} -> ${mapping.actual}` : ln;
+					}).join(", ") || "none";
+
+					const enrichedSpec = `${w.handshakeSpec}
+
+## Your Context
+- **Identity:** ${workerIdentity}
+- **Logical Name:** ${w.logicalName}
+- **Assigned Files:** ${preAssignment?.files.join(", ") || "none pre-assigned"}
+- **Adjacent Workers:** ${adjacentMappings}
+
+## Identity Mapping
+${identityMap.map(m => `- ${m.logical} = ${m.actual}`).join("\n")}
+
+${planContent ? `## Full Plan\n\`\`\`markdown\n${planContent}\n\`\`\`` : ""}
+`;
+
+					const handle = spawnWorkerProcess(
+						{
+							agent: w.agent,
+							handshakeSpec: enrichedSpec,
+							steps: w.steps,
+							logicalName: w.logicalName,
+							workerId,
+							identity: workerIdentity,
+						},
+						coordDir,
+						pi.cwd,
+						storage,
+						w.model,
+					);
 					handles.push(handle);
 				}
 
@@ -183,6 +297,89 @@ const factory: CustomToolFactory = (pi) => {
 				return {
 					content: [{ type: "text", text: `All ${handles.length} workers completed:\n${workerResults.join("\n")}` }],
 					details: { workers: handles.map((h) => ({ workerId: h.workerId, identity: h.identity, pid: h.pid })) },
+				};
+			},
+		},
+
+		{
+			name: "assign_files",
+			label: "Assign Files",
+			description: "Pre-assign files to a worker before spawning. Creates actual file reservations. First assignment wins.",
+			parameters: Type.Object({
+				workerLogicalName: Type.String({ description: "Logical worker name (e.g., 'worker-A')" }),
+				files: Type.Array(Type.String(), { description: "Files this worker will own" }),
+			}),
+			async execute(_toolCallId, params) {
+				const reservationId = randomUUID();
+				const preAssignIdentity = `pre:${params.workerLogicalName}`;
+
+				const result = await storage.reserveFiles({
+					id: reservationId,
+					agent: preAssignIdentity,
+					patterns: params.files,
+					exclusive: true,
+					reason: `Pre-assigned to ${params.workerLogicalName}`,
+					createdAt: Date.now(),
+					expiresAt: Date.now() + 3600000,
+				});
+
+				if (!result.success) {
+					return {
+						content: [{
+							type: "text",
+							text: `File conflict: ${params.files.join(", ")} already assigned to ${result.conflict?.agent}`,
+						}],
+						isError: true,
+					};
+				}
+
+				const state = await storage.getState();
+				await storage.setState({
+					...state,
+					preAssignments: {
+						...state.preAssignments,
+						[params.workerLogicalName]: {
+							files: params.files,
+							reservationId,
+						},
+					},
+				});
+
+				return {
+					content: [{ type: "text", text: `Assigned ${params.files.join(", ")} to ${params.workerLogicalName}` }],
+				};
+			},
+		},
+
+		{
+			name: "broadcast_deviation",
+			label: "Broadcast Deviation",
+			description: "Notify affected workers when a deviation occurs",
+			parameters: Type.Object({
+				deviation: Type.String({ description: "What deviated from the plan" }),
+				affectedWorkers: Type.Array(Type.String(), { description: "Worker identities to notify" }),
+				adaptationHint: Type.Optional(Type.String({ description: "How workers should adapt" })),
+			}),
+			async execute(_toolCallId, params) {
+				for (const worker of params.affectedWorkers) {
+					await storage.sendMessage({
+						id: randomUUID(),
+						from: identity,
+						to: worker,
+						type: "status",
+						content: `DEVIATION: ${params.deviation}${params.adaptationHint ? `\n\nAdaptation: ${params.adaptationHint}` : ""}`,
+						timestamp: Date.now(),
+					});
+				}
+
+				await storage.appendDeviation({
+					type: "plan_deviation",
+					description: params.deviation,
+					timestamp: Date.now(),
+				});
+
+				return {
+					content: [{ type: "text", text: `Notified ${params.affectedWorkers.length} workers of deviation` }],
 				};
 			},
 		},

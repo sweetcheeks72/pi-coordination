@@ -1,6 +1,7 @@
 import * as path from "node:path";
-import type { CoordinationState, CoordinationEvent, WorkerStateFile } from "./types.js";
+import type { CoordinationState, CoordinationEvent, WorkerStateFile, PipelineState, ReviewIssue, CostState } from "./types.js";
 import type { SingleResult } from "../subagent/types.js";
+import type { ReviewResult } from "./phases/review.js";
 
 interface LogData {
 	sessionId: string;
@@ -13,6 +14,9 @@ interface LogData {
 	coordinatorResult: SingleResult;
 	startedAt: number;
 	completedAt: number;
+	pipelineState?: PipelineState;
+	reviewHistory?: ReviewResult[];
+	costState?: CostState;
 }
 
 function formatDuration(ms: number): string {
@@ -47,6 +51,9 @@ export function generateCoordinationLog(data: LogData): string {
 		coordinatorResult,
 		startedAt,
 		completedAt,
+		pipelineState,
+		reviewHistory,
+		costState,
 	} = data;
 
 	const duration = completedAt - startedAt;
@@ -59,6 +66,18 @@ export function generateCoordinationLog(data: LogData): string {
 
 	lines.push(`# Coordination Log`);
 	lines.push(``);
+
+	const reviewCycles = pipelineState?.fixCycle || 0;
+	const outcomeText = failedCount > 0 
+		? `${failedCount} worker(s) failed` 
+		: state.status === "complete" 
+			? "all tasks completed successfully" 
+			: `ended with status: ${state.status}`;
+	lines.push(`## Executive Summary`);
+	lines.push(``);
+	lines.push(`This coordination session executed the **${path.basename(planPath)}** plan in ${formatDuration(duration)}. ${successCount} workers completed ${workerStates.reduce((sum, w) => sum + w.completedSteps.length, 0)} tasks${reviewCycles > 0 ? ` with ${reviewCycles} review cycle(s)` : ""}. Total cost: $${totalCost.toFixed(4)}. Outcome: ${outcomeText}.`);
+	lines.push(``);
+
 	lines.push(`**Session ID:** \`${sessionId}\``);
 	lines.push(`**Status:** ${state.status === "complete" ? "Completed" : state.status}`);
 	lines.push(`**Started:** ${formatTimestamp(startedAt)}`);
@@ -66,6 +85,30 @@ export function generateCoordinationLog(data: LogData): string {
 	lines.push(`**Total Cost:** $${totalCost.toFixed(4)}`);
 	lines.push(`**Workers:** ${successCount}/${workerStates.length} succeeded${failedCount > 0 ? `, ${failedCount} failed` : ""}`);
 	lines.push(``);
+
+	if (pipelineState) {
+		lines.push(`## Phase Timeline`);
+		lines.push(``);
+		lines.push(`| Phase       | Status   | Duration | Cost   | Notes                    |`);
+		lines.push(`|-------------|----------|----------|--------|--------------------------|`);
+
+		const phases = ["scout", "coordinator", "workers", "review", "fixes", "complete"] as const;
+		for (const phase of phases) {
+			const result = pipelineState.phases[phase];
+			if (!result || result.status === "pending") continue;
+			
+			const phaseDuration = result.startedAt && result.completedAt 
+				? formatDuration(result.completedAt - result.startedAt)
+				: "--";
+			const phaseCost = costState?.byPhase[phase] 
+				? `$${costState.byPhase[phase].toFixed(2)}`
+				: "--";
+			const notes = result.error || "";
+			
+			lines.push(`| ${phase.padEnd(11)} | ${result.status.padEnd(8)} | ${phaseDuration.padEnd(8)} | ${phaseCost.padEnd(6)} | ${notes.slice(0, 24).padEnd(24)} |`);
+		}
+		lines.push(``);
+	}
 
 	lines.push(`## Plan`);
 	lines.push(``);
@@ -150,6 +193,15 @@ export function generateCoordinationLog(data: LogData): string {
 			case "coordinator":
 				line += `[coordinator] ${ev.message}`;
 				break;
+			case "phase_complete":
+				line += `**Phase ${ev.phase} complete** (${formatDuration(ev.duration)}, $${ev.cost.toFixed(2)})`;
+				break;
+			case "cost_warning":
+				line += `**Cost warning:** $${ev.total.toFixed(2)}`;
+				break;
+			case "cost_pause":
+				line += `**Cost pause triggered:** $${ev.total.toFixed(2)}`;
+				break;
 		}
 
 		lines.push(line);
@@ -195,12 +247,73 @@ export function generateCoordinationLog(data: LogData): string {
 		}
 	}
 
+	if (reviewHistory && reviewHistory.length > 0) {
+		lines.push(`## Review Cycles`);
+		lines.push(``);
+
+		for (let i = 0; i < reviewHistory.length; i++) {
+			const review = reviewHistory[i];
+			lines.push(`### Review Cycle ${i + 1}`);
+			lines.push(``);
+			lines.push(`- **All Passing:** ${review.allPassing ? "Yes" : "No"}`);
+			lines.push(`- **Summary:** ${review.summary}`);
+			lines.push(`- **Duration:** ${formatDuration(review.duration)}`);
+			lines.push(`- **Cost:** $${review.cost.toFixed(4)}`);
+			lines.push(``);
+
+			if (review.issues.length > 0) {
+				lines.push(`**Issues Found:**`);
+				lines.push(``);
+				for (const issue of review.issues) {
+					lines.push(`- **${issue.file}:${issue.line || "?"}** (${issue.severity}/${issue.category}): ${issue.description}`);
+					if (issue.suggestedFix) {
+						lines.push(`  - Suggested: ${issue.suggestedFix}`);
+					}
+				}
+				lines.push(``);
+			}
+		}
+	}
+
 	if (state.deviations.length > 0) {
 		lines.push(`## Deviations`);
 		lines.push(``);
 		for (const d of state.deviations) {
 			lines.push(`- **${d.type}:** ${d.description}`);
 		}
+		lines.push(``);
+	}
+
+	if (costState) {
+		lines.push(`## Cost Breakdown`);
+		lines.push(``);
+		lines.push(`**Total:** $${costState.total.toFixed(4)}`);
+		lines.push(``);
+
+		if (Object.keys(costState.byPhase).length > 0) {
+			lines.push(`**By Phase:**`);
+			for (const [phase, cost] of Object.entries(costState.byPhase)) {
+				if (cost > 0) {
+					lines.push(`- ${phase}: $${cost.toFixed(4)}`);
+				}
+			}
+			lines.push(``);
+		}
+
+		if (Object.keys(costState.byWorker).length > 0) {
+			lines.push(`**By Worker:**`);
+			for (const [workerId, cost] of Object.entries(costState.byWorker)) {
+				if (cost > 0) {
+					lines.push(`- ${workerId.slice(0, 8)}: $${cost.toFixed(4)}`);
+				}
+			}
+			lines.push(``);
+		}
+
+		lines.push(`**Thresholds:**`);
+		lines.push(`- Warn: $${costState.thresholds.warn.toFixed(2)}`);
+		lines.push(`- Pause: $${costState.thresholds.pause.toFixed(2)}`);
+		lines.push(`- Hard: $${costState.thresholds.hard.toFixed(2)}`);
 		lines.push(``);
 	}
 

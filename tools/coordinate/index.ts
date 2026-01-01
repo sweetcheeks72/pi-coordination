@@ -14,7 +14,7 @@ import { runSingleAgent } from "../subagent/runner.js";
 import type { SingleResult, SubagentDetails } from "../subagent/types.js";
 import { FileBasedStorage } from "./state.js";
 import { generateCoordinationLog } from "./log-generator.js";
-import type { CoordinationState, CoordinationEvent, WorkerStateFile, WorkerStatus, CoordinationStatus } from "./types.js";
+import type { CoordinationState, CoordinationEvent, WorkerStateFile, WorkerStatus, CoordinationStatus, PipelinePhase, PhaseResult, CostState } from "./types.js";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
@@ -47,6 +47,12 @@ interface CoordinationDetails {
 	pendingAgents: string[];
 	deviations: string[];
 	startedAt: number;
+	pipeline?: {
+		currentPhase: PipelinePhase;
+		phases: Record<PipelinePhase, PhaseResult>;
+		fixCycle: number;
+	};
+	cost?: CostState;
 }
 
 type OnUpdateCallback = (partial: AgentToolResult<CoordinationDetails>) => void;
@@ -55,6 +61,16 @@ const CoordinateParams = Type.Object({
 	plan: Type.String({ description: "Path to markdown plan file" }),
 	agents: Type.Array(Type.String(), { description: "Agent types to use (e.g. ['worker', 'worker'])" }),
 	logPath: Type.Optional(Type.String({ description: "Path for coordination log output. Defaults to cwd. Set to empty string to disable." })),
+	resume: Type.Optional(Type.String({ description: "Checkpoint ID to resume from" })),
+	maxFixCycles: Type.Optional(Type.Number({ description: "Maximum review/fix cycles (default: 3)" })),
+	sameIssueLimit: Type.Optional(Type.Number({ description: "Times same issue can recur before giving up (default: 2)" })),
+	reviewModel: Type.Optional(Type.String({ description: "Model for code review phase" })),
+	checkTests: Type.Optional(Type.Boolean({ description: "Whether reviewer should check for tests (default: true)" })),
+	costThresholds: Type.Optional(Type.Object({
+		warn: Type.Number({ description: "Cost threshold for warning ($)", default: 1.0 }),
+		pause: Type.Number({ description: "Cost threshold to pause and confirm ($)", default: 5.0 }),
+		hard: Type.Number({ description: "Cost threshold to abort ($)", default: 10.0 }),
+	})),
 });
 
 const factory: CustomToolFactory = (pi) => {
@@ -126,10 +142,15 @@ const factory: CustomToolFactory = (pi) => {
 				return a;
 			});
 
+			const scoutContext = ""; 
+
 			const task = `## Coordination Session
 
 You are managing a coordination session. Your job is to spawn worker agents and summarize results.
-
+${scoutContext ? `
+### Scout Context
+${scoutContext}
+` : ""}
 ### Plan to Execute
 \`\`\`markdown
 ${planContent}
@@ -147,24 +168,35 @@ ${coordDir}
    - Identify which steps depend on outputs from other steps
    - For each dependency, note: what is being produced, who produces it, who needs it
 
-2. **Create contracts for dependencies** (if any exist)
+2. **Pre-assign file ownership** (optional but recommended for complex plans)
+   - Call assign_files() to declare which files each worker owns BEFORE spawning workers
+   - Use logical names like "worker-A", "worker-B"
+   - First worker to own a file gets it; later workers needing the same file wait via contract
+
+3. **Create contracts for dependencies** (if any exist)
    - Call create_contract() for each cross-worker dependency BEFORE spawning workers
-   - Use logical worker names (worker-A, worker-B, etc.) that match handshakeSpec references
+   - Use logical worker names (worker-A, worker-B, etc.) that match spawn_workers logicalName
    - Workers will use wait_for_contract() to block until dependencies are ready
    - Workers will use signal_contract_complete() when they finish producing the dependency
 
-3. **Call spawn_workers()** with detailed handshake specs
+4. **Call spawn_workers()** with detailed handshake specs
    - This spawns workers in parallel and WAITS for all to complete
-   - Each worker needs: agent type, step numbers, and detailed handshakeSpec
+   - Each worker needs: agent type, logicalName, step numbers, and detailed handshakeSpec
    - If worker depends on another, include "Wait for contract 'X' before starting" in handshakeSpec
    - If worker provides something others need, include "Signal contract 'X' when complete" in handshakeSpec
+   - Use adjacentWorkers to indicate which workers interact with each other
    
-4. **Call done()** with a summary of what was accomplished
+5. **Call done()** with a summary of what was accomplished
    - done() validates that workers were spawned and completed successfully
 
 ### Example with Dependencies (Diamond Pattern):
 \`\`\`
-// Step 1: Create contract for the dependency
+// Step 1: Pre-assign files (optional)
+assign_files({ workerLogicalName: "worker-A", files: ["src/types.ts"] })
+assign_files({ workerLogicalName: "worker-B", files: ["src/service.ts"] })
+assign_files({ workerLogicalName: "worker-C", files: ["src/validator.ts"] })
+
+// Step 2: Create contract for the dependency
 create_contract({
   item: "User type",
   type: "type", 
@@ -173,23 +205,29 @@ create_contract({
   signature: "interface User { id: string; name: string; }"
 })
 
-// Step 2: Spawn workers with dependency info in handshakeSpec
+// Step 3: Spawn workers with dependency info in handshakeSpec
 spawn_workers({
   workers: [
     {
       "agent": "worker",
+      "logicalName": "worker-A",
       "steps": [1],
-      "handshakeSpec": "You are worker-A. Create src/types.ts with User interface (id: string, name: string). After creating the file, call signal_contract_complete({ item: 'User type', file: 'src/types.ts' })."
-    },
-    {
-      "agent": "worker", 
-      "steps": [2],
-      "handshakeSpec": "You are worker-B. First call wait_for_contract({ item: 'User type' }) to wait for the User type to be ready. Then create src/service.ts with createUser function that imports User from ./types."
+      "adjacentWorkers": ["worker-B", "worker-C"],
+      "handshakeSpec": "Create src/types.ts with User interface (id: string, name: string). After creating the file, call signal_contract_complete({ item: 'User type', file: 'src/types.ts' })."
     },
     {
       "agent": "worker",
-      "steps": [3], 
-      "handshakeSpec": "You are worker-C. First call wait_for_contract({ item: 'User type' }) to wait for the User type to be ready. Then create src/validator.ts with validateUser function that imports User from ./types."
+      "logicalName": "worker-B",
+      "steps": [2],
+      "adjacentWorkers": ["worker-A"],
+      "handshakeSpec": "First call wait_for_contract({ item: 'User type' }) to wait for the User type to be ready. Then create src/service.ts with createUser function that imports User from ./types."
+    },
+    {
+      "agent": "worker",
+      "logicalName": "worker-C",
+      "steps": [3],
+      "adjacentWorkers": ["worker-A"],
+      "handshakeSpec": "First call wait_for_contract({ item: 'User type' }) to wait for the User type to be ready. Then create src/validator.ts with validateUser function that imports User from ./types."
     }
   ]
 })
@@ -200,8 +238,8 @@ spawn_workers({
 // No contracts needed - just spawn workers
 spawn_workers({
   workers: [
-    {"agent": "worker", "steps": [1], "handshakeSpec": "Create src/file1.ts with a hello() function returning 'hello'."},
-    {"agent": "worker", "steps": [2], "handshakeSpec": "Create src/file2.ts with a world() function returning 'world'."}
+    {"agent": "worker", "logicalName": "worker-A", "steps": [1], "handshakeSpec": "Create src/file1.ts with a hello() function returning 'hello'."},
+    {"agent": "worker", "logicalName": "worker-B", "steps": [2], "handshakeSpec": "Create src/file2.ts with a world() function returning 'world'."}
   ]
 })
 \`\`\`
@@ -411,6 +449,36 @@ spawn_workers({
 			const allDone = workers.length > 0 &&
 				workers.every(w => w.status === "complete" || w.status === "failed");
 
+			if (details.pipeline) {
+				const phases: PipelinePhase[] = ["scout", "coordinator", "workers", "review", "fixes", "complete"];
+				const current = details.pipeline.currentPhase;
+
+				let timeline = "";
+				for (const phase of phases) {
+					const status = details.pipeline.phases[phase]?.status;
+
+					if (status === "complete") {
+						timeline += theme.fg("success", `[${phase}]`) + " -> ";
+					} else if (status === "running") {
+						timeline += theme.fg("warning", `[${phase}]`) + " -> ";
+					} else if (status === "failed") {
+						timeline += theme.fg("error", `[${phase}]`) + " -> ";
+					} else {
+						timeline += theme.fg("muted", `[${phase}]`) + " -> ";
+					}
+				}
+
+				container.addChild(new Text(`Pipeline: ${timeline.slice(0, -4)}`, 0, 0));
+				container.addChild(new Text(`Current: ${current}`, 0, 0));
+				if (details.cost) {
+					container.addChild(new Text(
+						`Cost: $${details.cost.total.toFixed(2)} / $${details.cost.thresholds.pause.toFixed(2)} pause threshold`,
+						0, 0
+					));
+				}
+				container.addChild(new Text("", 0, 0));
+			}
+
 			const formatElapsed = (ms: number): string => {
 				const secs = Math.floor(ms / 1000);
 				if (secs < 60) return `${secs}s`;
@@ -530,9 +598,16 @@ spawn_workers({
 
 				for (const ev of recentEvents) {
 					const elapsed = `+${((ev.timestamp - firstTs) / 1000).toFixed(1)}s`;
-					const shortId = ev.type === "cost_milestone"
-						? "$"
-						: (ev as { workerId?: string }).workerId?.slice(0, 4) || "??";
+					let shortId: string;
+					if (ev.type === "cost_milestone" || ev.type === "cost_warning" || ev.type === "cost_pause") {
+						shortId = "$";
+					} else if (ev.type === "phase_complete") {
+						shortId = "sys";
+					} else if (ev.type === "coordinator") {
+						shortId = "co";
+					} else {
+						shortId = (ev as { workerId?: string }).workerId?.slice(0, 4) || "??";
+					}
 
 					let line = `${theme.fg("muted", elapsed.padEnd(8))}`;
 					line += `${theme.fg("accent", `[${shortId}]`)} `;
@@ -569,6 +644,15 @@ spawn_workers({
 							break;
 						case "coordinator":
 							line += theme.fg("dim", ev.message.slice(0, 50));
+							break;
+						case "phase_complete":
+							line += theme.fg("success", `phase ${ev.phase} done ($${ev.cost.toFixed(2)})`);
+							break;
+						case "cost_warning":
+							line += theme.fg("warning", `cost warning: $${ev.total.toFixed(2)}`);
+							break;
+						case "cost_pause":
+							line += theme.fg("error", `cost pause: $${ev.total.toFixed(2)}`);
 							break;
 					}
 
