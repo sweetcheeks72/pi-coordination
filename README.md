@@ -227,7 +227,7 @@ The coordinate tool will:
 
 The scout outputs a structured context file for the planner with two sections:
 
-```markdown
+````markdown
 <file_map>
 /path/to/project
 ├── src
@@ -254,7 +254,7 @@ File: /path/to/project/src/index.ts
 export * from './components';
 ```
 </file_contents>
-```
+````
 
 The planner reads this context using the `read_context` tool:
 - `read_context({ path: "scout/main.md" })` - Full context
@@ -296,27 +296,27 @@ Coordination Complete (2m 34s total, $0.89)
 For async coordination jobs, use the `/coord` command to open a full-screen dashboard:
 
 ```
-┌─ Coordination ─────────────────────────────────────────────┐
-│ Pipeline: [scout ✓] → [planner ✓] → [workers ●] → [review] │
-│ Cost: $1.23 / $40.00 limit              Elapsed: 3m 45s    │
-├─ Task Queue (6) ───────────────────────────────────────────┤
-│ ● task-1   Create user types       claimed   worker:04ea   │
-│ ○ task-2   Implement auth service  pending   deps: task-1  │
-│ ✓ task-3   Setup database schema   complete  worker:52e2   │
-├─ Workers (4) ──────────────────────────────────────────────┤
-│ → 04ea  types.ts     ● working  1m23s  $0.45  12 turns     │
-│   52e2  store.ts     ✓ complete 2m01s  $0.38  8 turns      │
-│   a3f1  handlers.ts  ● working  0m45s  $0.22  5 turns      │
-│   b2c4  ----         ○ waiting  0m12s  $0.00  0 turns      │
-├─ Events ───────────────────────────────────────────────────┤
-│ +1m23s  [04ea] write src/types.ts                          │
-│ +1m45s  [52e2] completed                                   │
-│ +2m01s  [a3f1] read src/handlers.ts                        │
-├─ Cost Breakdown ───────────────────────────────────────────┤
-│ By Phase: scout $0.12 | planner $0.34 | workers $0.77      │
-│ By Worker: 04ea $0.45 | 52e2 $0.38 | a3f1 $0.22            │
-└────────────────────────────────────────────────────────────┘
-  [j/k] select  [Enter] details  [w]rap up  [R]estart  [q]uit
+─ Coordination ─────────────────────────────────────────────────
+Pipeline: [scout ✓] → [planner ✓] → [workers ●] → [review]
+Cost: $1.23 / $40.00 limit                    Elapsed: 3m 45s
+─ Task Queue (6) ───────────────────────────────────────────────
+● task-1   Create user types        claimed    worker:04ea
+○ task-2   Implement auth service   pending    deps: task-1
+✓ task-3   Setup database schema    complete   worker:52e2
+─ Workers (4) ──────────────────────────────────────────────────
+→ 04ea  types.ts      ● working   1m23s  $0.45   12 turns
+  52e2  store.ts      ✓ complete  2m01s  $0.38   8 turns
+  a3f1  handlers.ts   ● working   0m45s  $0.22   5 turns
+  b2c4  ----          ○ waiting   0m12s  $0.00   0 turns
+─ Events ───────────────────────────────────────────────────────
++1m23s  [04ea] write src/types.ts
++1m45s  [52e2] completed
++2m01s  [a3f1] read src/handlers.ts
+─ Cost Breakdown ───────────────────────────────────────────────
+By Phase: scout $0.12 | planner $0.34 | workers $0.77
+By Worker: 04ea $0.45 | 52e2 $0.38 | a3f1 $0.22
+
+[j/k] select  [Enter] details  [w]rap up  [R]estart  [q]uit
 ```
 
 **Overlays:**
