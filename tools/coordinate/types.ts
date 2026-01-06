@@ -361,22 +361,6 @@ export interface SelfReviewConfig {
 	maxCycles: number;
 }
 
-export interface V2Config {
-	selfReview: SelfReviewConfig;
-	supervisor: SupervisorConfig & { enabled: boolean };
-	planner: PlannerConfig;
-}
-
-export type V2PipelinePhase =
-	| "scout"
-	| "planner"
-	| "coordinator"
-	| "workers"
-	| "review"
-	| "fixes"
-	| "complete"
-	| "failed";
-
 export interface Discovery {
 	id: string;
 	workerId: string;

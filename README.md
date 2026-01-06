@@ -75,23 +75,21 @@ coordinate({
   pauseOnCostThreshold: false,
   validate: true,
   validateStream: true,
-  v2: {
-    selfReview: {
-      enabled: true,
-      maxCycles: 5
-    },
-    supervisor: {
-      enabled: true,
-      nudgeThresholdMs: 180000,
-      restartThresholdMs: 300000,
-      maxRestarts: 2,
-      checkIntervalMs: 30000
-    },
-    planner: {
-      enabled: true,
-      humanCheckpoint: false,
-      maxSelfReviewCycles: 5
-    }
+  planner: {
+    enabled: true,
+    humanCheckpoint: false,
+    maxSelfReviewCycles: 5
+  },
+  selfReview: {
+    enabled: true,
+    maxCycles: 5
+  },
+  supervisor: {
+    enabled: true,
+    nudgeThresholdMs: 180000,
+    restartThresholdMs: 300000,
+    maxRestarts: 2,
+    checkIntervalMs: 30000
   }
 })
 ```
@@ -120,7 +118,7 @@ The coordinate tool will:
 | Phase | Description |
 |-------|-------------|
 | **scout** | Deep codebase analysis before coordination (provides context to planner/workers) |
-| **planner** | Creates task graph from plan with self-review (optional, requires v2.planner.enabled) |
+| **planner** | Creates task graph from plan with self-review (optional, requires `planner.enabled`) |
 | **coordinator** | Spawns workers from task queue, manages supervisor loop |
 | **workers** | Parallel execution of tasks with self-review |
 | **review** | Code reviewer checks all changes against plan goals |

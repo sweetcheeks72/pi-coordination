@@ -19,7 +19,7 @@ This document describes the architecture and workflows of pi-coordination:
 +=====================================================================================+
 |                                                                                     |
 |   User invokes:  coordinate({ plan: "./plan.md", agents: ["worker"],               |
-|                              v2: { planner: { enabled: true }, ... } })             |
+|                              planner: { enabled: true }, ... })                     |
 |                                                                                     |
 |   +-------------------------------------------------------------------------+       |
 |   |                        Coordinate Tool (index.ts)                       |       |
@@ -729,23 +729,21 @@ coordinate({
   plan: "./plan.md",
   agents: ["worker"],
   
-  v2: {
-    selfReview: {
-      enabled: true,           // Enable worker self-review
-      maxCycles: 5             // Max review cycles
-    },
-    supervisor: {
-      enabled: true,           // Enable supervisor loop
-      nudgeThresholdMs: 180000,    // 3 minutes
-      restartThresholdMs: 300000,  // 5 minutes
-      maxRestarts: 2,
-      checkIntervalMs: 30000       // 30 seconds
-    },
-    planner: {
-      enabled: true,           // Enable planner phase
-      humanCheckpoint: false,  // Pause for approval
-      maxSelfReviewCycles: 5   // Planner self-review cycles
-    }
+  planner: {
+    enabled: true,
+    humanCheckpoint: false,
+    maxSelfReviewCycles: 5
+  },
+  selfReview: {
+    enabled: true,
+    maxCycles: 5
+  },
+  supervisor: {
+    enabled: true,
+    nudgeThresholdMs: 180000,
+    restartThresholdMs: 300000,
+    maxRestarts: 2,
+    checkIntervalMs: 30000
   }
 })
 ```
@@ -831,7 +829,7 @@ coordDir/
 
 | Symptom | Check | Resolution |
 |---------|-------|------------|
-| No tasks.json created | Check if planner phase enabled | Ensure `v2.planner.enabled: true` |
+| No tasks.json created | Check if planner phase enabled | Ensure `planner: { enabled: true }` |
 | Workers not spawning | Check tasks.json status | Verify tasks have status "pending" |
 | Self-review not triggering | Check PI_SELF_REVIEW_ENABLED | Should not be "false" |
 | Self-review stuck | Check PI_MAX_SELF_REVIEW_CYCLES | Increase if needed |

@@ -29,8 +29,8 @@ All notable changes to pi-coordination.
 ### Added
 - **Planner phase** with Ralph self-review loop for task decomposition before coordination
 - **Task queue model** replacing step-based work distribution (priority levels, dependencies, dynamic assignment)
-- **Worker self-review loop** via tool interception on `complete_task` (configurable via `v2.selfReview`)
-- **Supervisor loop** monitors worker activity, nudges or restarts stuck workers (configurable via `v2.supervisor`)
+- **Worker self-review loop** via tool interception on `complete_task` (configurable via `selfReview`)
+- **Supervisor loop** monitors worker activity, nudges or restarts stuck workers (configurable via `supervisor`)
 - **Discovered tasks workflow** - workers can add tasks via `add_discovered_task`, planner reviews before adding to queue
 - **A2A communication** - `send_message` / `check_messages` for inter-worker messaging
 - **Structured scout context** - Scout outputs `<file_map>` and `<file_contents>` sections for planner consumption
@@ -46,6 +46,7 @@ All notable changes to pi-coordination.
 - Configurable self-review spec via `PI_SELF_REVIEW_SPEC_PATH` env var
 
 ### Changed
+- **Config flattened**: `planner`, `selfReview`, `supervisor` options now at top level (no `v2` wrapper)
 - Scout agent now outputs structured format with file tree and full file contents
 - Planner reads scout context via `read_context` tool instead of inline prompt
 - Installation now cleans up legacy hooks/tools symlinks

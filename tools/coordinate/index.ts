@@ -146,23 +146,21 @@ const CoordinateParams = Type.Object({
 	pauseOnCostThreshold: Type.Optional(Type.Boolean({ description: "Block and ask user when pause threshold is hit (default: false)" })),
 	validate: Type.Optional(Type.Boolean({ description: "Run validation after completion (default: false)" })),
 	validateStream: Type.Optional(Type.Boolean({ description: "Stream invariant warnings in real-time (default: false)" })),
-	v2: Type.Optional(Type.Object({
-		selfReview: Type.Optional(Type.Object({
-			enabled: Type.Boolean({ description: "Enable worker self-review loop (default: true)" }),
-			maxCycles: Type.Number({ description: "Max self-review cycles per worker (default: 5)" }),
-		})),
-		supervisor: Type.Optional(Type.Object({
-			enabled: Type.Boolean({ description: "Enable supervisor loop (default: true)" }),
-			nudgeThresholdMs: Type.Number({ description: "Inactivity before nudge (default: 180000)" }),
-			restartThresholdMs: Type.Number({ description: "Inactivity before restart (default: 300000)" }),
-			maxRestarts: Type.Number({ description: "Max restart attempts per worker (default: 2)" }),
-			checkIntervalMs: Type.Number({ description: "Supervisor check interval (default: 30000)" }),
-		})),
-		planner: Type.Optional(Type.Object({
-			enabled: Type.Boolean({ description: "Enable planner phase (default: false)" }),
-			humanCheckpoint: Type.Boolean({ description: "Pause for human approval of task graph (default: false)" }),
-			maxSelfReviewCycles: Type.Number({ description: "Max planner self-review cycles (default: 5)" }),
-		})),
+	planner: Type.Optional(Type.Object({
+		enabled: Type.Boolean({ description: "Enable planner phase (default: false)" }),
+		humanCheckpoint: Type.Optional(Type.Boolean({ description: "Pause for human approval of task graph (default: false)" })),
+		maxSelfReviewCycles: Type.Optional(Type.Number({ description: "Max planner self-review cycles (default: 5)" })),
+	})),
+	selfReview: Type.Optional(Type.Object({
+		enabled: Type.Boolean({ description: "Enable worker self-review loop (default: true)" }),
+		maxCycles: Type.Optional(Type.Number({ description: "Max self-review cycles per worker (default: 5)" })),
+	})),
+	supervisor: Type.Optional(Type.Object({
+		enabled: Type.Boolean({ description: "Enable supervisor loop (default: true)" }),
+		nudgeThresholdMs: Type.Optional(Type.Number({ description: "Inactivity before nudge (default: 180000)" })),
+		restartThresholdMs: Type.Optional(Type.Number({ description: "Inactivity before restart (default: 300000)" })),
+		maxRestarts: Type.Optional(Type.Number({ description: "Max restart attempts per worker (default: 2)" })),
+		checkIntervalMs: Type.Optional(Type.Number({ description: "Supervisor check interval (default: 30000)" })),
 	})),
 });
 
@@ -503,24 +501,22 @@ export async function runCoordinationSession(options: CoordinationRunOptions): P
 		costThresholds: costState.thresholds,
 		pauseOnCostThreshold: params.pauseOnCostThreshold ?? false,
 		maxOutput: params.maxOutput,
-		v2: params.v2 ? {
-			selfReview: {
-				enabled: params.v2.selfReview?.enabled ?? true,
-				maxCycles: params.v2.selfReview?.maxCycles ?? 5,
-			},
-			supervisor: {
-				enabled: params.v2.supervisor?.enabled ?? true,
-				nudgeThresholdMs: params.v2.supervisor?.nudgeThresholdMs ?? 180000,
-				restartThresholdMs: params.v2.supervisor?.restartThresholdMs ?? 300000,
-				maxRestarts: params.v2.supervisor?.maxRestarts ?? 2,
-				checkIntervalMs: params.v2.supervisor?.checkIntervalMs ?? 30000,
-			},
-			planner: {
-				enabled: params.v2.planner?.enabled ?? false,
-				humanCheckpoint: params.v2.planner?.humanCheckpoint ?? false,
-				maxSelfReviewCycles: params.v2.planner?.maxSelfReviewCycles ?? 5,
-			},
-		} : undefined,
+		planner: {
+			enabled: params.planner?.enabled ?? false,
+			humanCheckpoint: params.planner?.humanCheckpoint ?? false,
+			maxSelfReviewCycles: params.planner?.maxSelfReviewCycles ?? 5,
+		},
+		selfReview: {
+			enabled: params.selfReview?.enabled ?? true,
+			maxCycles: params.selfReview?.maxCycles ?? 5,
+		},
+		supervisor: {
+			enabled: params.supervisor?.enabled ?? true,
+			nudgeThresholdMs: params.supervisor?.nudgeThresholdMs ?? 180000,
+			restartThresholdMs: params.supervisor?.restartThresholdMs ?? 300000,
+			maxRestarts: params.supervisor?.maxRestarts ?? 2,
+			checkIntervalMs: params.supervisor?.checkIntervalMs ?? 30000,
+		},
 	};
 
 	const obs = await ObservabilityContext.create(
@@ -732,7 +728,7 @@ export async function runCoordinationSession(options: CoordinationRunOptions): P
 			await runScoutPhaseWrapper(pipelineContext, pipelineConfig);
 		}
 
-		if (pipelineConfig.v2?.planner?.enabled) {
+		if (pipelineConfig.planner?.enabled) {
 			await runPlannerPhaseWrapper(pipelineContext, pipelineConfig);
 		}
 

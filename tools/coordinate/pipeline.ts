@@ -21,7 +21,7 @@ import { runPlannerPhase, createTaskQueueFromPlanner, runPlannerBackgroundReview
 import { runReviewPhase, type ReviewConfig, type ReviewResult } from "./phases/review.js";
 import { runFixPhase, type FixConfig } from "./phases/fix.js";
 import { ObservabilityContext } from "./observability/index.js";
-import type { V2Config, Task } from "./types.js";
+import type { Task, PlannerConfig, SelfReviewConfig, SupervisorConfig } from "./types.js";
 
 export interface PipelineConfig {
 	planPath: string;
@@ -37,7 +37,9 @@ export interface PipelineConfig {
 	costThresholds: CostThresholds;
 	pauseOnCostThreshold: boolean;
 	maxOutput?: OutputLimits;
-	v2?: Partial<V2Config>;
+	planner?: Partial<PlannerConfig>;
+	selfReview?: Partial<SelfReviewConfig>;
+	supervisor?: Partial<SupervisorConfig & { enabled: boolean }>;
 }
 
 export interface PipelineContext {
@@ -313,8 +315,7 @@ export async function runPlannerPhaseWrapper(
 	ctx: PipelineContext,
 	config: PipelineConfig,
 ): Promise<Task[]> {
-	const v2Config = config.v2;
-	if (!v2Config?.planner?.enabled) {
+	if (!config.planner?.enabled) {
 		return [];
 	}
 
@@ -325,8 +326,8 @@ export async function runPlannerPhaseWrapper(
 
 	try {
 		const plannerConfig: PlannerPhaseConfig = {
-			humanCheckpoint: v2Config.planner.humanCheckpoint,
-			maxSelfReviewCycles: v2Config.planner.maxSelfReviewCycles || 5,
+			humanCheckpoint: config.planner.humanCheckpoint,
+			maxSelfReviewCycles: config.planner.maxSelfReviewCycles || 5,
 			outputLimits: config.maxOutput,
 		};
 
