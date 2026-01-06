@@ -21,23 +21,22 @@ error() { echo -e "${RED}[x]${NC} $1"; exit 1; }
 uninstall() {
     log "Uninstalling pi-coordination..."
     
-    # Remove coordinate tool symlink
-    if [ -L "$PI_AGENT_DIR/tools/coordinate" ]; then
-        rm "$PI_AGENT_DIR/tools/coordinate"
-        log "Removed tools/coordinate symlink"
-    fi
-    
-    # Remove runner.ts symlink (careful - might be used by subagent)
-    if [ -L "$PI_AGENT_DIR/tools/subagent/runner.ts" ]; then
-        warn "tools/subagent/runner.ts is a symlink - removing"
-        warn "Note: You may need to restore the original runner.ts for subagent"
-        rm "$PI_AGENT_DIR/tools/subagent/runner.ts"
+    # Remove coordination extension symlink
+    if [ -L "$PI_AGENT_DIR/extensions/coordination" ]; then
+        rm "$PI_AGENT_DIR/extensions/coordination"
+        log "Removed extensions/coordination symlink"
     fi
     
     # Remove agent symlinks
     if [ -L "$PI_AGENT_DIR/agents/coordinator.md" ]; then
         rm "$PI_AGENT_DIR/agents/coordinator.md"
         log "Removed agents/coordinator.md symlink"
+    fi
+    
+    # Remove coordination agent directory symlinks
+    if [ -d "$PI_AGENT_DIR/agents/coordination" ]; then
+        rm -rf "$PI_AGENT_DIR/agents/coordination"
+        log "Removed agents/coordination directory"
     fi
     
     # Remove skill symlink
@@ -58,36 +57,39 @@ fi
 log "Installing pi-coordination..."
 
 # Ensure pi agent directories exist
-mkdir -p "$PI_AGENT_DIR/tools"
-mkdir -p "$PI_AGENT_DIR/tools/subagent"
+mkdir -p "$PI_AGENT_DIR/extensions"
 mkdir -p "$PI_AGENT_DIR/agents"
 mkdir -p "$PI_AGENT_DIR/skills"
 
-# Create coordinate tool symlink
-if [ -e "$PI_AGENT_DIR/tools/coordinate" ]; then
-    if [ -L "$PI_AGENT_DIR/tools/coordinate" ]; then
-        warn "tools/coordinate symlink exists, replacing..."
-        rm "$PI_AGENT_DIR/tools/coordinate"
-    else
-        error "tools/coordinate exists and is not a symlink. Please remove it first."
-    fi
-fi
-ln -s "$SCRIPT_DIR/tools/coordinate" "$PI_AGENT_DIR/tools/coordinate"
-log "Linked tools/coordinate"
+# Clean up legacy hooks/tools from pre-extensions installs
+LEGACY_PATHS=(
+    "$PI_AGENT_DIR/tools/coordinate"
+    "$PI_AGENT_DIR/tools/coord-output"
+    "$PI_AGENT_DIR/hooks/coordination-async-notify.ts"
+    "$PI_AGENT_DIR/hooks/coordination-async-notify"
+)
 
-# Create runner.ts symlink (shared with subagent)
-if [ -e "$PI_AGENT_DIR/tools/subagent/runner.ts" ]; then
-    if [ -L "$PI_AGENT_DIR/tools/subagent/runner.ts" ]; then
-        warn "tools/subagent/runner.ts symlink exists, replacing..."
-        rm "$PI_AGENT_DIR/tools/subagent/runner.ts"
+for legacy in "${LEGACY_PATHS[@]}"; do
+    if [ -L "$legacy" ]; then
+        rm "$legacy"
+        log "Removed legacy symlink: $legacy"
+    elif [ -e "$legacy" ]; then
+        warn "Legacy path exists (not a symlink): $legacy"
+        warn "Remove it manually to avoid load errors."
+    fi
+done
+
+# Create coordination extension symlink
+if [ -e "$PI_AGENT_DIR/extensions/coordination" ]; then
+    if [ -L "$PI_AGENT_DIR/extensions/coordination" ]; then
+        warn "extensions/coordination symlink exists, replacing..."
+        rm "$PI_AGENT_DIR/extensions/coordination"
     else
-        warn "tools/subagent/runner.ts exists as a file"
-        warn "Backing up to runner.ts.bak and replacing..."
-        mv "$PI_AGENT_DIR/tools/subagent/runner.ts" "$PI_AGENT_DIR/tools/subagent/runner.ts.bak"
+        error "extensions/coordination exists and is not a symlink. Please remove it first."
     fi
 fi
-ln -s "$SCRIPT_DIR/tools/runner.ts" "$PI_AGENT_DIR/tools/subagent/runner.ts"
-log "Linked tools/subagent/runner.ts"
+ln -s "$SCRIPT_DIR/extensions/coordination" "$PI_AGENT_DIR/extensions/coordination"
+log "Linked extensions/coordination"
 
 # Create coordinator agent symlink
 if [ -e "$PI_AGENT_DIR/agents/coordinator.md" ]; then
@@ -115,6 +117,21 @@ else
     log "Linked agents/worker.md"
 fi
 
+# Create coordination agent subdirectory for V2 agents (coordination/worker, coordination/scout, etc.)
+mkdir -p "$PI_AGENT_DIR/agents/coordination"
+log "Created agents/coordination directory"
+
+# Link all agents from the repo to coordination/ subdirectory
+for agent_file in "$SCRIPT_DIR/agents"/*.md; do
+    agent_name=$(basename "$agent_file")
+    target_path="$PI_AGENT_DIR/agents/coordination/$agent_name"
+    if [ -L "$target_path" ]; then
+        rm "$target_path"
+    fi
+    ln -s "$agent_file" "$target_path"
+    log "Linked agents/coordination/$agent_name"
+done
+
 # Create coordination skill symlink
 if [ -e "$PI_AGENT_DIR/skills/coordination" ]; then
     if [ -L "$PI_AGENT_DIR/skills/coordination" ]; then
@@ -130,5 +147,5 @@ log "Linked skills/coordination"
 log ""
 log "Installation complete!"
 log ""
-log "The coordinate tool is now available. Try:"
+log "The coordination extension is now available. Try:"
 log "  coordinate({ plan: './plan.md', agents: ['worker', 'worker'] })"

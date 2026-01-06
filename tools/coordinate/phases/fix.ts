@@ -1,6 +1,6 @@
 import { randomUUID } from "node:crypto";
 import type { ReviewIssue, WorkerStateFile } from "../types.js";
-import type { CustomToolAPI } from "@mariozechner/pi-coding-agent";
+import type { AgentRuntime } from "../../subagent/runner.js";
 import { FileBasedStorage } from "../state.js";
 import { spawnWorkerProcess, type WorkerHandle } from "../coordinator-tools/index.js";
 import type { ObservabilityContext } from "../observability/index.js";
@@ -29,7 +29,7 @@ export interface FixResult {
 }
 
 export async function runFixPhase(
-	pi: CustomToolAPI,
+	runtime: AgentRuntime,
 	coordDir: string,
 	issues: ReviewIssue[],
 	workerStates: WorkerStateFile[],
@@ -92,7 +92,7 @@ export async function runFixPhase(
 				identity: fixIdentity,
 			},
 			coordDir,
-			pi.cwd,
+			runtime.cwd,
 			storage,
 			undefined,
 			obs,

@@ -1,8 +1,14 @@
+---
+name: coordination
+description: Multi-agent coordination for parallel plan execution with the coordinate and coord_output tools.
+---
+
 # Coordination Skill
 
 Multi-agent coordination for parallel plan execution.
 
 **YOU HAVE THE `coordinate` TOOL AVAILABLE.** When asked to execute a plan with multiple workers, run tasks in parallel, or coordinate multi-step work - USE THE `coordinate` TOOL, not `subagent`.
+**You also have `coord_output` available** to read full worker outputs from artifacts when the coordinate tool truncates its preview.
 
 ## When to Use `coordinate`
 
@@ -20,8 +26,25 @@ Use the `coordinate` tool when:
 
 ```typescript
 coordinate({
-  plan: string,   // Path to markdown plan file
-  agents: string[] // Array of agent types, e.g. ["worker", "worker", "worker"]
+  plan: string,               // Path to markdown plan file
+  agents: string[],           // Agent types, e.g. ["worker", "worker", "worker"]
+  async?: boolean,            // Run in background (default false)
+  asyncResultsDir?: string,   // Override async results dir (default /tmp/pi-async-coordination-results)
+  maxFixCycles?: number,      // Default 3
+  sameIssueLimit?: number,    // Default 2
+  reviewModel?: string,       // Override review model
+  checkTests?: boolean,       // Default true
+  maxOutput?: { bytes?: number; lines?: number }, // Truncate returned output, full output in artifacts
+  costThresholds?: { warn: number; pause: number; hard: number },
+  pauseOnCostThreshold?: boolean,
+  validate?: boolean,
+  validateStream?: boolean
+})
+
+coord_output({
+  ids: string[],              // Worker IDs or labels (e.g. ["worker-04ea", "scout", "review"])
+  coordDir?: string,          // Defaults to PI_COORDINATION_DIR
+  format?: "raw" | "json" | "stripped"
 })
 ```
 
@@ -131,6 +154,13 @@ Create `src/store.ts` with CRUD operations. Imports Todo from types.
 
 ## Step 3: Create Handlers
 Create `src/handlers.ts` with HTTP handlers. Imports from store.
+```
+
+## Output Retrieval
+
+When results are truncated, use:
+```
+coord_output({ ids: ["worker-04ea"] })
 ```
 
 ## Limitations

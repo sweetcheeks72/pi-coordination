@@ -1,6 +1,7 @@
 import { randomUUID } from "node:crypto";
 import * as fs from "node:fs/promises";
-import type { CustomAgentTool, CustomToolFactory } from "@mariozechner/pi-coding-agent";
+import type { ExtensionAPI, ExtensionContext, ToolDefinition } from "@mariozechner/pi-coding-agent";
+import type { AssistantMessage } from "@mariozechner/pi-ai";
 import { Type } from "@sinclair/typebox";
 import { FileBasedStorage } from "../state.js";
 import { createWorkerObservability } from "../observability/index.js";
@@ -9,7 +10,116 @@ function sleep(ms: number): Promise<void> {
 	return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
-const factory: CustomToolFactory = (pi) => {
+function registerWorkerEventHandlers(
+	pi: ExtensionAPI,
+	storage: FileBasedStorage,
+	identity: string,
+	workerId: string,
+): void {
+	pi.on("tool_call", async (event) => {
+		const { toolName, input } = event;
+
+		if (toolName === "edit" || toolName === "write") {
+			const filePath = input.path as string | undefined;
+			if (filePath) {
+				const reservation = await storage.checkReservation(filePath);
+				if (reservation && reservation.agent !== identity && reservation.exclusive) {
+					const expiresIn = Math.max(0, Math.floor((reservation.expiresAt - Date.now()) / 1000));
+					return {
+						block: true,
+						reason:
+							`File exclusively reserved by ${reservation.agent}: ${filePath}\n` +
+							`Reason: ${reservation.reason}\n` +
+							`Expires in: ${expiresIn}s\n\n` +
+							`Options:\n` +
+							`- Wait for the reservation to expire\n` +
+							`- Send a message to ${reservation.agent} requesting early release\n` +
+							`- Work on different files that aren't reserved`,
+					};
+				}
+			}
+		}
+
+		const filePath = (toolName === "edit" || toolName === "write" || toolName === "read")
+			? (input.path as string | undefined) ?? null
+			: null;
+
+		try {
+			await storage.updateWorkerState(workerId, (s) => ({
+				...s,
+				currentTool: toolName,
+				currentFile: filePath,
+			}));
+
+			await storage.appendEvent({
+				type: "tool_call",
+				workerId,
+				tool: toolName,
+				file: filePath ?? undefined,
+				timestamp: Date.now(),
+			});
+		} catch {}
+	});
+
+	pi.on("tool_result", async (event) => {
+		const filePath = (event.toolName === "edit" || event.toolName === "write" || event.toolName === "read")
+			? (event.input.path as string | undefined) ?? undefined
+			: undefined;
+
+		try {
+			await storage.appendEvent({
+				type: "tool_result",
+				workerId,
+				tool: event.toolName,
+				file: filePath,
+				success: !event.isError,
+				timestamp: Date.now(),
+			});
+
+			const isFileOp = (event.toolName === "edit" || event.toolName === "write") && !event.isError;
+
+			await storage.updateWorkerState(workerId, (s) => ({
+				...s,
+				currentTool: null,
+				currentFile: filePath ?? s.currentFile,
+				filesModified: isFileOp && filePath
+					? [...new Set([...s.filesModified, filePath])]
+					: s.filesModified,
+			}));
+		} catch {}
+	});
+
+	pi.on("turn_end", async (event) => {
+		if (event.message.role === "assistant") {
+			const msg = event.message as AssistantMessage;
+			const usage = msg.usage;
+			if (usage) {
+				try {
+					await storage.updateWorkerState(workerId, (state) => ({
+						...state,
+						usage: {
+							input: state.usage.input + usage.input,
+							output: state.usage.output + usage.output,
+							cost: state.usage.cost + usage.cost.total,
+							turns: state.usage.turns + 1,
+						},
+					}));
+				} catch {}
+			}
+		}
+	});
+
+	pi.on("agent_end", async () => {
+		try {
+			await storage.updateWorkerState(workerId, (s) => ({
+				...s,
+				completedAt: s.completedAt ?? Date.now(),
+			}));
+		} catch {}
+	});
+}
+
+export function registerWorkerTools(pi: ExtensionAPI): void {
 	const coordDir = process.env.PI_COORDINATION_DIR;
 	const identity = process.env.PI_AGENT_IDENTITY;
 	const workerId = process.env.PI_WORKER_ID;
@@ -19,10 +129,18 @@ const factory: CustomToolFactory = (pi) => {
 	}
 
 	const storage = new FileBasedStorage(coordDir);
-	const obs = createWorkerObservability(coordDir, process.env.PI_TRACE_ID, identity, pi.cwd);
+	let obs: ReturnType<typeof createWorkerObservability> | null = null;
+	const getObs = (ctx: ExtensionContext) => {
+		if (!obs) {
+			obs = createWorkerObservability(coordDir, process.env.PI_TRACE_ID, identity, ctx.cwd);
+		}
+		return obs;
+	};
 	let lastMessageCheck = Date.now();
 
-	const tools: CustomAgentTool[] = [
+	registerWorkerEventHandlers(pi, storage, identity, workerId);
+
+	const tools: ToolDefinition[] = [
 		{
 			name: "send_message",
 			label: "Send Message",
@@ -32,7 +150,8 @@ const factory: CustomToolFactory = (pi) => {
 				content: Type.String({ description: "Message content" }),
 				type: Type.String({ description: "Message type: 'handover', 'clarification', 'response', 'status', or 'conflict'" }),
 			}),
-			async execute(_toolCallId, params) {
+			async execute(_toolCallId, params, _onUpdate, ctx) {
+				const obs = getObs(ctx);
 				const msgId = randomUUID();
 				const msgType = params.type as "handover" | "clarification" | "response" | "status" | "conflict";
 				const msg = {
@@ -67,7 +186,7 @@ const factory: CustomToolFactory = (pi) => {
 			parameters: Type.Object({
 				since: Type.Optional(Type.Number({ description: "Only get messages since this timestamp" })),
 			}),
-			async execute(_toolCallId, params) {
+			async execute(_toolCallId, params, _onUpdate, _ctx) {
 				const messages = await storage.getMessages({
 					to: identity,
 					since: params.since || lastMessageCheck,
@@ -99,7 +218,8 @@ const factory: CustomToolFactory = (pi) => {
 				ttl: Type.Number({ description: "Reservation time-to-live in seconds" }),
 				reason: Type.String({ description: "Why you need these files" }),
 			}),
-			async execute(_toolCallId, params) {
+			async execute(_toolCallId, params, _onUpdate, ctx) {
+				const obs = getObs(ctx);
 				const reservationId = randomUUID();
 
 				await obs?.events.emit({
@@ -163,7 +283,8 @@ const factory: CustomToolFactory = (pi) => {
 			parameters: Type.Object({
 				patterns: Type.Array(Type.String(), { description: "File patterns to release" }),
 			}),
-			async execute(_toolCallId, params) {
+			async execute(_toolCallId, params, _onUpdate, ctx) {
+				const obs = getObs(ctx);
 				const reservations = await storage.getActiveReservations();
 				const myReservations = reservations.filter(r => r.agent === identity);
 
@@ -191,7 +312,8 @@ const factory: CustomToolFactory = (pi) => {
 				signature: Type.Optional(Type.String({ description: "Actual signature/definition" })),
 				file: Type.Optional(Type.String({ description: "File where it's defined" })),
 			}),
-			async execute(_toolCallId, params) {
+			async execute(_toolCallId, params, _onUpdate, ctx) {
+				const obs = getObs(ctx);
 				let waiters: string[] = [];
 				let contractId: string | undefined;
 
@@ -247,7 +369,8 @@ const factory: CustomToolFactory = (pi) => {
 				result: Type.String({ description: "Summary of what was accomplished" }),
 				filesModified: Type.Optional(Type.Array(Type.String(), { description: "List of modified files" })),
 			}),
-			async execute(_toolCallId, params) {
+			async execute(_toolCallId, params, _onUpdate, ctx) {
+				const obs = getObs(ctx);
 				await storage.updateWorkerState(workerId, (w) => ({
 					...w,
 					status: "complete",
@@ -302,7 +425,8 @@ const factory: CustomToolFactory = (pi) => {
 				timeout: Type.Optional(Type.Number({ description: "Timeout in seconds (default: 60)" })),
 				defaultOption: Type.Optional(Type.Number({ description: "Index of default option (0-based)" })),
 			}),
-			async execute(_toolCallId, params) {
+			async execute(_toolCallId, params, _onUpdate, ctx) {
+				const obs = getObs(ctx);
 				const id = randomUUID();
 				const timeout = params.timeout || 60;
 
@@ -373,7 +497,8 @@ const factory: CustomToolFactory = (pi) => {
 				item: Type.String({ description: "Contract item name to wait for" }),
 				timeout: Type.Optional(Type.Number({ description: "Timeout in seconds (default: 300)" })),
 			}),
-			async execute(_toolCallId, params) {
+			async execute(_toolCallId, params, _onUpdate, ctx) {
+				const obs = getObs(ctx);
 				const timeout = params.timeout || 300;
 				const deadline = Date.now() + timeout * 1000;
 				const waitStartTime = Date.now();
@@ -485,7 +610,7 @@ const factory: CustomToolFactory = (pi) => {
 				step: Type.Number({ description: "Step number now being worked on" }),
 				status: Type.Optional(Type.String({ description: "Status update message" })),
 			}),
-			async execute(_toolCallId, params) {
+			async execute(_toolCallId, params, _onUpdate, _ctx) {
 				await storage.updateWorkerState(workerId, (w) => {
 					const completedSteps = [...w.completedSteps];
 					if (w.currentStep !== null && !completedSteps.includes(w.currentStep)) {
@@ -521,7 +646,8 @@ const factory: CustomToolFactory = (pi) => {
 				reason: Type.String({ description: "Why this deviation is necessary" }),
 				affectsOthers: Type.Boolean({ description: "Could this affect other workers?" }),
 			}),
-			async execute(_toolCallId, params) {
+			async execute(_toolCallId, params, _onUpdate, ctx) {
+				const obs = getObs(ctx);
 				const deviationObj = {
 					description: params.deviation,
 					reason: params.reason,
@@ -562,7 +688,7 @@ const factory: CustomToolFactory = (pi) => {
 			label: "Read Plan",
 			description: "Read the full implementation plan (if not already in your context)",
 			parameters: Type.Object({}),
-			async execute() {
+			async execute(_toolCallId, _params, _onUpdate, _ctx) {
 				const state = await storage.getState();
 				const content = await fs.readFile(state.planPath, "utf-8");
 				return {
@@ -570,9 +696,107 @@ const factory: CustomToolFactory = (pi) => {
 				};
 			},
 		},
+
+		{
+			name: "add_discovered_task",
+			label: "Add Discovered Task",
+			description: "Add a task you discovered during implementation. It will be reviewed by the planner before becoming claimable.",
+			parameters: Type.Object({
+				id: Type.String({ description: "Unique task ID (e.g., 'TASK-DISC-01')" }),
+				description: Type.String({ description: "What needs to be done" }),
+				priority: Type.Number({ description: "Priority (0=critical, 1=high, 2=medium, 3=low)" }),
+				files: Type.Optional(Type.Array(Type.String(), { description: "Files that need modification" })),
+				dependsOn: Type.Optional(Type.Array(Type.String(), { description: "Task IDs this depends on" })),
+				reason: Type.String({ description: "Why this task is needed" }),
+			}),
+			async execute(_toolCallId, params, _onUpdate, ctx) {
+				const obs = getObs(ctx);
+				const { TaskQueueManager } = await import("../task-queue.js");
+				const taskQueue = new TaskQueueManager(coordDir);
+
+				const task = await taskQueue.addDiscoveredTask({
+					id: params.id,
+					description: params.description,
+					priority: params.priority,
+					files: params.files,
+					dependsOn: params.dependsOn,
+					discoveredFrom: workerId,
+					acceptanceCriteria: [`Discovered: ${params.reason}`],
+				});
+
+				await obs?.events.emit({
+					type: "task_discovered",
+					taskId: task.id,
+					discoveredBy: identity,
+					discoveredFrom: workerId,
+				});
+
+				await storage.sendMessage({
+					id: randomUUID(),
+					from: identity,
+					to: "coordinator",
+					type: "status",
+					content: `Discovered new task: ${params.id} - ${params.description}\nReason: ${params.reason}`,
+					timestamp: Date.now(),
+				});
+
+				return {
+					content: [{ type: "text", text: `Task ${params.id} added for planner review` }],
+					details: { task },
+				};
+			},
+		},
+
+		{
+			name: "share_discovery",
+			label: "Share Discovery",
+			description: "Share a learning or discovery with other workers",
+			parameters: Type.Object({
+				topic: Type.String({ description: "Topic/title of the discovery" }),
+				content: Type.String({ description: "Details of what you discovered" }),
+				importance: Type.String({ description: "Importance level: 'fyi', 'important', or 'critical'" }),
+			}),
+			async execute(_toolCallId, params, _onUpdate, ctx) {
+				const obs = getObs(ctx);
+				const { appendDiscovery } = await import("../progress.js");
+
+				const importance = params.importance as "fyi" | "important" | "critical";
+
+				await appendDiscovery(coordDir, {
+					id: randomUUID(),
+					workerId,
+					workerIdentity: identity,
+					topic: params.topic,
+					content: params.content,
+					importance,
+					timestamp: Date.now(),
+				});
+
+				await obs?.events.emit({
+					type: "discovery_shared",
+					discoveryId: randomUUID(),
+					workerId,
+					topic: params.topic,
+					importance,
+				});
+
+				await storage.sendMessage({
+					id: randomUUID(),
+					from: identity,
+					to: "all",
+					type: "status",
+					content: `[${importance.toUpperCase()}] ${params.topic}: ${params.content}`,
+					timestamp: Date.now(),
+				});
+
+				return {
+					content: [{ type: "text", text: `Discovery shared: ${params.topic}` }],
+				};
+			},
+		},
 	];
 
-	return tools;
-};
-
-export default factory;
+	for (const tool of tools) {
+		pi.registerTool(tool);
+	}
+}

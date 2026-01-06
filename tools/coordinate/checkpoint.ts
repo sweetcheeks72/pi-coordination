@@ -3,7 +3,7 @@ import * as path from "node:path";
 import type { PipelinePhase, PipelineState, Checkpoint, CostState, ReviewIssue } from "./types.js";
 import { FileBasedStorage } from "./state.js";
 
-export const PHASE_ORDER: PipelinePhase[] = ["scout", "coordinator", "workers", "review", "fixes", "complete"];
+export const PHASE_ORDER: PipelinePhase[] = ["scout", "planner", "coordinator", "workers", "review", "fixes", "complete"];
 
 export function getNextPhase(currentPhase: PipelinePhase): PipelinePhase {
 	const idx = PHASE_ORDER.indexOf(currentPhase);

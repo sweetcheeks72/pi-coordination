@@ -12,6 +12,25 @@ export interface UsageStats {
 	turns: number;
 }
 
+export interface OutputLimits {
+	bytes?: number;
+	lines?: number;
+}
+
+export interface OutputMeta {
+	byteCount: number;
+	lineCount: number;
+	charCount: number;
+}
+
+export interface ArtifactPaths {
+	dir: string;
+	inputPath: string;
+	outputPath: string;
+	jsonlPath: string;
+	metadataPath: string;
+}
+
 export interface SingleResult {
 	agent: string;
 	agentSource: "user" | "project" | "unknown";
@@ -24,6 +43,17 @@ export interface SingleResult {
 	stopReason?: string;
 	errorMessage?: string;
 	step?: number;
+	output?: string;
+	truncated?: boolean;
+	outputMeta?: OutputMeta;
+	artifactPaths?: ArtifactPaths;
+	jsonlEvents?: string[];
+	durationMs?: number;
+	tokens?: number;
+	toolCount?: number;
+	currentTool?: string | null;
+	currentToolArgs?: string | null;
+	recentTools?: Array<{ tool: string; args: string; endMs: number }>;
 }
 
 export interface SubagentDetails {

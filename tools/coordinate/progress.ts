@@ -1,9 +1,12 @@
+import * as fs from "node:fs/promises";
+import * as fsSync from "node:fs";
 import * as path from "node:path";
 import type {
 	PipelineState,
 	CoordinationState,
 	WorkerStateFile,
 	CoordinationEvent,
+	Discovery,
 } from "./types.js";
 import type { ReviewResult } from "./phases/review.js";
 
@@ -116,4 +119,93 @@ export function generateProgressDoc(
 	}
 
 	return lines.join("\n");
+}
+
+export async function appendDiscovery(coordDir: string, discovery: Discovery): Promise<void> {
+	const lockPath = path.join(coordDir, "discoveries.lock");
+	const discoveriesPath = path.join(coordDir, "discoveries.json");
+
+	const maxRetries = 50;
+	const retryDelay = 100;
+
+	for (let i = 0; i < maxRetries; i++) {
+		try {
+			const fd = fsSync.openSync(lockPath, fsSync.constants.O_CREAT | fsSync.constants.O_EXCL | fsSync.constants.O_RDWR);
+			fsSync.closeSync(fd);
+			break;
+		} catch (err: unknown) {
+			if ((err as NodeJS.ErrnoException).code === "EEXIST") {
+				await new Promise((r) => setTimeout(r, retryDelay));
+				if (i === maxRetries - 1) throw new Error("Failed to acquire discoveries.json lock");
+			} else {
+				throw err;
+			}
+		}
+	}
+
+	try {
+		let discoveries: Discovery[] = [];
+		try {
+			const content = await fs.readFile(discoveriesPath, "utf-8");
+			discoveries = JSON.parse(content);
+		} catch {}
+
+		discoveries.push(discovery);
+		await fs.writeFile(discoveriesPath, JSON.stringify(discoveries, null, 2));
+
+		const progressPath = path.join(coordDir, "PROGRESS.md");
+		let progressContent = "";
+		try {
+			progressContent = await fs.readFile(progressPath, "utf-8");
+		} catch {}
+
+		const discoveriesSection = generateDiscoveriesSection(discoveries);
+
+		if (progressContent.includes("## Discoveries (Shared Knowledge)")) {
+			progressContent = progressContent.replace(
+				/## Discoveries \(Shared Knowledge\)[\s\S]*?(?=\n## |$)/,
+				discoveriesSection,
+			);
+		} else {
+			progressContent = progressContent + "\n" + discoveriesSection;
+		}
+
+		await fs.writeFile(progressPath, progressContent);
+	} finally {
+		try {
+			fsSync.unlinkSync(lockPath);
+		} catch {}
+	}
+}
+
+function generateDiscoveriesSection(discoveries: Discovery[]): string {
+	const lines: string[] = [];
+	lines.push(`## Discoveries (Shared Knowledge)`);
+	lines.push(``);
+
+	const sorted = [...discoveries].sort((a, b) => {
+		const importanceOrder = { critical: 0, important: 1, fyi: 2 };
+		return importanceOrder[a.importance] - importanceOrder[b.importance];
+	});
+
+	for (const d of sorted) {
+		const time = new Date(d.timestamp).toISOString().slice(11, 19);
+		const tag = d.importance === "critical" ? "[CRITICAL]" : d.importance === "important" ? "[IMPORTANT]" : "[FYI]";
+		lines.push(`### ${tag} ${d.topic}`);
+		lines.push(`- **From:** ${d.workerIdentity} at ${time}`);
+		lines.push(`- ${d.content}`);
+		lines.push(``);
+	}
+
+	return lines.join("\n");
+}
+
+export async function getDiscoveries(coordDir: string): Promise<Discovery[]> {
+	const discoveriesPath = path.join(coordDir, "discoveries.json");
+	try {
+		const content = await fs.readFile(discoveriesPath, "utf-8");
+		return JSON.parse(content);
+	} catch {
+		return [];
+	}
 }

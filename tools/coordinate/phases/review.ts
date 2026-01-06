@@ -1,11 +1,14 @@
 import { exec } from "node:child_process";
+import * as fs from "node:fs/promises";
+import * as path from "node:path";
 import { promisify } from "node:util";
 import { randomUUID } from "node:crypto";
 import { runSingleAgent } from "../../subagent/runner.js";
 import { discoverAgents } from "../../subagent/agents.js";
-import { getFinalOutput } from "../../subagent/render.js";
+import { getResultOutput } from "../../subagent/render.js";
 import type { ReviewIssue, WorkerStateFile } from "../types.js";
-import type { CustomToolAPI } from "@mariozechner/pi-coding-agent";
+import type { AgentRuntime } from "../../subagent/runner.js";
+import type { OutputLimits } from "../../subagent/types.js";
 
 const execAsync = promisify(exec);
 
@@ -13,6 +16,7 @@ export interface ReviewConfig {
 	model?: string;
 	checkTests: boolean;
 	verifyPlanGoals: boolean;
+	outputLimits?: OutputLimits;
 }
 
 export interface ReviewResult {
@@ -25,15 +29,15 @@ export interface ReviewResult {
 }
 
 export async function runReviewPhase(
-	pi: CustomToolAPI,
-	_coordDir: string,
+	runtime: AgentRuntime,
+	coordDir: string,
 	planContent: string,
 	workerStates: WorkerStateFile[],
 	config: ReviewConfig,
 	signal?: AbortSignal,
 ): Promise<ReviewResult> {
 	const startTime = Date.now();
-	const { agents } = discoverAgents(pi.cwd, "user");
+	const { agents } = discoverAgents(runtime.cwd, "user");
 
 	const modifiedFiles = [...new Set(workerStates.flatMap(w => w.filesModified))];
 	
@@ -41,7 +45,7 @@ export async function runReviewPhase(
 	if (modifiedFiles.length > 0) {
 		try {
 			const quotedFiles = modifiedFiles.map(f => `"${f.replace(/"/g, '\\"')}"`).join(" ");
-			const { stdout } = await execAsync(`git diff HEAD -- ${quotedFiles}`, { cwd: pi.cwd });
+			const { stdout } = await execAsync(`git diff HEAD -- ${quotedFiles}`, { cwd: runtime.cwd });
 			gitDiff = stdout;
 		} catch {
 			gitDiff = "(git diff unavailable)";
@@ -98,18 +102,22 @@ Return a JSON object (no markdown code fences, just raw JSON):
 		: agents;
 
 	const result = await runSingleAgent(
-		pi,
+		runtime,
 		agentsWithOverride,
 		"code-reviewer",
 		task,
-		pi.cwd,
+		runtime.cwd,
 		undefined,
 		signal,
 		undefined,
 		(results) => ({ mode: "single", results, agentScope: "user", projectAgentsDir: null }),
+		{ outputLimits: config.outputLimits, artifactsDir: path.join(coordDir, "artifacts"), artifactLabel: "review" },
 	);
 
-	const output = getFinalOutput(result.messages);
+	let output = getResultOutput(result);
+	if (result.truncated && result.artifactPaths?.outputPath) {
+		output = await fs.readFile(result.artifactPaths.outputPath, "utf-8").catch(() => output);
+	}
 	let parsed: { allPassing: boolean; summary: string; issues: Partial<ReviewIssue>[] };
 	
 	try {

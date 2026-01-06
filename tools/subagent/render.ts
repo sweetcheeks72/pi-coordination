@@ -121,6 +121,10 @@ export function getFinalOutput(messages: Message[]): string {
 	return "";
 }
 
+export function getResultOutput(result: SingleResult): string {
+	return result.output ?? getFinalOutput(result.messages);
+}
+
 export function getDisplayItems(messages: Message[]): DisplayItem[] {
 	const items: DisplayItem[] = [];
 	for (const msg of messages) {
@@ -236,7 +240,7 @@ export function renderResult(
 		const isError = r.exitCode !== 0 || r.stopReason === "error" || r.stopReason === "aborted";
 		const icon = isError ? theme.fg("error", "✗") : theme.fg("success", "✓");
 		const displayItems = getDisplayItems(r.messages);
-		const finalOutput = getFinalOutput(r.messages);
+		const finalOutput = getResultOutput(r);
 
 		if (expanded) {
 			const container = new Container();
@@ -309,7 +313,7 @@ export function renderResult(
 			for (const r of details.results) {
 				const rIcon = r.exitCode === 0 ? theme.fg("success", "✓") : theme.fg("error", "✗");
 				const displayItems = getDisplayItems(r.messages);
-				const finalOutput = getFinalOutput(r.messages);
+				const finalOutput = getResultOutput(r);
 
 				container.addChild(new Spacer(1));
 				container.addChild(
@@ -387,7 +391,7 @@ export function renderResult(
 			for (const r of details.results) {
 				const rIcon = r.exitCode === 0 ? theme.fg("success", "✓") : theme.fg("error", "✗");
 				const displayItems = getDisplayItems(r.messages);
-				const finalOutput = getFinalOutput(r.messages);
+				const finalOutput = getResultOutput(r);
 
 				container.addChild(new Spacer(1));
 				container.addChild(new Text(`${theme.fg("muted", "─── ") + theme.fg("accent", r.agent)} ${rIcon}`, 0, 0));

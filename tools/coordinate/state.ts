@@ -59,6 +59,9 @@ export class FileBasedStorage {
 		await fs.mkdir(path.join(this._coordDir, "messages"), { recursive: true });
 		await fs.mkdir(path.join(this._coordDir, "reservations"), { recursive: true });
 		await fs.mkdir(path.join(this._coordDir, "escalation-responses"), { recursive: true });
+		await fs.mkdir(path.join(this._coordDir, "inputs"), { recursive: true });
+		await fs.mkdir(path.join(this._coordDir, "outputs"), { recursive: true });
+		await fs.mkdir(path.join(this._coordDir, "artifacts"), { recursive: true });
 		const eventsPath = path.join(this._coordDir, "events.jsonl");
 		const escPath = path.join(this._coordDir, "escalations.jsonl");
 		try {

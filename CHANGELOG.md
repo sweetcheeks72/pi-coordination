@@ -24,6 +24,20 @@ All notable changes to pi-coordination.
 
 ---
 
+## 2026-01-05
+
+### Added
+- Extensions-first integration for coordinator/worker/coord_output
+- Async coordination runner with result files and durable `coordDir/async/status.json`
+- Artifacts + output truncation helpers for full-output recovery
+- Async TUI widget for idle status updates
+
+### Changed
+- Installation now cleans up legacy hooks/tools symlinks
+- README updated for async options, artifacts, and new file layout
+
+---
+
 ## 2024-12-31
 
 ### Added

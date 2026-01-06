@@ -8,6 +8,7 @@ import { DecisionLogger } from "./decisions.js";
 import { ResourceTracker } from "./resources.js";
 import { ErrorTracker } from "./errors.js";
 import { CausalityTracker } from "./causality.js";
+import { LlmLogger } from "./llm.js";
 import type { ActorType } from "./types.js";
 
 export class ObservabilityContext {
@@ -18,6 +19,7 @@ export class ObservabilityContext {
 	readonly resources: ResourceTracker;
 	readonly errors: ErrorTracker;
 	readonly causality: CausalityTracker;
+	readonly llm: LlmLogger;
 
 	private constructor(
 		public readonly traceId: string,
@@ -33,6 +35,7 @@ export class ObservabilityContext {
 		this.resources = new ResourceTracker(coordDir, traceId);
 		this.errors = new ErrorTracker(coordDir, traceId);
 		this.causality = new CausalityTracker(coordDir, traceId);
+		this.llm = new LlmLogger(coordDir, traceId);
 	}
 
 	static async create(
@@ -88,4 +91,5 @@ export { DecisionLogger } from "./decisions.js";
 export { ResourceTracker } from "./resources.js";
 export { ErrorTracker } from "./errors.js";
 export { CausalityTracker } from "./causality.js";
+export { LlmLogger } from "./llm.js";
 export * from "./types.js";

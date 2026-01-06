@@ -53,7 +53,7 @@ function parseFrontmatter(content: string): { frontmatter: Record<string, string
 	return { frontmatter, body };
 }
 
-function loadAgentsFromDir(dir: string, source: "user" | "project"): AgentConfig[] {
+function loadAgentsFromDir(dir: string, source: "user" | "project", prefix = ""): AgentConfig[] {
 	const agents: AgentConfig[] = [];
 
 	if (!fs.existsSync(dir)) {
@@ -68,13 +68,20 @@ function loadAgentsFromDir(dir: string, source: "user" | "project"): AgentConfig
 	}
 
 	for (const entry of entries) {
+		const fullPath = path.join(dir, entry.name);
+
+		if (entry.isDirectory()) {
+			const subPrefix = prefix ? `${prefix}/${entry.name}` : entry.name;
+			agents.push(...loadAgentsFromDir(fullPath, source, subPrefix));
+			continue;
+		}
+
 		if (!entry.name.endsWith(".md")) continue;
 		if (!entry.isFile() && !entry.isSymbolicLink()) continue;
 
-		const filePath = path.join(dir, entry.name);
 		let content: string;
 		try {
-			content = fs.readFileSync(filePath, "utf-8");
+			content = fs.readFileSync(fullPath, "utf-8");
 		} catch {
 			continue;
 		}
@@ -90,14 +97,17 @@ function loadAgentsFromDir(dir: string, source: "user" | "project"): AgentConfig
 			.map((t) => t.trim())
 			.filter(Boolean);
 
+		const baseName = entry.name.replace(/\.md$/, "");
+		const agentName = prefix ? `${prefix}/${baseName}` : frontmatter.name;
+
 		agents.push({
-			name: frontmatter.name,
+			name: agentName,
 			description: frontmatter.description,
 			tools: tools && tools.length > 0 ? tools : undefined,
 			model: frontmatter.model,
 			systemPrompt: body,
 			source,
-			filePath,
+			filePath: fullPath,
 		});
 	}
 

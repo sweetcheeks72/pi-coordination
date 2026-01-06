@@ -96,6 +96,12 @@ export interface WorkerStateFile {
 		cost: number;
 		turns: number;
 	};
+	toolCount?: number;
+	tokens?: number;
+	durationMs?: number;
+	recentTools?: Array<{ tool: string; args: string; endMs: number }>;
+	lastOutput?: string;
+	artifactsDir?: string;
 	filesModified: string[];
 	blockers: string[];
 	errorType: string | null;
@@ -145,6 +151,7 @@ export interface CoordinationResult {
 
 export type PipelinePhase =
 	| "scout"
+	| "planner"
 	| "coordinator"
 	| "workers"
 	| "review"
@@ -250,4 +257,132 @@ export interface ModelConfig {
 	coordinator?: string;
 	worker?: string;
 	reviewer?: string;
+	planner?: string;
+}
+
+export type TaskStatus =
+	| "pending_review"
+	| "pending"
+	| "blocked"
+	| "claimed"
+	| "complete"
+	| "failed"
+	| "rejected";
+
+export interface Task {
+	id: string;
+	description: string;
+	priority: number;
+	status: TaskStatus;
+	files?: string[];
+	creates?: string[];
+	dependsOn?: string[];
+	acceptanceCriteria?: string[];
+	claimedBy?: string;
+	claimedAt?: number;
+	completedAt?: number;
+	completedBy?: string;
+	restartCount?: number;
+	failureReason?: string;
+	discoveredFrom?: string;
+	reviewed?: boolean;
+	reviewedAt?: number;
+	reviewResult?: "ok" | "modified" | "rejected";
+	reviewNotes?: string;
+}
+
+export interface TaskQueue {
+	version: "2.0";
+	planPath: string;
+	planHash: string;
+	createdAt: number;
+	tasks: Task[];
+}
+
+export type A2AMessageType =
+	| "file_release_request"
+	| "file_release_response"
+	| "discovery"
+	| "task_handoff"
+	| "help_request"
+	| "status_update"
+	| "completion_notice";
+
+export interface A2AMessage {
+	id: string;
+	from: string;
+	to: string | "all";
+	timestamp: number;
+	type: A2AMessageType;
+	payload: A2APayload;
+	inReplyTo?: string;
+}
+
+export type A2APayload =
+	| { type: "file_release_request"; file: string; reason: string; urgency: "low" | "medium" | "high" }
+	| { type: "file_release_response"; file: string; granted: boolean; eta?: number; reason?: string }
+	| { type: "discovery"; topic: string; content: string; importance: "fyi" | "important" | "critical" }
+	| { type: "task_handoff"; taskId: string; reason: string; context: string }
+	| { type: "help_request"; taskId: string; blocker: string; needsFrom?: string }
+	| { type: "status_update"; taskId: string; progress: number; eta?: number }
+	| { type: "completion_notice"; taskId: string; filesModified: string[] };
+
+export type NudgeType = "wrap_up" | "restart" | "abort";
+
+export interface NudgePayload {
+	type: NudgeType;
+	message: string;
+	timestamp: number;
+}
+
+export interface SupervisorConfig {
+	nudgeThresholdMs: number;
+	restartThresholdMs: number;
+	maxRestarts: number;
+	checkIntervalMs: number;
+}
+
+export interface PlannerReviewResult {
+	taskId: string;
+	approved: boolean;
+	modified: boolean;
+	modifications?: Partial<Task>;
+	reason?: string;
+}
+
+export interface PlannerConfig {
+	enabled: boolean;
+	humanCheckpoint: boolean;
+	maxSelfReviewCycles: number;
+}
+
+export interface SelfReviewConfig {
+	enabled: boolean;
+	maxCycles: number;
+}
+
+export interface V2Config {
+	selfReview: SelfReviewConfig;
+	supervisor: SupervisorConfig & { enabled: boolean };
+	planner: PlannerConfig;
+}
+
+export type V2PipelinePhase =
+	| "scout"
+	| "planner"
+	| "coordinator"
+	| "workers"
+	| "review"
+	| "fixes"
+	| "complete"
+	| "failed";
+
+export interface Discovery {
+	id: string;
+	workerId: string;
+	workerIdentity: string;
+	topic: string;
+	content: string;
+	importance: "fyi" | "important" | "critical";
+	timestamp: number;
 }

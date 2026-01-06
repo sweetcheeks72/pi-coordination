@@ -1,7 +1,7 @@
 import * as fs from "node:fs/promises";
 import * as path from "node:path";
 import type { AgentToolResult } from "@mariozechner/pi-agent-core";
-import type { CustomToolAPI } from "@mariozechner/pi-coding-agent";
+import type { AgentRuntime } from "../subagent/runner.js";
 import type {
 	PipelinePhase,
 	PipelineState,
@@ -12,13 +12,16 @@ import type {
 	WorkerStateFile,
 	ReviewIssue,
 } from "./types.js";
+import type { OutputLimits } from "../subagent/types.js";
 import { FileBasedStorage } from "./state.js";
 import { CheckpointManager, PHASE_ORDER } from "./checkpoint.js";
 import { generateProgressDoc } from "./progress.js";
 import { runScoutPhase, type ScoutConfig } from "./phases/scout.js";
+import { runPlannerPhase, createTaskQueueFromPlanner, runPlannerBackgroundReview, type PlannerPhaseConfig } from "./phases/planner.js";
 import { runReviewPhase, type ReviewConfig, type ReviewResult } from "./phases/review.js";
 import { runFixPhase, type FixConfig } from "./phases/fix.js";
 import { ObservabilityContext } from "./observability/index.js";
+import type { V2Config, Task } from "./types.js";
 
 export interface PipelineConfig {
 	planPath: string;
@@ -33,10 +36,12 @@ export interface PipelineConfig {
 	checkTests: boolean;
 	costThresholds: CostThresholds;
 	pauseOnCostThreshold: boolean;
+	maxOutput?: OutputLimits;
+	v2?: Partial<V2Config>;
 }
 
 export interface PipelineContext {
-	pi: CustomToolAPI;
+	runtime: AgentRuntime;
 	storage: FileBasedStorage;
 	checkpointManager: CheckpointManager;
 	pipelineState: PipelineState;
@@ -46,6 +51,8 @@ export interface PipelineContext {
 	onUpdate?: (partial: AgentToolResult<unknown>) => void;
 	obs?: ObservabilityContext;
 	abort?: () => void;
+	plannerTasks?: Task[];
+	plannerBackgroundAbort?: AbortController;
 }
 
 export interface PipelineResult {
@@ -89,6 +96,7 @@ export function initializeCostState(thresholds?: Partial<CostThresholds>): CostS
 		total: 0,
 		byPhase: {
 			scout: 0,
+			planner: 0,
 			coordinator: 0,
 			workers: 0,
 			review: 0,
@@ -251,10 +259,11 @@ export async function runScoutPhaseWrapper(
 			depth: "shallow",
 			outputDir: path.join(config.coordDir, "scout"),
 			maxFileSize: 50000,
+			outputLimits: config.maxOutput,
 		};
 
 		const result = await runScoutPhase(
-			ctx.pi,
+			ctx.runtime,
 			config.planPath,
 			config.planContent,
 			config.coordDir,
@@ -300,6 +309,90 @@ export async function runScoutPhaseWrapper(
 	}
 }
 
+export async function runPlannerPhaseWrapper(
+	ctx: PipelineContext,
+	config: PipelineConfig,
+): Promise<Task[]> {
+	const v2Config = config.v2;
+	if (!v2Config?.planner?.enabled) {
+		return [];
+	}
+
+	const span = ctx.obs?.spans.startSpan("phase:planner", "phase");
+	await ctx.obs?.snapshots.capture("phase_start", "planner");
+
+	updatePhaseStatus("planner", "running", ctx);
+
+	try {
+		const plannerConfig: PlannerPhaseConfig = {
+			humanCheckpoint: v2Config.planner.humanCheckpoint,
+			maxSelfReviewCycles: v2Config.planner.maxSelfReviewCycles || 5,
+			outputLimits: config.maxOutput,
+		};
+
+		await ctx.obs?.events.emit({
+			type: "planner_review_started",
+			tasksToReview: 0,
+		});
+
+		const result = await runPlannerPhase(
+			ctx.runtime,
+			config.planContent,
+			ctx.pipelineState.scoutContext || "",
+			config.coordDir,
+			plannerConfig,
+			ctx.signal,
+		);
+
+		ctx.plannerTasks = result.tasks;
+		ctx.costState.byPhase.planner += result.cost;
+		ctx.costState.total += result.cost;
+
+		await createTaskQueueFromPlanner(config.coordDir, config.planPath, result.tasks);
+
+		await ctx.obs?.events.emit({
+			type: "planner_review_complete",
+			approved: result.tasks.length,
+			rejected: 0,
+			modified: 0,
+		});
+
+		await ctx.obs?.events.emit({
+			type: "cost_updated",
+			delta: result.cost,
+			total: ctx.costState.total,
+			breakdown: { byPhase: ctx.costState.byPhase, byWorker: ctx.costState.byWorker },
+		});
+
+		ctx.plannerBackgroundAbort = new AbortController();
+		runPlannerBackgroundReview(
+			ctx.runtime,
+			config.coordDir,
+			plannerConfig,
+			ctx.plannerBackgroundAbort.signal,
+		).catch(() => {});
+
+		await saveProgressDoc(ctx);
+		await ctx.obs?.snapshots.capture("phase_end", "planner");
+		span && ctx.obs?.spans.endSpan(span.id, "ok", { taskCount: result.tasks.length }, { cost: result.cost });
+		updatePhaseStatus("planner", "complete", ctx);
+
+		return result.tasks;
+	} catch (err) {
+		await ctx.obs?.errors.capture(err, {
+			category: "system_error",
+			severity: "error",
+			actor: "planner",
+			phase: "planner",
+			spanId: span?.id || "root",
+			recoverable: false,
+		});
+		updatePhaseStatus("planner", "failed", ctx, String(err));
+		span && ctx.obs?.spans.endSpan(span.id, "error");
+		throw err;
+	}
+}
+
 export async function runReviewPhaseWrapper(
 	ctx: PipelineContext,
 	config: PipelineConfig,
@@ -321,10 +414,11 @@ export async function runReviewPhaseWrapper(
 			model: config.reviewModel,
 			checkTests: config.checkTests,
 			verifyPlanGoals: true,
+			outputLimits: config.maxOutput,
 		};
 
 		const result = await runReviewPhase(
-			ctx.pi,
+			ctx.runtime,
 			config.coordDir,
 			config.planContent,
 			workerStates,
@@ -407,7 +501,7 @@ export async function runFixPhaseWrapper(
 		};
 
 		const result = await runFixPhase(
-			ctx.pi,
+			ctx.runtime,
 			config.coordDir,
 			issues,
 			workerStates,
