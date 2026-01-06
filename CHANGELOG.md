@@ -20,6 +20,7 @@ All notable changes to pi-coordination.
 - **Philosophy section** in README explaining the "Ralph Wiggum on steroids" pattern
 
 ### Fixed
+- Supervisor worker state file path now uses correct `worker-{id}.json` format (was looking in non-existent `workers/` subdirectory)
 - Dashboard reads pipeline state from checkpoint files (not non-existent `pipeline-state.json`), with fallback to `progress.md` parsing
 - Dashboard checkpoint sorting now parses timestamps correctly (was sorting alphabetically by phase name)
 - Dashboard `recentTools` display now shows newest tools first (was showing oldest due to incorrect slice direction)

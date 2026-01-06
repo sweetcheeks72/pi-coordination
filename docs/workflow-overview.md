@@ -18,8 +18,8 @@ This document describes the architecture and workflows of pi-coordination:
 ||                           PI-COORDINATION ARCHITECTURE                            ||
 +=====================================================================================+
 |                                                                                     |
-|   User invokes:  coordinate({ plan: "./plan.md", agents: ["worker"],               |
-|                              planner: { enabled: true }, ... })                     |
+|   User invokes:  coordinate({ plan: "./plan.md", agents: 4,                        |
+|                              planner: true, supervisor: true, ... })               |
 |                                                                                     |
 |   +-------------------------------------------------------------------------+       |
 |   |                        Coordinate Tool (index.ts)                       |       |
@@ -71,7 +71,7 @@ This document describes the architecture and workflows of pi-coordination:
 |   |                                                                         |       |
 |   |  - tasks.json (task queue)        - progress.md (shared memory)         |       |
 |   |  - state.json (coordination)      - nudges/ (supervisor -> worker)      |       |
-|   |  - workers/*.json (per-worker)    - a2a-messages/ (agent-to-agent)      |       |
+|   |  - worker-*.json (per-worker)     - a2a-messages/ (agent-to-agent)      |       |
 |   |  - discoveries.json               - events.jsonl                        |       |
 |   +-------------------------------------------------------------------------+       |
 |                                                                                     |
@@ -132,7 +132,8 @@ This document describes the architecture and workflows of pi-coordination:
                                       v
 +-------------------------------------------------------------------------------+
 |                            REVIEW PHASE                                       |
-|  - code-reviewer analyzes all changes                                         |
+|  Agent: coordination/reviewer                                                 |
+|  - Analyzes all changes made during coordination                              |
 |  - Returns issues or allPassing: true                                         |
 +-------------------------------------------------------------------------------+
                                       |
@@ -593,6 +594,58 @@ Worker A                      a2a-messages/                    Worker B
                                                +----> markRead()   |
 ```
 
+### Common Use Cases
+
+| Use Case | Message Type | Example |
+|----------|--------------|---------|
+| Need a file another worker has | `file_release_request` | "I need src/types.ts to add new interface" |
+| Share important finding | `discovery` | "Found existing auth middleware we should reuse" |
+| Hand off work to specialist | `task_handoff` | "This needs database expertise" |
+| Blocked on another worker | `help_request` | "Can't proceed until API types are done" |
+| Notify dependents | `completion_notice` | "Types ready, you can now use them" |
+
+---
+
+## File Reservation System
+
+Workers can reserve files for exclusive editing to prevent conflicts.
+
+### Tools
+
+| Tool | Description |
+|------|-------------|
+| `reserve_files` | Reserve files/patterns for exclusive editing with TTL |
+| `release_files` | Release reservations when done |
+
+### Usage
+
+```typescript
+// Reserve files before editing
+reserve_files({
+  patterns: ["src/auth/**", "src/types.ts"],
+  exclusive: true,
+  ttl: 300  // 5 minutes
+})
+
+// Release when done
+release_files({ patterns: ["src/auth/**", "src/types.ts"] })
+```
+
+### Conflict Handling
+
+When a file is already reserved:
+1. Tool returns conflict info with holder identity
+2. Worker can use A2A `file_release_request` to negotiate
+3. Holder can respond with `file_release_response` (granted/denied with ETA)
+
+### Auto-Release
+
+Reservations are automatically released when:
+- Worker calls `release_files`
+- Worker completes task (`complete_task`)
+- TTL expires
+- Worker process exits
+
 ---
 
 ## Discovered Task Workflow
@@ -713,7 +766,8 @@ Subdirectory-based agent naming avoids conflicts with generic agents.
 │   ├── coordinator.md              <- coordination/coordinator
 │   ├── worker.md                   <- coordination/worker
 │   ├── scout.md                    <- coordination/scout
-│   └── planner.md                  <- coordination/planner
+│   ├── planner.md                  <- coordination/planner
+│   └── reviewer.md                 <- coordination/reviewer
 ├── worker.md                        <- Generic worker (unchanged)
 └── scout.md                         <- Generic scout (unchanged)
 ```
@@ -727,24 +781,18 @@ Subdirectory-based agent naming avoids conflicts with generic agents.
 ```typescript
 coordinate({
   plan: "./plan.md",
-  agents: ["worker"],
+  agents: 4,                      // or ["worker", "worker", ...]
   
-  planner: {
-    enabled: true,
-    humanCheckpoint: false,
-    maxSelfReviewCycles: 5
-  },
-  selfReview: {
-    enabled: true,
-    maxCycles: 5
-  },
-  supervisor: {
-    enabled: true,
-    nudgeThresholdMs: 180000,
-    restartThresholdMs: 300000,
-    maxRestarts: 2,
-    checkIntervalMs: 30000
-  }
+  planner: true,                  // or { enabled, model, humanCheckpoint, maxSelfReviewCycles }
+  reviewCycles: 5,                // worker self-review cycles (false to disable)
+  supervisor: true,               // or { nudgeThresholdMs, restartThresholdMs, maxRestarts, checkIntervalMs }
+  costLimit: 40,                  // dollars, ends gracefully when exceeded
+  
+  // Per-phase model overrides
+  scout: "claude-sonnet-4-5",
+  coordinator: "claude-sonnet-4-5",
+  worker: "claude-sonnet-4-5",
+  reviewer: "claude-sonnet-4-5",
 })
 ```
 
@@ -772,9 +820,9 @@ coordDir/
 ├── events.jsonl                  # All coordination events
 ├── progress.md                   # Human-readable progress
 ├── discoveries.json              # Shared discoveries
+├── a2a-read.json                 # Tracks read A2A messages per worker
 │
-├── workers/                      # Per-worker state files
-│   └── {workerId}.json
+├── worker-{workerId}.json        # Per-worker state files (in coordDir root)
 │
 ├── nudges/                       # Supervisor -> Worker nudges
 │   └── {workerId}.json           # Consumed on read
@@ -786,6 +834,9 @@ coordDir/
 │   ├── main.md
 │   └── files/
 │
+├── checkpoints/                  # Phase checkpoints
+│   └── {phase}-{timestamp}.json  # Contains PipelineState
+│
 ├── artifacts/                    # Per-agent artifacts
 │   ├── planner-*/
 │   ├── planner-review-*/
@@ -793,35 +844,40 @@ coordDir/
 │   ├── scout-*/
 │   └── worker:*-*/
 │
-├── checkpoints/                  # Phase checkpoints
-├── traces/                       # Observability traces
-└── ...
+└── traces/                       # Observability traces
 ```
 
 ---
 
 ## Observable Events
 
-| Event | Description |
-|-------|-------------|
-| `task_claimed` | Worker claimed a task from queue |
-| `task_completed` | Task marked complete |
-| `task_failed` | Task marked failed |
-| `task_deferred` | Task deferred (deps not met) |
-| `task_discovered` | Worker discovered new task |
-| `task_reviewed` | Planner reviewed discovered task |
-| `self_review_started` | Worker self-review cycle started |
-| `self_review_passed` | Worker self-review found no issues |
-| `self_review_limit_reached` | Max self-review cycles hit |
-| `worker_nudged` | Supervisor sent nudge to worker |
-| `worker_restarting` | Worker being restarted |
-| `worker_abandoned` | Worker abandoned after max restarts |
-| `planner_review_started` | Planner phase started |
-| `planner_review_complete` | Planner phase completed |
-| `discovery_shared` | Worker shared discovery via A2A |
-| `a2a_message_sent` | A2A message sent |
-| `file_negotiation_started` | File release negotiation started |
-| `file_negotiation_resolved` | File release negotiation resolved |
+### CoordinationEvent Types (events.jsonl)
+
+| Event Type | Description |
+|------------|-------------|
+| `tool_call` | Worker called a tool (includes workerId, tool name, optional file) |
+| `tool_result` | Tool execution completed (includes success boolean) |
+| `waiting` | Worker waiting for something (contract, file, etc.) |
+| `contract_received` | Worker received a contract from another worker |
+| `worker_started` | Worker process started |
+| `worker_completed` | Worker finished successfully |
+| `worker_failed` | Worker failed with error message |
+| `cost_milestone` | Cost threshold reached (includes totals by worker) |
+| `coordinator` | Coordinator message (nudges, restarts, status updates) |
+| `phase_complete` | Pipeline phase completed (includes duration, cost) |
+| `cost_limit_reached` | Cost limit exceeded, coordination stopping |
+
+### A2A Message Types
+
+| Message Type | Description |
+|--------------|-------------|
+| `file_release_request` | Request another worker release a file |
+| `file_release_response` | Response to file release request |
+| `discovery` | Share a discovery with other workers |
+| `task_handoff` | Hand off a task to another worker |
+| `help_request` | Request help with a blocker |
+| `status_update` | Progress update on a task |
+| `completion_notice` | Notify others of task completion |
 
 ---
 
@@ -829,7 +885,7 @@ coordDir/
 
 | Symptom | Check | Resolution |
 |---------|-------|------------|
-| No tasks.json created | Check if planner phase enabled | Ensure `planner: { enabled: true }` |
+| No tasks.json created | Check if planner phase enabled | Ensure `planner: true` or `planner: { enabled: true }` |
 | Workers not spawning | Check tasks.json status | Verify tasks have status "pending" |
 | Self-review not triggering | Check PI_SELF_REVIEW_ENABLED | Should not be "false" |
 | Self-review stuck | Check PI_MAX_SELF_REVIEW_CYCLES | Increase if needed |

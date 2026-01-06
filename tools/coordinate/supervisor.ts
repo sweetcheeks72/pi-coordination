@@ -81,7 +81,7 @@ export class SupervisorLoop {
 
 	private getWorkerStateModTime(workerId: string): number | null {
 		try {
-			const statePath = path.join(this.coordDir, "workers", `${workerId}.json`);
+			const statePath = path.join(this.coordDir, `worker-${workerId}.json`);
 			const stat = fsSync.statSync(statePath);
 			return stat.mtimeMs;
 		} catch {

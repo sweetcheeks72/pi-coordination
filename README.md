@@ -34,7 +34,7 @@ Think of it as "Ralph Wiggum on steroids" - the same proven single-task-per-agen
 - **A2A Messaging**: Agent-to-agent communication for file negotiation and discovery sharing
 - **Dependency Management**: Pre-assign files and create contracts between workers
 - **Review Cycles**: Automated code review with fix iterations
-- **Cost Controls**: Configurable warn/pause/hard thresholds
+- **Cost Controls**: Configurable cost limit with graceful shutdown
 - **Async Mode**: Fire-and-forget coordination with completion notifications
 - **Artifacts + Truncation**: Full prompt/output JSONL artifacts with optional output truncation
 - **Checkpointing**: Save/restore at phase boundaries for resumable sessions
@@ -176,7 +176,7 @@ The coordinate tool will:
 | Phase | Description |
 |-------|-------------|
 | **scout** | Deep codebase analysis before coordination (provides context to planner/workers) |
-| **planner** | Creates task graph from plan with self-review (optional, requires `planner.enabled`) |
+| **planner** | Creates task graph from plan with self-review (enabled by default, disable with `planner: false`) |
 | **coordinator** | Spawns workers from task queue, manages supervisor loop |
 | **workers** | Parallel execution of tasks with self-review |
 | **review** | Code reviewer checks all changes against plan goals |
@@ -267,7 +267,7 @@ The planner reads this context using the `read_context` tool:
 ```
 Pipeline: [scout] -> [planner] -> [coordinator] -> [workers] -> [review] -> [fixes] -> [complete]
 Current: workers
-Cost: $0.45 / $5.00 pause threshold
+Cost: $0.45 / $40.00 limit
 ```
 
 **While Running:**
@@ -422,9 +422,11 @@ Configuration:
 
 The supervisor monitors worker activity and intervenes when workers appear stuck:
 
-- **Nudge** (3 min inactive): Sends wrap_up message to worker
-- **Restart** (5 min inactive): Kills worker, releases task for retry
-- **Abandon** (max restarts exceeded): Marks task as failed
+- **Nudge**: Sends wrap_up message after `nudgeThresholdMs` (default: 3 min)
+- **Restart**: Kills worker, releases task after `restartThresholdMs` (default: 5 min)
+- **Abandon**: Marks task failed after `maxRestarts` attempts (default: 2)
+
+Configure via `supervisor: { nudgeThresholdMs, restartThresholdMs, maxRestarts, checkIntervalMs }`.
 
 ## Observability
 
@@ -442,19 +444,18 @@ The coordination system includes comprehensive observability for debugging, repl
 | Snapshots | `snapshots/*.json` | Git/file/coordination state at phase boundaries |
 | Decisions | `decisions.jsonl` | Decision audit trail with outcomes |
 
-### Event Types
+### Event Types (events.jsonl)
 
-- **Session**: `session_started`, `session_completed`
-- **Phase**: `phase_started`, `phase_completed`
-- **Worker**: `worker_spawning`, `worker_started`, `worker_completed`, `worker_failed`
-- **Contract**: `contract_created`, `contract_signaled`, `contract_waiting`, `contract_received`
-- **Reservation**: `reservation_requested`, `reservation_granted`, `reservation_denied`, `reservation_transferred`, `reservation_released`
-- **Review**: `review_started`, `review_completed`, `fix_started`, `fix_completed`
-- **Cost**: `cost_updated`, `cost_limit_reached`
-- **Task**: `task_claimed`, `task_completed`, `task_failed`, `task_discovered`, `task_reviewed`
-- **Self-Review**: `self_review_started`, `self_review_passed`, `self_review_limit_reached`
-- **Supervisor**: `worker_nudged`, `worker_restarting`, `worker_abandoned`
-- **A2A**: `a2a_message_sent`, `discovery_shared`
+- **Worker**: `worker_started`, `worker_completed`, `worker_failed`
+- **Tools**: `tool_call`, `tool_result`
+- **Contracts**: `waiting`, `contract_received`
+- **Coordinator**: `coordinator` (nudges, restarts, status messages)
+- **Pipeline**: `phase_complete`
+- **Cost**: `cost_milestone`, `cost_limit_reached`
+
+### A2A Message Types (a2a-messages/)
+
+`file_release_request`, `file_release_response`, `discovery`, `task_handoff`, `help_request`, `status_update`, `completion_notice`
 
 ### Trace Correlation
 
@@ -534,8 +535,8 @@ coordDir/
 ├── events.jsonl                  # All coordination events
 ├── progress.md                   # Human-readable progress
 ├── discoveries.json              # Shared discoveries
-├── workers/                      # Per-worker state files
-│   └── {workerId}.json
+├── a2a-read.json                 # Tracks read A2A messages per worker
+├── worker-{workerId}.json        # Per-worker state files
 ├── nudges/                       # Supervisor -> Worker nudges
 │   └── {workerId}.json
 ├── a2a-messages/                 # Agent-to-agent messages
@@ -589,7 +590,8 @@ agents/
 ├── coordinator.md          # Coordinator agent definition
 ├── worker.md               # Worker agent definition
 ├── scout.md                # Scout agent definition
-└── planner.md              # Planner agent definition
+├── planner.md              # Planner agent definition
+└── reviewer.md             # Reviewer agent definition
 
 skills/
 └── coordination/
