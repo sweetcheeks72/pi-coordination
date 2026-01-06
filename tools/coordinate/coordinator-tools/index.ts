@@ -15,6 +15,20 @@ import { createArtifactPaths } from "../../subagent/artifacts.js";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
+interface RuntimeConfig {
+	selfReview?: { enabled?: boolean; maxCycles?: number };
+	supervisor?: { enabled?: boolean; nudgeThresholdMs?: number; restartThresholdMs?: number; maxRestarts?: number; checkIntervalMs?: number };
+}
+
+function loadRuntimeConfig(coordDir: string): RuntimeConfig {
+	try {
+		const content = fsSync.readFileSync(path.join(coordDir, "runtime-config.json"), "utf-8");
+		return JSON.parse(content);
+	} catch {
+		return {};
+	}
+}
+
 function sleep(ms: number): Promise<void> {
 	return new Promise((resolve) => setTimeout(resolve, ms));
 }
@@ -118,6 +132,7 @@ export function spawnWorkerProcess(
 	}).catch(() => {});
 
 	const traceId = obs?.getTraceId() || process.env.PI_TRACE_ID;
+	const runtimeConfig = loadRuntimeConfig(coordDir);
 
 	const proc = spawn("pi", args, {
 		cwd,
@@ -127,6 +142,8 @@ export function spawnWorkerProcess(
 			PI_AGENT_IDENTITY: identity,
 			PI_WORKER_ID: workerId,
 			...(traceId ? { PI_TRACE_ID: traceId } : {}),
+			...(runtimeConfig.selfReview?.enabled !== undefined ? { PI_SELF_REVIEW_ENABLED: String(runtimeConfig.selfReview.enabled) } : {}),
+			...(runtimeConfig.selfReview?.maxCycles !== undefined ? { PI_MAX_SELF_REVIEW_CYCLES: String(runtimeConfig.selfReview.maxCycles) } : {}),
 		},
 		stdio: ["ignore", "pipe", "pipe"],
 	});
@@ -1043,8 +1060,9 @@ ${planContent ? `### Full Plan\n\`\`\`markdown\n${planContent}\n\`\`\`` : ""}
 				}
 
 				let supervisor: SupervisorLoop | null = null;
-				if (params.enableSupervisor !== false) {
-					supervisor = new SupervisorLoop(coordDir, storage, taskQueue);
+				const runtimeConfig = loadRuntimeConfig(coordDir);
+				if (params.enableSupervisor !== false && runtimeConfig.supervisor?.enabled !== false) {
+					supervisor = new SupervisorLoop(coordDir, storage, taskQueue, runtimeConfig.supervisor);
 					supervisor.start(handles.map(h => ({ ...h, taskId: h.taskId })));
 				}
 

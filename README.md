@@ -48,13 +48,22 @@ Default options can be configured in `~/.pi/agent/settings.json` under the `coor
 ```json
 {
   "coordination": {
-    "agents": ["worker", "worker"],
-    "planner": { "enabled": true },
-    "selfReview": { "enabled": true, "maxCycles": 5 },
-    "supervisor": { "enabled": true, "nudgeThresholdMs": 180000 },
-    "costThresholds": { "warn": 1.0, "pause": 5.0, "hard": 10.0 },
-    "maxFixCycles": 3,
-    "checkTests": true
+    "agents": 4,
+    "planner": true,
+    "reviewCycles": 5,
+    "supervisor": true
+  }
+}
+```
+
+Use `false` to disable features:
+
+```json
+{
+  "coordination": {
+    "reviewCycles": false,
+    "supervisor": { "nudgeThresholdMs": 120000 },
+    "costThresholds": { "warn": 1.0, "pause": 5.0, "hard": 10.0 }
   }
 }
 ```
@@ -72,17 +81,33 @@ coordinate({ plan: "./plan.md" })
 With smart defaults, this runs the full pipeline: scout -> planner -> coordinator -> workers -> review -> fixes.
 
 Defaults:
-- `agents`: `["worker"]`
-- `planner.enabled`: `true`
-- `selfReview.enabled`: `true`
-- `supervisor.enabled`: `true`
+- `agents`: 4 workers
+- `planner`: enabled
+- `reviewCycles`: 5
+- `supervisor`: enabled
+
+### Common Configurations
+
+```typescript
+// 8 workers (reviewCycles defaults to 5)
+coordinate({ plan: "./plan.md", agents: 8 })
+
+// Custom review cycles
+coordinate({ plan: "./plan.md", reviewCycles: 3 })
+
+// Disable self-review
+coordinate({ plan: "./plan.md", reviewCycles: false })
+
+// Disable planner (manual coordinator flow)
+coordinate({ plan: "./plan.md", planner: false })
+```
 
 ### With All Options
 
 ```typescript
 coordinate({
   plan: "./plan.md",
-  agents: ["worker", "worker"],
+  agents: 4,                    // or ["worker", "worker", ...]
   logPath: "./logs",
   resume: "workers-1234567",
   maxFixCycles: 3,
@@ -90,32 +115,13 @@ coordinate({
   reviewModel: "claude-opus-4-20250514",
   checkTests: true,
   async: false,
-  asyncResultsDir: "/tmp/pi-async-coordination-results",
   maxOutput: { lines: 200 },
-  costThresholds: {
-    warn: 1.0,
-    pause: 5.0,
-    hard: 10.0
-  },
+  costThresholds: { warn: 1.0, pause: 5.0, hard: 10.0 },
   pauseOnCostThreshold: false,
   validate: true,
-  validateStream: true,
-  planner: {
-    enabled: true,
-    humanCheckpoint: false,
-    maxSelfReviewCycles: 5
-  },
-  selfReview: {
-    enabled: true,
-    maxCycles: 5
-  },
-  supervisor: {
-    enabled: true,
-    nudgeThresholdMs: 180000,
-    restartThresholdMs: 300000,
-    maxRestarts: 2,
-    checkIntervalMs: 30000
-  }
+  planner: true,                // or { humanCheckpoint: true, maxSelfReviewCycles: 3 }
+  reviewCycles: 5,              // worker self-review cycles (false to disable)
+  supervisor: true              // or { nudgeThresholdMs: 180000, ... }
 })
 ```
 
@@ -183,6 +189,13 @@ The coordinate tool will:
 | `escalate_to_user` | Ask user a question |
 | `add_discovered_task` | Add a discovered task for planner review |
 | `share_discovery` | Share learnings with other workers |
+
+## Scout Tools
+
+| Tool | Description |
+|------|-------------|
+| `scan_files` | Scan codebase and return file tree with token estimates |
+| `bundle_files` | Bundle specified files into output with contents |
 
 ## Planner Tools
 
@@ -486,9 +499,11 @@ extensions/
     ├── index.ts            # Main extension (coordinate + coord_output + async notify)
     ├── coordinator.ts      # Coordinator-only tools
     ├── worker.ts           # Worker tools + self-review hooks
-    └── planner.ts          # Planner tools (read_context)
+    ├── planner.ts          # Planner tools (read_context)
+    └── scout.ts            # Scout tools (scan_files, bundle_files)
 
 tools/
+├── bundle-files/           # Scout bundle tools (scan_files, bundle_files)
 ├── coord-output/           # Read full outputs from coordDir/artifacts
 ├── read-context/           # Read scout context without truncation
 ├── coordinate/             # Coordination runtime

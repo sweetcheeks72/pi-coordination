@@ -11,29 +11,51 @@ import type { EventBus, ExtensionContext, ToolDefinition } from "@mariozechner/p
 import { Container, Text } from "@mariozechner/pi-tui";
 import { Type, type Static } from "@sinclair/typebox";
 import { discoverAgents, type AgentConfig } from "../subagent/agents.js";
+import { getResultOutput } from "../subagent/render.js";
 
 interface CoordinationSettings {
+	agents?: string[] | number;
+	planner?: boolean | { enabled?: boolean; humanCheckpoint?: boolean; maxSelfReviewCycles?: number };
+	reviewCycles?: number | false;
+	supervisor?: boolean | { enabled?: boolean; nudgeThresholdMs?: number; restartThresholdMs?: number; maxRestarts?: number; checkIntervalMs?: number };
+	costThresholds?: { warn?: number; pause?: number; hard?: number };
+	maxFixCycles?: number;
+	checkTests?: boolean;
+}
+
+interface NormalizedSettings {
 	agents?: string[];
 	planner?: { enabled?: boolean; humanCheckpoint?: boolean; maxSelfReviewCycles?: number };
-	selfReview?: { enabled?: boolean; maxCycles?: number };
+	reviewCycles?: number | false;
 	supervisor?: { enabled?: boolean; nudgeThresholdMs?: number; restartThresholdMs?: number; maxRestarts?: number; checkIntervalMs?: number };
 	costThresholds?: { warn?: number; pause?: number; hard?: number };
 	maxFixCycles?: number;
 	checkTests?: boolean;
 }
 
-function loadCoordinationSettings(): CoordinationSettings {
+function normalizeSettings(raw: CoordinationSettings): NormalizedSettings {
+	return {
+		agents: typeof raw.agents === "number" ? Array(raw.agents).fill("worker") : raw.agents,
+		planner: typeof raw.planner === "boolean" ? { enabled: raw.planner } : raw.planner,
+		reviewCycles: raw.reviewCycles,
+		supervisor: typeof raw.supervisor === "boolean" ? { enabled: raw.supervisor } : raw.supervisor,
+		costThresholds: raw.costThresholds,
+		maxFixCycles: raw.maxFixCycles,
+		checkTests: raw.checkTests,
+	};
+}
+
+function loadCoordinationSettings(): NormalizedSettings {
 	const settingsPath = path.join(os.homedir(), ".pi", "agent", "settings.json");
 	try {
 		if (!fsSync.existsSync(settingsPath)) return {};
 		const content = fsSync.readFileSync(settingsPath, "utf-8");
 		const settings = JSON.parse(content);
-		return settings.coordination ?? {};
+		return normalizeSettings(settings.coordination ?? {});
 	} catch {
 		return {};
 	}
 }
-import { getResultOutput } from "../subagent/render.js";
 
 import { runSingleAgent, type AgentRuntime } from "../subagent/runner.js";
 import type { SingleResult, SubagentDetails } from "../subagent/types.js";
@@ -147,7 +169,10 @@ interface CoordinationRuntime extends AgentRuntime {
 
 const CoordinateParams = Type.Object({
 	plan: Type.String({ description: "Path to markdown plan file" }),
-	agents: Type.Optional(Type.Array(Type.String(), { description: "Agent types to use (default: ['worker'])" })),
+	agents: Type.Optional(Type.Union([
+		Type.Array(Type.String()),
+		Type.Number(),
+	], { description: "Worker agents: array of names or count (default: 4 workers)" })),
 	logPath: Type.Optional(Type.String({ description: "Path for coordination log output. Defaults to cwd. Set to empty string to disable." })),
 	resume: Type.Optional(Type.String({ description: "Checkpoint ID to resume from" })),
 	maxFixCycles: Type.Optional(Type.Number({ description: "Maximum review/fix cycles (default: 3)" })),
@@ -168,22 +193,28 @@ const CoordinateParams = Type.Object({
 	pauseOnCostThreshold: Type.Optional(Type.Boolean({ description: "Block and ask user when pause threshold is hit (default: false)" })),
 	validate: Type.Optional(Type.Boolean({ description: "Run validation after completion (default: false)" })),
 	validateStream: Type.Optional(Type.Boolean({ description: "Stream invariant warnings in real-time (default: false)" })),
-	planner: Type.Optional(Type.Object({
-		enabled: Type.Boolean({ description: "Enable planner phase (default: false)" }),
-		humanCheckpoint: Type.Optional(Type.Boolean({ description: "Pause for human approval of task graph (default: false)" })),
-		maxSelfReviewCycles: Type.Optional(Type.Number({ description: "Max planner self-review cycles (default: 5)" })),
-	})),
-	selfReview: Type.Optional(Type.Object({
-		enabled: Type.Boolean({ description: "Enable worker self-review loop (default: true)" }),
-		maxCycles: Type.Optional(Type.Number({ description: "Max self-review cycles per worker (default: 5)" })),
-	})),
-	supervisor: Type.Optional(Type.Object({
-		enabled: Type.Boolean({ description: "Enable supervisor loop (default: true)" }),
-		nudgeThresholdMs: Type.Optional(Type.Number({ description: "Inactivity before nudge (default: 180000)" })),
-		restartThresholdMs: Type.Optional(Type.Number({ description: "Inactivity before restart (default: 300000)" })),
-		maxRestarts: Type.Optional(Type.Number({ description: "Max restart attempts per worker (default: 2)" })),
-		checkIntervalMs: Type.Optional(Type.Number({ description: "Supervisor check interval (default: 30000)" })),
-	})),
+	planner: Type.Optional(Type.Union([
+		Type.Boolean(),
+		Type.Object({
+			enabled: Type.Optional(Type.Boolean()),
+			humanCheckpoint: Type.Optional(Type.Boolean()),
+			maxSelfReviewCycles: Type.Optional(Type.Number()),
+		}),
+	], { description: "Enable planner phase (default: true)" })),
+	reviewCycles: Type.Optional(Type.Union([
+		Type.Number(),
+		Type.Literal(false),
+	], { description: "Worker self-review cycles (default: 5, false to disable)" })),
+	supervisor: Type.Optional(Type.Union([
+		Type.Boolean(),
+		Type.Object({
+			enabled: Type.Optional(Type.Boolean()),
+			nudgeThresholdMs: Type.Optional(Type.Number()),
+			restartThresholdMs: Type.Optional(Type.Number()),
+			maxRestarts: Type.Optional(Type.Number()),
+			checkIntervalMs: Type.Optional(Type.Number()),
+		}),
+	], { description: "Enable supervisor loop (default: true)" })),
 });
 
 type CoordinateParamsType = Static<typeof CoordinateParams>;
@@ -515,13 +546,27 @@ export async function runCoordinationSession(options: CoordinationRunOptions): P
 		}
 	}
 
+	const normalizeAgents = (v: string[] | number | undefined): string[] | undefined =>
+		typeof v === "number" ? Array(v).fill("worker") : v;
+	const normalizeBoolOrObj = <T extends object>(v: boolean | T | undefined): T | undefined =>
+		typeof v === "boolean" ? { enabled: v } as T : v;
+
+	const paramPlanner = normalizeBoolOrObj(params.planner);
+	const paramSupervisor = normalizeBoolOrObj(params.supervisor);
+
+	const reviewCycles = params.reviewCycles ?? settings.reviewCycles ?? 5;
+	const selfReviewConfig = {
+		enabled: reviewCycles !== false,
+		maxCycles: reviewCycles === false ? 0 : reviewCycles,
+	};
+
 	const pipelineConfig: PipelineConfig = {
 		planPath,
 		planContent,
 		planDir,
 		coordDir,
 		sessionId: coordSessionId,
-		agents: params.agents ?? settings.agents ?? ["worker"],
+		agents: normalizeAgents(params.agents) ?? settings.agents ?? ["worker", "worker", "worker", "worker"],
 		maxFixCycles: params.maxFixCycles ?? settings.maxFixCycles ?? 3,
 		sameIssueLimit: params.sameIssueLimit ?? 2,
 		reviewModel: params.reviewModel,
@@ -530,22 +575,28 @@ export async function runCoordinationSession(options: CoordinationRunOptions): P
 		pauseOnCostThreshold: params.pauseOnCostThreshold ?? false,
 		maxOutput: params.maxOutput,
 		planner: {
-			enabled: params.planner?.enabled ?? settings.planner?.enabled ?? true,
-			humanCheckpoint: params.planner?.humanCheckpoint ?? settings.planner?.humanCheckpoint ?? false,
-			maxSelfReviewCycles: params.planner?.maxSelfReviewCycles ?? settings.planner?.maxSelfReviewCycles ?? 5,
+			enabled: paramPlanner?.enabled ?? settings.planner?.enabled ?? true,
+			humanCheckpoint: paramPlanner?.humanCheckpoint ?? settings.planner?.humanCheckpoint ?? false,
+			maxSelfReviewCycles: paramPlanner?.maxSelfReviewCycles ?? settings.planner?.maxSelfReviewCycles ?? 5,
 		},
-		selfReview: {
-			enabled: params.selfReview?.enabled ?? settings.selfReview?.enabled ?? true,
-			maxCycles: params.selfReview?.maxCycles ?? settings.selfReview?.maxCycles ?? 5,
-		},
+		selfReview: selfReviewConfig,
 		supervisor: {
-			enabled: params.supervisor?.enabled ?? settings.supervisor?.enabled ?? true,
-			nudgeThresholdMs: params.supervisor?.nudgeThresholdMs ?? settings.supervisor?.nudgeThresholdMs ?? 180000,
-			restartThresholdMs: params.supervisor?.restartThresholdMs ?? settings.supervisor?.restartThresholdMs ?? 300000,
-			maxRestarts: params.supervisor?.maxRestarts ?? settings.supervisor?.maxRestarts ?? 2,
-			checkIntervalMs: params.supervisor?.checkIntervalMs ?? settings.supervisor?.checkIntervalMs ?? 30000,
+			enabled: paramSupervisor?.enabled ?? settings.supervisor?.enabled ?? true,
+			nudgeThresholdMs: paramSupervisor?.nudgeThresholdMs ?? settings.supervisor?.nudgeThresholdMs ?? 180000,
+			restartThresholdMs: paramSupervisor?.restartThresholdMs ?? settings.supervisor?.restartThresholdMs ?? 300000,
+			maxRestarts: paramSupervisor?.maxRestarts ?? settings.supervisor?.maxRestarts ?? 2,
+			checkIntervalMs: paramSupervisor?.checkIntervalMs ?? settings.supervisor?.checkIntervalMs ?? 30000,
 		},
 	};
+
+	const runtimeConfig = {
+		selfReview: pipelineConfig.selfReview,
+		supervisor: pipelineConfig.supervisor,
+	};
+	await fs.writeFile(
+		path.join(coordDir, "runtime-config.json"),
+		JSON.stringify(runtimeConfig, null, 2),
+	);
 
 	const obs = await ObservabilityContext.create(
 		coordDir,
