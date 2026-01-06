@@ -27,14 +27,28 @@ All notable changes to pi-coordination.
 ## 2026-01-05
 
 ### Added
+- **Planner phase** with Ralph self-review loop for task decomposition before coordination
+- **Task queue model** replacing step-based work distribution (priority levels, dependencies, dynamic assignment)
+- **Worker self-review loop** via tool interception on `complete_task` (configurable via `v2.selfReview`)
+- **Supervisor loop** monitors worker activity, nudges or restarts stuck workers (configurable via `v2.supervisor`)
+- **Discovered tasks workflow** - workers can add tasks via `add_discovered_task`, planner reviews before adding to queue
+- **A2A communication** - `send_message` / `check_messages` for inter-worker messaging
+- New coordinator tools: `spawn_from_queue`, `get_task_queue_status`
+- New worker tools: `add_discovered_task`, `share_discovery`
 - Extensions-first integration for coordinator/worker/coord_output
 - Async coordination runner with result files and durable `coordDir/async/status.json`
 - Artifacts + output truncation helpers for full-output recovery
 - Async TUI widget for idle status updates
+- `coord_output` tool for retrieving subagent results from artifacts
+- Configurable self-review spec via `PI_SELF_REVIEW_SPEC_PATH` env var
 
 ### Changed
 - Installation now cleans up legacy hooks/tools symlinks
-- README updated for async options, artifacts, and new file layout
+- README updated for V2 options, async mode, artifacts, and new file layout
+- Pipeline phases now include optional planner phase between scout and coordinator
+
+### Removed
+- `worker-hooks/reservation.ts` (replaced by extensions model)
 
 ---
 
