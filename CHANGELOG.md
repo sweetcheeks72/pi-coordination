@@ -47,6 +47,8 @@ All notable changes to pi-coordination.
 
 ### Changed
 - **Config flattened**: `planner`, `selfReview`, `supervisor` options now at top level (no `v2` wrapper)
+- **Smart defaults**: `agents` defaults to `["worker"]`, `planner.enabled` defaults to `true`
+- **Settings support**: Defaults can be configured in `~/.pi/agent/settings.json` under `coordination` key
 - Scout agent now outputs structured format with file tree and full file contents
 - Planner reads scout context via `read_context` tool instead of inline prompt
 - Installation now cleans up legacy hooks/tools symlinks

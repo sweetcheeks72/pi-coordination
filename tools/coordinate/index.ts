@@ -11,6 +11,28 @@ import type { EventBus, ExtensionContext, ToolDefinition } from "@mariozechner/p
 import { Container, Text } from "@mariozechner/pi-tui";
 import { Type, type Static } from "@sinclair/typebox";
 import { discoverAgents, type AgentConfig } from "../subagent/agents.js";
+
+interface CoordinationSettings {
+	agents?: string[];
+	planner?: { enabled?: boolean; humanCheckpoint?: boolean; maxSelfReviewCycles?: number };
+	selfReview?: { enabled?: boolean; maxCycles?: number };
+	supervisor?: { enabled?: boolean; nudgeThresholdMs?: number; restartThresholdMs?: number; maxRestarts?: number; checkIntervalMs?: number };
+	costThresholds?: { warn?: number; pause?: number; hard?: number };
+	maxFixCycles?: number;
+	checkTests?: boolean;
+}
+
+function loadCoordinationSettings(): CoordinationSettings {
+	const settingsPath = path.join(os.homedir(), ".pi", "agent", "settings.json");
+	try {
+		if (!fsSync.existsSync(settingsPath)) return {};
+		const content = fsSync.readFileSync(settingsPath, "utf-8");
+		const settings = JSON.parse(content);
+		return settings.coordination ?? {};
+	} catch {
+		return {};
+	}
+}
 import { getResultOutput } from "../subagent/render.js";
 
 import { runSingleAgent, type AgentRuntime } from "../subagent/runner.js";
@@ -125,7 +147,7 @@ interface CoordinationRuntime extends AgentRuntime {
 
 const CoordinateParams = Type.Object({
 	plan: Type.String({ description: "Path to markdown plan file" }),
-	agents: Type.Array(Type.String(), { description: "Agent types to use (e.g. ['worker', 'worker'])" }),
+	agents: Type.Optional(Type.Array(Type.String(), { description: "Agent types to use (default: ['worker'])" })),
 	logPath: Type.Optional(Type.String({ description: "Path for coordination log output. Defaults to cwd. Set to empty string to disable." })),
 	resume: Type.Optional(Type.String({ description: "Checkpoint ID to resume from" })),
 	maxFixCycles: Type.Optional(Type.Number({ description: "Maximum review/fix cycles (default: 3)" })),
@@ -453,7 +475,13 @@ export async function runCoordinationSession(options: CoordinationRunOptions): P
 		hash(planContent),
 		params.maxFixCycles ?? 3,
 	);
-	let costState = initializeCostState(params.costThresholds);
+	const settings = loadCoordinationSettings();
+	const effectiveCostThresholds = {
+		warn: params.costThresholds?.warn ?? settings.costThresholds?.warn,
+		pause: params.costThresholds?.pause ?? settings.costThresholds?.pause,
+		hard: params.costThresholds?.hard ?? settings.costThresholds?.hard,
+	};
+	let costState = initializeCostState(effectiveCostThresholds);
 	let reviewHistory: ReviewResult[] = [];
 	let resumeFromPhase: PipelinePhase | null = null;
 
@@ -493,29 +521,29 @@ export async function runCoordinationSession(options: CoordinationRunOptions): P
 		planDir,
 		coordDir,
 		sessionId: coordSessionId,
-		agents: params.agents,
-		maxFixCycles: params.maxFixCycles ?? 3,
+		agents: params.agents ?? settings.agents ?? ["worker"],
+		maxFixCycles: params.maxFixCycles ?? settings.maxFixCycles ?? 3,
 		sameIssueLimit: params.sameIssueLimit ?? 2,
 		reviewModel: params.reviewModel,
-		checkTests: params.checkTests ?? true,
+		checkTests: params.checkTests ?? settings.checkTests ?? true,
 		costThresholds: costState.thresholds,
 		pauseOnCostThreshold: params.pauseOnCostThreshold ?? false,
 		maxOutput: params.maxOutput,
 		planner: {
-			enabled: params.planner?.enabled ?? false,
-			humanCheckpoint: params.planner?.humanCheckpoint ?? false,
-			maxSelfReviewCycles: params.planner?.maxSelfReviewCycles ?? 5,
+			enabled: params.planner?.enabled ?? settings.planner?.enabled ?? true,
+			humanCheckpoint: params.planner?.humanCheckpoint ?? settings.planner?.humanCheckpoint ?? false,
+			maxSelfReviewCycles: params.planner?.maxSelfReviewCycles ?? settings.planner?.maxSelfReviewCycles ?? 5,
 		},
 		selfReview: {
-			enabled: params.selfReview?.enabled ?? true,
-			maxCycles: params.selfReview?.maxCycles ?? 5,
+			enabled: params.selfReview?.enabled ?? settings.selfReview?.enabled ?? true,
+			maxCycles: params.selfReview?.maxCycles ?? settings.selfReview?.maxCycles ?? 5,
 		},
 		supervisor: {
-			enabled: params.supervisor?.enabled ?? true,
-			nudgeThresholdMs: params.supervisor?.nudgeThresholdMs ?? 180000,
-			restartThresholdMs: params.supervisor?.restartThresholdMs ?? 300000,
-			maxRestarts: params.supervisor?.maxRestarts ?? 2,
-			checkIntervalMs: params.supervisor?.checkIntervalMs ?? 30000,
+			enabled: params.supervisor?.enabled ?? settings.supervisor?.enabled ?? true,
+			nudgeThresholdMs: params.supervisor?.nudgeThresholdMs ?? settings.supervisor?.nudgeThresholdMs ?? 180000,
+			restartThresholdMs: params.supervisor?.restartThresholdMs ?? settings.supervisor?.restartThresholdMs ?? 300000,
+			maxRestarts: params.supervisor?.maxRestarts ?? settings.supervisor?.maxRestarts ?? 2,
+			checkIntervalMs: params.supervisor?.checkIntervalMs ?? settings.supervisor?.checkIntervalMs ?? 30000,
 		},
 	};
 

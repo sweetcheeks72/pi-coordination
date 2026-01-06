@@ -41,16 +41,41 @@ To uninstall:
 - pi (from pi-mono) v0.35.0+ (extensions system)
 - Node.js 18+
 
+## Settings
+
+Default options can be configured in `~/.pi/agent/settings.json` under the `coordination` key:
+
+```json
+{
+  "coordination": {
+    "agents": ["worker", "worker"],
+    "planner": { "enabled": true },
+    "selfReview": { "enabled": true, "maxCycles": 5 },
+    "supervisor": { "enabled": true, "nudgeThresholdMs": 180000 },
+    "costThresholds": { "warn": 1.0, "pause": 5.0, "hard": 10.0 },
+    "maxFixCycles": 3,
+    "checkTests": true
+  }
+}
+```
+
+Options passed to `coordinate()` override settings, which override built-in defaults.
+
 ## Usage
 
 ### Basic Usage
 
 ```typescript
-coordinate({
-  plan: "./plan.md",
-  agents: ["worker", "worker", "worker"]
-})
+coordinate({ plan: "./plan.md" })
 ```
+
+With smart defaults, this runs the full pipeline: scout -> planner -> coordinator -> workers -> review -> fixes.
+
+Defaults:
+- `agents`: `["worker"]`
+- `planner.enabled`: `true`
+- `selfReview.enabled`: `true`
+- `supervisor.enabled`: `true`
 
 ### With All Options
 
