@@ -550,52 +550,43 @@ coordDir/
 ## Files
 
 ```
-extensions/
-└── coordination/
-    ├── index.ts            # Main extension (coordinate + coord_output + async notify)
-    ├── coordinator.ts      # Coordinator-only tools
-    ├── worker.ts           # Worker tools + self-review hooks
-    └── planner.ts          # Planner tools (read_context)
+extensions/coordination/           # Symlinked to ~/.pi/agent/extensions/coordination/
+├── index.ts                      # Main extension entry point
+├── coordinator.ts                # Coordinator-specific hooks
+├── worker.ts                     # Worker hooks + self-review
+├── planner.ts                    # Planner hooks (read_context)
+├── scout.ts                      # Scout hooks (bundle tools)
+│
+├── coordinate/                   # Coordination runtime
+│   ├── index.ts                  # coordinate() tool
+│   ├── dashboard.ts              # /coord command TUI
+│   ├── pipeline.ts               # Multi-phase orchestration
+│   ├── state.ts                  # FileBasedStorage
+│   ├── task-queue.ts             # TaskQueueManager
+│   ├── supervisor.ts             # Stuck worker detection
+│   ├── a2a.ts                    # Agent-to-agent messaging
+│   ├── nudge.ts                  # Supervisor nudge protocol
+│   ├── coordinator-tools/        # Coordinator tools
+│   ├── worker-tools/             # Worker tools
+│   ├── phases/                   # Phase runners (scout, planner, review, fix)
+│   ├── observability/            # Events, spans, causality
+│   └── validation/               # Invariant checking
+│
+├── coord-output/                 # coord_output() tool
+├── read-context/                 # read_context() tool
+├── bundle-files/                 # scan_files(), bundle_files() tools
+├── subagent/                     # Shared agent utilities
+└── validate-coord/               # Standalone validation CLI
 
-tools/
-├── coord-output/           # Read full outputs from coordDir/artifacts
-├── read-context/           # Read scout context without truncation
-├── coordinate/             # Coordination runtime
-│   ├── index.ts            # Tool entry point with TUI rendering
-│   ├── dashboard.ts        # Full-screen coordination dashboard (/coord command)
-│   ├── async-runner.ts     # Detached async runner
-│   ├── pipeline.ts         # Multi-phase pipeline orchestration
-│   ├── types.ts            # Type definitions
-│   ├── state.ts            # FileBasedStorage for shared state
-│   ├── task-queue.ts       # TaskQueueManager for task distribution
-│   ├── supervisor.ts       # Supervisor loop for stuck worker detection
-│   ├── nudge.ts            # Nudge protocol for supervisor -> worker
-│   ├── a2a.ts              # Agent-to-agent messaging
-│   ├── log-generator.ts    # Coordination log generation
-│   ├── progress.ts         # Progress document generation
-│   ├── checkpoint.ts       # Phase-boundary checkpointing
-│   ├── coordinator-tools/  # Coordinator tools
-│   ├── worker-tools/       # Worker tools
-│   ├── phases/             # Phase runners
-│   │   ├── scout.ts
-│   │   ├── planner.ts
-│   │   ├── review.ts
-│   │   └── fix.ts
-│   ├── observability/      # Observability system
-│   └── validation/         # Validation layer
-├── validate-coord/         # Standalone validation CLI
-└── subagent/               # Shared agent utilities
+agents/                           # Symlinked to ~/.pi/agent/agents/coordination/
+├── coordinator.md
+├── worker.md
+├── scout.md
+├── planner.md
+└── reviewer.md
 
-agents/
-├── coordinator.md          # Coordinator agent definition
-├── worker.md               # Worker agent definition
-├── scout.md                # Scout agent definition
-├── planner.md              # Planner agent definition
-└── reviewer.md             # Reviewer agent definition
-
-skills/
-└── coordination/
-    └── SKILL.md            # Skill documentation
+skills/coordination/              # Symlinked to ~/.pi/agent/skills/coordination/
+└── SKILL.md
 ```
 
 ## License

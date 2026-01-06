@@ -1,9 +1,9 @@
 import * as fs from "node:fs";
 import * as path from "node:path";
 import type { ExtensionAPI, ExtensionContext } from "@mariozechner/pi-coding-agent";
-import { createCoordinateTool } from "../../tools/coordinate/index.js";
-import { createCoordOutputTool } from "../../tools/coord-output/index.js";
-import { CoordinationDashboard, MiniFooter } from "../../tools/coordinate/dashboard.js";
+import { createCoordinateTool } from "./coordinate/index.js";
+import { createCoordOutputTool } from "./coord-output/index.js";
+import { CoordinationDashboard, MiniFooter } from "./coordinate/dashboard.js";
 
 interface CoordinationResult {
 	asyncId: string;

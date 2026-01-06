@@ -1,9 +1,9 @@
 import * as fs from "node:fs";
 import * as path from "node:path";
 import type { ExtensionAPI, ExtensionContext } from "@mariozechner/pi-coding-agent";
-import { registerWorkerTools } from "../../tools/coordinate/worker-tools/index.js";
-import { consumeNudgeSync } from "../../tools/coordinate/nudge.js";
-import { A2AManager } from "../../tools/coordinate/a2a.js";
+import { registerWorkerTools } from "./coordinate/worker-tools/index.js";
+import { consumeNudgeSync } from "./coordinate/nudge.js";
+import { A2AManager } from "./coordinate/a2a.js";
 
 function getSelfReviewPrompt(specPath?: string): string {
 	const specInstruction = specPath

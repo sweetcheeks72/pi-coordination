@@ -19,6 +19,9 @@ All notable changes to pi-coordination.
   - Mini footer for persistent status after dashboard exit
 - **Philosophy section** in README explaining the "Ralph Wiggum on steroids" pattern
 
+### Changed
+- Consolidated `tools/` into `extensions/coordination/` - all code now lives in the extension folder
+
 ### Fixed
 - Supervisor worker state file path now uses correct `worker-{id}.json` format (was looking in non-existent `workers/` subdirectory)
 - Dashboard reads pipeline state from checkpoint files (not non-existent `pipeline-state.json`), with fallback to `progress.md` parsing
