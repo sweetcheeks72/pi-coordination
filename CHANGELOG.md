@@ -4,6 +4,38 @@ All notable changes to pi-coordination.
 
 ---
 
+## 2026-01-06
+
+### Added
+- **Coordination Dashboard** - Full-screen TUI for monitoring async coordination jobs via `/coord` command
+  - Pipeline status with phase indicators (pending/running/complete/failed)
+  - Task queue section with status, dependencies, and worker assignments
+  - Worker grid with scrolling, selection, and progress bars
+  - Event stream showing recent activity
+  - Cost breakdown by phase and worker
+  - Worker details overlay with stats, files modified, recent tools, and output
+  - Task queue overlay with full dependency visualization
+  - Worker actions: wrap_up, restart, abort via keyboard shortcuts
+  - Mini footer for persistent status after dashboard exit
+- **Philosophy section** in README explaining the "Ralph Wiggum on steroids" pattern
+
+### Fixed
+- Dashboard reads pipeline state from checkpoint files (not non-existent `pipeline-state.json`), with fallback to `progress.md` parsing
+- Dashboard checkpoint sorting now parses timestamps correctly (was sorting alphabetically by phase name)
+- Dashboard `recentTools` display now shows newest tools first (was showing oldest due to incorrect slice direction)
+- Dashboard tool timing calculation now computes relative duration from worker start (was passing absolute timestamp)
+- Dashboard task overlay now checks for null state before opening
+- Dashboard overlay render methods have defensive null checks
+- Dashboard handles all CoordinationEvent types (added `contract_received`, `coordinator`, `cost_limit_reached`)
+- Dashboard worker details now shows current task (looked up from tasks array)
+- Dashboard calls `dispose()` before exit to set disposed flag (was only calling `stopPolling()`)
+- Dashboard JSONL parsing now skips malformed lines instead of discarding all events
+- Dashboard uses `truncateToWidth` for all content to handle narrow terminals
+- Dashboard uses `padToWidth` helper for visible-width-aware column alignment (supports emojis and wide characters)
+- Dashboard checks `disposed` flag before async operations complete to prevent render-after-unmount
+
+---
+
 ## 2025-01-01
 
 ### Added

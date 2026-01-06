@@ -3,6 +3,7 @@ import * as path from "node:path";
 import type { ExtensionAPI, ExtensionContext } from "@mariozechner/pi-coding-agent";
 import { createCoordinateTool } from "../../tools/coordinate/index.js";
 import { createCoordOutputTool } from "../../tools/coord-output/index.js";
+import { CoordinationDashboard, MiniFooter } from "../../tools/coordinate/dashboard.js";
 
 interface CoordinationResult {
 	asyncId: string;
@@ -149,6 +150,43 @@ export default function registerCoordinationExtension(pi: ExtensionAPI): void {
 	const asyncJobs = new Map<string, AsyncJobState>();
 	let lastUiContext: ExtensionContext | null = null;
 	let poller: NodeJS.Timeout | null = null;
+	let dashboardFooterInstalled = false;
+
+	pi.registerCommand("coord", {
+		description: "Open coordination dashboard for async jobs",
+		handler: async (_args, ctx) => {
+			if (!ctx.hasUI) {
+				ctx.ui.notify("Dashboard requires interactive mode", "error");
+				return;
+			}
+
+			const runningJobs = Array.from(asyncJobs.values()).filter(
+				(j) => (j.status === "queued" || j.status === "running") && fs.existsSync(j.coordDir),
+			);
+
+			if (runningJobs.length === 0) {
+				ctx.ui.notify("No active async coordination", "info");
+				return;
+			}
+
+			const job = runningJobs[0];
+
+			if (dashboardFooterInstalled) {
+				ctx.ui.setFooter(undefined);
+				dashboardFooterInstalled = false;
+			}
+
+			await ctx.ui.custom((tui, theme, done) => {
+				return new CoordinationDashboard(tui, job.coordDir, theme, (installFooter) => {
+					if (installFooter) {
+						ctx.ui.setFooter((_tui, theme) => new MiniFooter(job.coordDir, theme));
+						dashboardFooterInstalled = true;
+					}
+					done();
+				});
+			});
+		},
+	});
 
 	const ensurePoller = () => {
 		if (poller) return;
@@ -242,5 +280,9 @@ export default function registerCoordinationExtension(pi: ExtensionAPI): void {
 		poller = null;
 		asyncJobs.clear();
 		ctx.ui.setWidget(WIDGET_KEY, undefined);
+		if (dashboardFooterInstalled) {
+			ctx.ui.setFooter(undefined);
+			dashboardFooterInstalled = false;
+		}
 	});
 }

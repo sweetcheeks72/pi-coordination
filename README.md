@@ -2,6 +2,26 @@
 
 Multi-agent coordination system for [pi](https://github.com/badlogic/pi-mono). Enables parallel plan execution with dependency management, contracts between workers, review cycles, and real-time TUI visibility.
 
+## Philosophy: Why This Works
+
+Pi-coordination is built on the "Ralph Wiggum" insight: LLMs work better when focused on ONE task with a fresh context, rather than juggling an entire spec at once.
+
+**The Core Pattern:**
+- **Stateless agents** - Fresh context each time, no accumulated confusion
+- **Stateful files** - `tasks.json` tracks progress, survives crashes
+- **One task per agent** - Focused execution, no context overload
+- **Persistent memory** - `events.jsonl` and worker state files, not agent memory
+
+**What we add to the basic pattern:**
+- **Parallel execution** - N workers instead of 1
+- **Task dependencies** - Blocked until prerequisites complete
+- **Contracts** - Cross-worker coordination for shared types/APIs
+- **File reservations** - Prevent conflicts on shared files
+- **Review cycles** - Dedicated quality gate after workers complete
+- **Real-time monitoring** - TUI dashboard for visibility
+
+Think of it as "Ralph Wiggum on steroids" - the same proven single-task-per-agent pattern, scaled up with parallelism and coordination primitives. If Ralph is a solo developer with a todo list, pi-coordination is a team with a project manager, code reviewer, and task board.
+
 ## Features
 
 - **Multi-Phase Pipeline**: Scout -> Planner -> Coordinator -> Workers -> Review -> Fixes -> Complete
@@ -19,6 +39,7 @@ Multi-agent coordination system for [pi](https://github.com/badlogic/pi-mono). E
 - **Artifacts + Truncation**: Full prompt/output JSONL artifacts with optional output truncation
 - **Checkpointing**: Save/restore at phase boundaries for resumable sessions
 - **Real-time TUI**: Phase timeline, worker status, and event stream
+- **Coordination Dashboard**: Full-screen `/coord` command for monitoring async jobs
 - **Coordination Logs**: Comprehensive markdown logs with executive summary
 - **Full Observability**: Events, spans, causality tracking, snapshots, structured errors
 - **Validation Layer**: Invariant checking, content validation, streaming warnings, markdown reports
@@ -270,6 +291,52 @@ Coordination Complete (2m 34s total, $0.89)
 | ok worker:52e2 | 52s    | $0.25 | 10    | store.ts
 ```
 
+## Coordination Dashboard
+
+For async coordination jobs, use the `/coord` command to open a full-screen dashboard:
+
+```
+ ┌─ Coordination ──────────────────────────────────────────────────────────────┐
+ │ Pipeline: [scout ✓] -> [planner ✓] -> [workers ●] -> [review] -> [complete] │
+ │ Cost: $1.23 / $40.00 limit                              Elapsed: 3m 45s     │
+ ├─ Task Queue (6) ────────────────────────────────────────────────────────────┤
+ │ ● task-1     Create user types          claimed    worker:04ea              │
+ │ ○ task-2     Implement auth service     pending    deps: task-1             │
+ │ ✓ task-3     Setup database schema      complete   worker:52e2              │
+ ├─ Workers (4) ───────────────────────────────────────────────────────────────┤
+ │ → 04ea   types.ts     ● working  1m23s   $0.45   12 turns  ████████░░       │
+ │   52e2   store.ts     ✓ complete 2m01s   $0.38   8 turns   ██████████       │
+ │   a3f1   handlers.ts  ● working  0m45s   $0.22   5 turns   ███░░░░░░░       │
+ │   b2c4   ----         ○ waiting  0m12s   $0.00   0 turns   ░░░░░░░░░░       │
+ ├─ Events ────────────────────────────────────────────────────────────────────┤
+ │ +1m23s  [04ea] write src/types.ts                                           │
+ │ +1m45s  [52e2] completed                                                    │
+ │ +2m01s  [a3f1] read src/handlers.ts                                         │
+ ├─ Cost Breakdown ────────────────────────────────────────────────────────────┤
+ │ By Phase: scout $0.12 | planner $0.34 | workers $0.77                       │
+ │ By Worker: 04ea $0.45 | 52e2 $0.38 | a3f1 $0.22                              │
+ └─────────────────────────────────────────────────────────────────────────────┘
+           [j/k] select  [Enter] details  [w]rap up  [R]estart  [A]bort  [t]asks  [q]uit
+```
+
+**Keyboard Controls:**
+| Key | Action |
+|-----|--------|
+| `j/k` or `↑/↓` | Navigate worker list |
+| `Enter` | Open worker details overlay |
+| `t` | Open full task queue overlay |
+| `w` | Send wrap_up nudge to selected worker |
+| `R` | Restart selected worker |
+| `A` | Abort selected worker |
+| `r` | Force refresh |
+| `q` or `Esc` | Exit dashboard (shows mini footer) |
+| `Q` | Exit without footer |
+
+**Mini Footer:** After exiting with `q`, a compact status line shows in the main UI:
+```
+[coord] workers ● 2/4 | $1.23 | 3m45s | /coord to open
+```
+
 ## Plan Format
 
 Plans should be markdown with clear steps:
@@ -468,6 +535,8 @@ Async runs start a detached runner and return immediately. Completion is deliver
 - Durable status: `coordDir/async/status.json`
 - Logs: `coordination-log-*.md` saved to `coordDir` by default in async runs
 
+**Note:** If using the [rewind extension](https://github.com/nicobailon/pi-rewind-hook), avoid restoring files via `/branch` while async coordination is running. Workers write files concurrently; restoring mid-flight can cause inconsistent state or worker failures.
+
 ## Coordination Data Layout
 
 ```
@@ -505,6 +574,7 @@ tools/
 ├── read-context/           # Read scout context without truncation
 ├── coordinate/             # Coordination runtime
 │   ├── index.ts            # Tool entry point with TUI rendering
+│   ├── dashboard.ts        # Full-screen coordination dashboard (/coord command)
 │   ├── async-runner.ts     # Detached async runner
 │   ├── pipeline.ts         # Multi-phase pipeline orchestration
 │   ├── types.ts            # Type definitions
