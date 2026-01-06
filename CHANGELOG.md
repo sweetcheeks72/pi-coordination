@@ -33,8 +33,11 @@ All notable changes to pi-coordination.
 - **Supervisor loop** monitors worker activity, nudges or restarts stuck workers (configurable via `v2.supervisor`)
 - **Discovered tasks workflow** - workers can add tasks via `add_discovered_task`, planner reviews before adding to queue
 - **A2A communication** - `send_message` / `check_messages` for inter-worker messaging
+- **Structured scout context** - Scout outputs `<file_map>` and `<file_contents>` sections for planner consumption
+- **`read_context` tool** - Planner tool to read large scout context files without truncation
 - New coordinator tools: `spawn_from_queue`, `get_task_queue_status`
 - New worker tools: `add_discovered_task`, `share_discovery`
+- Planner extension (`extensions/coordination/planner.ts`) with `read_context` tool
 - Extensions-first integration for coordinator/worker/coord_output
 - Async coordination runner with result files and durable `coordDir/async/status.json`
 - Artifacts + output truncation helpers for full-output recovery
@@ -43,8 +46,10 @@ All notable changes to pi-coordination.
 - Configurable self-review spec via `PI_SELF_REVIEW_SPEC_PATH` env var
 
 ### Changed
+- Scout agent now outputs structured format with file tree and full file contents
+- Planner reads scout context via `read_context` tool instead of inline prompt
 - Installation now cleans up legacy hooks/tools symlinks
-- README updated for V2 options, async mode, artifacts, and new file layout
+- README updated with scout context format, planner tools, and new file layout
 - Pipeline phases now include optional planner phase between scout and coordinator
 
 ### Removed

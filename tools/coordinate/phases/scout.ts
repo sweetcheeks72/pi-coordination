@@ -43,25 +43,62 @@ export async function runScoutPhase(
 ${planContent}
 
 ## Output Requirements
-1. Architecture overview relevant to the plan
-2. Key files that will need modification (with actual code snippets)
-3. Dependencies between components
-4. Existing patterns to follow
-5. Potential risks or complexities
+
+You MUST output a single file \`main.md\` with this EXACT structure:
+
+\`\`\`markdown
+<file_map>
+/path/to/project
+├── src
+│   ├── components
+│   │   ├── Button.tsx *
+│   │   ├── Input.tsx * +
+│   │   └── ...
+│   ├── utils
+│   │   └── helpers.ts +
+│   └── index.ts * +
+├── package.json
+└── README.md
+
+(* denotes files to be modified based on the plan)
+(+ denotes file contents included below)
+</file_map>
+
+<file_contents>
+File: /path/to/project/src/components/Input.tsx
+\`\`\`tsx
+// Full file contents here
+\`\`\`
+
+File: /path/to/project/src/utils/helpers.ts
+\`\`\`ts
+// Full file contents here
+\`\`\`
+</file_contents>
+\`\`\`
+
+## File Selection
+
+Mark files in the tree with:
+- \`*\` - Files that will need modification based on the plan
+- \`+\` - Files whose FULL contents are included in <file_contents>
+
+Include full contents for:
+1. Files that need modification (marked with *)
+2. Type definitions and interfaces relevant to the plan
+3. Files with patterns workers should follow
+4. Configuration files affecting the implementation
 
 ## Token Budget
-Target ~${tokenBudget} tokens for main.md. Prioritize:
-- Most relevant code sections for the plan
-- Interface definitions and types
-- Key function signatures
-- Example usage patterns
+Target ~${tokenBudget} tokens. Prioritize:
+- Files marked for modification (*)
+- Type definitions and interfaces
+- Pattern examples
+- Configuration files
 
-Save detailed output to: ${config.outputDir}/
+If you cannot include all relevant files, note which ones were omitted.
 
-### Output Structure
-- Save \`main.md\` - Primary context document (token-budgeted)
-- Save \`files/<name>.md\` - Detailed snippets for key files (if main.md would be too large)
-- Include actual code, not summaries`;
+Save output to: ${config.outputDir}/main.md`;
 
 	const agentName = config.agentName || "coordination/scout";
 	const agentsWithOverride = config.model 

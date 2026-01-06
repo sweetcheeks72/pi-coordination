@@ -1,11 +1,15 @@
 import * as fs from "node:fs/promises";
 import * as path from "node:path";
 import { createHash } from "node:crypto";
+import { fileURLToPath } from "node:url";
 import { runSingleAgent, type AgentRuntime } from "../../subagent/runner.js";
 import { discoverAgents } from "../../subagent/agents.js";
 import { TaskQueueManager } from "../task-queue.js";
-import type { Task, PlannerConfig } from "../types.js";
+import type { Task } from "../types.js";
 import type { OutputLimits } from "../../subagent/types.js";
+
+const __dirname = path.dirname(fileURLToPath(import.meta.url));
+const PLANNER_EXTENSION_PATH = path.resolve(__dirname, "../../../extensions/coordination/planner.ts");
 
 export interface PlannerPhaseConfig {
 	humanCheckpoint?: boolean;
@@ -13,6 +17,7 @@ export interface PlannerPhaseConfig {
 	model?: string;
 	outputLimits?: OutputLimits;
 	agentName?: string;
+	scoutContextPath?: string;
 }
 
 export interface PlannerResult {
@@ -34,9 +39,29 @@ export async function runPlannerPhase(
 	const startTime = Date.now();
 	const { agents } = discoverAgents(runtime.cwd, "user");
 
-	const scoutSection = scoutContext.trim()
-		? `## Scout Context (Codebase Analysis)\n${scoutContext}`
-		: "## Scout Context\n(No scout context provided - analyze the codebase as needed)";
+	const scoutContextPath = config.scoutContextPath || path.join(coordDir, "scout", "main.md");
+	const scoutFileExists = await fileExists(scoutContextPath);
+
+	let scoutSection: string;
+	if (scoutFileExists) {
+		scoutSection = `## Scout Context
+
+The scout has analyzed the codebase. Use the \`read_context\` tool to read the full context:
+
+\`\`\`
+read_context({ path: "${scoutContextPath}" })
+\`\`\`
+
+You can also read specific sections:
+- \`read_context({ path: "${scoutContextPath}", section: "file_map" })\` - Get the file tree
+- \`read_context({ path: "${scoutContextPath}", section: "file_contents" })\` - Get file contents
+
+Read the context FIRST before creating the task graph.`;
+	} else if (scoutContext.trim()) {
+		scoutSection = `## Scout Context (Codebase Analysis)\n${scoutContext}`;
+	} else {
+		scoutSection = "## Scout Context\n(No scout context provided - analyze the codebase as needed)";
+	}
 
 	const task = `Create a task graph for the following implementation plan.
 
@@ -44,6 +69,13 @@ ${scoutSection}
 
 ## Implementation Plan
 ${planContent}
+
+## Instructions
+
+1. FIRST: Use \`read_context\` to read the scout context file
+2. Analyze the file_map to understand project structure  
+3. Review file_contents to understand existing code patterns
+4. Create a task graph based on the plan and codebase analysis
 
 ## Output Requirements
 
@@ -106,6 +138,7 @@ Output ONLY the final JSON object after self-review, no other text.`;
 			outputLimits: config.outputLimits,
 			artifactsDir: path.join(coordDir, "artifacts"),
 			artifactLabel: "planner",
+			extensions: [PLANNER_EXTENSION_PATH],
 		},
 	);
 
@@ -284,5 +317,14 @@ function parseReviewResult(output: string): {
 		};
 	} catch {
 		return { approved: false, modified: false, reason: "Failed to parse review result" };
+	}
+}
+
+async function fileExists(filePath: string): Promise<boolean> {
+	try {
+		await fs.access(filePath);
+		return true;
+	} catch {
+		return false;
 	}
 }

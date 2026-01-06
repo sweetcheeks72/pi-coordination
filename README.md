@@ -161,6 +161,50 @@ The coordinate tool will:
 | `add_discovered_task` | Add a discovered task for planner review |
 | `share_discovery` | Share learnings with other workers |
 
+## Planner Tools
+
+| Tool | Description |
+|------|-------------|
+| `read_context` | Read scout context file without truncation (supports section filtering) |
+
+## Scout Context Format
+
+The scout outputs a structured context file for the planner with two sections:
+
+```markdown
+<file_map>
+/path/to/project
+├── src
+│   ├── components
+│   │   ├── Button.tsx *
+│   │   ├── Input.tsx * +
+│   │   └── ...
+│   └── index.ts +
+├── package.json
+└── README.md
+
+(* denotes files to be modified)
+(+ denotes file contents included below)
+</file_map>
+
+<file_contents>
+File: /path/to/project/src/components/Input.tsx
+```tsx
+export function Input() { ... }
+```
+
+File: /path/to/project/src/index.ts
+```ts
+export * from './components';
+```
+</file_contents>
+```
+
+The planner reads this context using the `read_context` tool:
+- `read_context({ path: "scout/main.md" })` - Full context
+- `read_context({ path: "scout/main.md", section: "file_map" })` - Just the file tree
+- `read_context({ path: "scout/main.md", section: "file_contents" })` - Just file contents
+
 ## TUI Display
 
 **Pipeline Timeline:**
@@ -418,10 +462,12 @@ extensions/
 └── coordination/
     ├── index.ts            # Main extension (coordinate + coord_output + async notify)
     ├── coordinator.ts      # Coordinator-only tools
-    └── worker.ts           # Worker tools + self-review hooks
+    ├── worker.ts           # Worker tools + self-review hooks
+    └── planner.ts          # Planner tools (read_context)
 
 tools/
 ├── coord-output/           # Read full outputs from coordDir/artifacts
+├── read-context/           # Read scout context without truncation
 ├── coordinate/             # Coordination runtime
 │   ├── index.ts            # Tool entry point with TUI rendering
 │   ├── async-runner.ts     # Detached async runner
