@@ -120,8 +120,7 @@ export type CoordinationEvent =
 	| { type: "cost_milestone"; threshold: number; totals: Record<string, number>; aggregate: number; timestamp: number }
 	| { type: "coordinator"; message: string; timestamp: number }
 	| { type: "phase_complete"; phase: PipelinePhase; duration: number; cost: number; timestamp: number }
-	| { type: "cost_warning"; total: number; timestamp: number }
-	| { type: "cost_pause"; total: number; timestamp: number };
+	| { type: "cost_limit_reached"; total: number; limit: number; timestamp: number };
 
 export type CoordinationStatus = "analyzing" | "executing" | "reviewing" | "complete" | "failed";
 
@@ -168,7 +167,7 @@ export interface PhaseResult {
 	attempt: number;
 }
 
-export type ExitReason = "clean" | "stuck" | "regression" | "max_cycles" | "cost_abort" | "user_abort";
+export type ExitReason = "clean" | "stuck" | "regression" | "max_cycles" | "cost_limit" | "user_abort";
 
 export interface PipelineState {
 	sessionId: string;
@@ -226,19 +225,12 @@ export interface WorkerDeviation {
 	timestamp: number;
 }
 
-export interface CostThresholds {
-	warn: number;
-	pause: number;
-	hard: number;
-}
-
 export interface CostState {
 	total: number;
 	byPhase: Record<PipelinePhase, number>;
 	byWorker: Record<string, number>;
-	warnings: number;
-	pauseCount: number;
-	thresholds: CostThresholds;
+	limit: number;
+	limitReached: boolean;
 }
 
 export interface Checkpoint {

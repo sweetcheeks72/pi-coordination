@@ -63,7 +63,7 @@ Use `false` to disable features:
   "coordination": {
     "reviewCycles": false,
     "supervisor": { "nudgeThresholdMs": 120000 },
-    "costThresholds": { "warn": 1.0, "pause": 5.0, "hard": 10.0 }
+    "costLimit": 40
   }
 }
 ```
@@ -112,18 +112,24 @@ coordinate({
   resume: "workers-1234567",
   maxFixCycles: 3,
   sameIssueLimit: 2,
-  reviewModel: "claude-opus-4-20250514",
   checkTests: true,
   async: false,
   maxOutput: { lines: 200 },
-  costThresholds: { warn: 1.0, pause: 5.0, hard: 10.0 },
-  pauseOnCostThreshold: false,
+  costLimit: 40,                // End gracefully when cost exceeds limit (default: $40)
   validate: true,
   planner: true,                // or { humanCheckpoint: true, maxSelfReviewCycles: 3 }
   reviewCycles: 5,              // worker self-review cycles (false to disable)
-  supervisor: true              // or { nudgeThresholdMs: 180000, ... }
+  supervisor: true,             // or { nudgeThresholdMs: 180000, ... }
+  // Per-phase model overrides (string sets model, object for full config)
+  scout: "claude-sonnet-4-5",
+  planner: { model: "claude-opus-4-5", maxSelfReviewCycles: 3 },
+  coordinator: "claude-opus-4-5",
+  worker: "claude-sonnet-4-5",
+  reviewer: "claude-opus-4-5"
 })
 ```
+
+**Model Resolution**: When multiple providers offer the same model ID, resolution follows provider registration order: `openai-codex` > `github-copilot` > `openrouter`. To target a specific provider, use explicit format: `"openai-codex/gpt-5.2"` or `"openrouter/anthropic/claude-sonnet-4-5"`.
 
 To disable logging, set `logPath: ""`.
 
@@ -189,13 +195,6 @@ The coordinate tool will:
 | `escalate_to_user` | Ask user a question |
 | `add_discovered_task` | Add a discovered task for planner review |
 | `share_discovery` | Share learnings with other workers |
-
-## Scout Tools
-
-| Tool | Description |
-|------|-------------|
-| `scan_files` | Scan codebase and return file tree with token estimates |
-| `bundle_files` | Bundle specified files into output with contents |
 
 ## Planner Tools
 
@@ -397,7 +396,7 @@ The coordination system includes comprehensive observability for debugging, repl
 - **Contract**: `contract_created`, `contract_signaled`, `contract_waiting`, `contract_received`
 - **Reservation**: `reservation_requested`, `reservation_granted`, `reservation_denied`, `reservation_transferred`, `reservation_released`
 - **Review**: `review_started`, `review_completed`, `fix_started`, `fix_completed`
-- **Cost**: `cost_updated`, `cost_threshold_crossed`
+- **Cost**: `cost_updated`, `cost_limit_reached`
 - **Task**: `task_claimed`, `task_completed`, `task_failed`, `task_discovered`, `task_reviewed`
 - **Self-Review**: `self_review_started`, `self_review_passed`, `self_review_limit_reached`
 - **Supervisor**: `worker_nudged`, `worker_restarting`, `worker_abandoned`
@@ -499,11 +498,9 @@ extensions/
     ├── index.ts            # Main extension (coordinate + coord_output + async notify)
     ├── coordinator.ts      # Coordinator-only tools
     ├── worker.ts           # Worker tools + self-review hooks
-    ├── planner.ts          # Planner tools (read_context)
-    └── scout.ts            # Scout tools (scan_files, bundle_files)
+    └── planner.ts          # Planner tools (read_context)
 
 tools/
-├── bundle-files/           # Scout bundle tools (scan_files, bundle_files)
 ├── coord-output/           # Read full outputs from coordDir/artifacts
 ├── read-context/           # Read scout context without truncation
 ├── coordinate/             # Coordination runtime

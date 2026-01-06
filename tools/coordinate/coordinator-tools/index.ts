@@ -18,6 +18,7 @@ const __dirname = path.dirname(fileURLToPath(import.meta.url));
 interface RuntimeConfig {
 	selfReview?: { enabled?: boolean; maxCycles?: number };
 	supervisor?: { enabled?: boolean; nudgeThresholdMs?: number; restartThresholdMs?: number; maxRestarts?: number; checkIntervalMs?: number };
+	models?: { scout?: string; planner?: string; coordinator?: string; worker?: string; reviewer?: string };
 }
 
 function loadRuntimeConfig(coordDir: string): RuntimeConfig {
@@ -91,15 +92,18 @@ export function spawnWorkerProcess(
 	const { workerId, identity } = config;
 	const shortId = workerId.slice(0, 4);
 
-	const model = modelOverride || workerAgent?.model || "claude-sonnet-4-20250514";
+	const runtimeConfigForModel = loadRuntimeConfig(coordDir);
+	const model = modelOverride || runtimeConfigForModel.models?.worker || workerAgent?.model;
 
 	const args: string[] = [
-		"--model", model,
 		"--mode", "json",
 		"-p",
 		"--no-session",
 		"--extension", workerExtensionPath,
 	];
+	if (model) {
+		args.unshift("--model", model);
+	}
 
 	let tmpPromptDir: string | null = null;
 	if (workerAgent?.systemPrompt) {

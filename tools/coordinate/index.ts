@@ -18,7 +18,7 @@ interface CoordinationSettings {
 	planner?: boolean | { enabled?: boolean; humanCheckpoint?: boolean; maxSelfReviewCycles?: number };
 	reviewCycles?: number | false;
 	supervisor?: boolean | { enabled?: boolean; nudgeThresholdMs?: number; restartThresholdMs?: number; maxRestarts?: number; checkIntervalMs?: number };
-	costThresholds?: { warn?: number; pause?: number; hard?: number };
+	costLimit?: number;
 	maxFixCycles?: number;
 	checkTests?: boolean;
 }
@@ -28,7 +28,7 @@ interface NormalizedSettings {
 	planner?: { enabled?: boolean; humanCheckpoint?: boolean; maxSelfReviewCycles?: number };
 	reviewCycles?: number | false;
 	supervisor?: { enabled?: boolean; nudgeThresholdMs?: number; restartThresholdMs?: number; maxRestarts?: number; checkIntervalMs?: number };
-	costThresholds?: { warn?: number; pause?: number; hard?: number };
+	costLimit?: number;
 	maxFixCycles?: number;
 	checkTests?: boolean;
 }
@@ -39,7 +39,7 @@ function normalizeSettings(raw: CoordinationSettings): NormalizedSettings {
 		planner: typeof raw.planner === "boolean" ? { enabled: raw.planner } : raw.planner,
 		reviewCycles: raw.reviewCycles,
 		supervisor: typeof raw.supervisor === "boolean" ? { enabled: raw.supervisor } : raw.supervisor,
-		costThresholds: raw.costThresholds,
+		costLimit: raw.costLimit,
 		maxFixCycles: raw.maxFixCycles,
 		checkTests: raw.checkTests,
 	};
@@ -177,7 +177,6 @@ const CoordinateParams = Type.Object({
 	resume: Type.Optional(Type.String({ description: "Checkpoint ID to resume from" })),
 	maxFixCycles: Type.Optional(Type.Number({ description: "Maximum review/fix cycles (default: 3)" })),
 	sameIssueLimit: Type.Optional(Type.Number({ description: "Times same issue can recur before giving up (default: 2)" })),
-	reviewModel: Type.Optional(Type.String({ description: "Model for code review phase" })),
 	checkTests: Type.Optional(Type.Boolean({ description: "Whether reviewer should check for tests (default: true)" })),
 	async: Type.Optional(Type.Boolean({ description: "Run coordination in background (default: false)" })),
 	asyncResultsDir: Type.Optional(Type.String({ description: "Override async results directory" })),
@@ -185,22 +184,35 @@ const CoordinateParams = Type.Object({
 		bytes: Type.Optional(Type.Number({ description: "Max output bytes to return from subagents" })),
 		lines: Type.Optional(Type.Number({ description: "Max output lines to return from subagents" })),
 	})),
-	costThresholds: Type.Optional(Type.Object({
-		warn: Type.Number({ description: "Cost threshold for warning ($)", default: 1.0 }),
-		pause: Type.Number({ description: "Cost threshold to pause and confirm ($)", default: 5.0 }),
-		hard: Type.Number({ description: "Cost threshold to abort ($)", default: 10.0 }),
-	})),
-	pauseOnCostThreshold: Type.Optional(Type.Boolean({ description: "Block and ask user when pause threshold is hit (default: false)" })),
+	costLimit: Type.Optional(Type.Number({ description: "Cost limit in dollars - ends gracefully before next review cycle (default: 40)" })),
 	validate: Type.Optional(Type.Boolean({ description: "Run validation after completion (default: false)" })),
 	validateStream: Type.Optional(Type.Boolean({ description: "Stream invariant warnings in real-time (default: false)" })),
+	scout: Type.Optional(Type.Union([
+		Type.String(),
+		Type.Object({ model: Type.Optional(Type.String()) }),
+	], { description: "Scout config: string sets model, object for full config" })),
 	planner: Type.Optional(Type.Union([
 		Type.Boolean(),
+		Type.String(),
 		Type.Object({
 			enabled: Type.Optional(Type.Boolean()),
+			model: Type.Optional(Type.String()),
 			humanCheckpoint: Type.Optional(Type.Boolean()),
 			maxSelfReviewCycles: Type.Optional(Type.Number()),
 		}),
-	], { description: "Enable planner phase (default: true)" })),
+	], { description: "Planner config: boolean enables/disables, string sets model, object for full config" })),
+	coordinator: Type.Optional(Type.Union([
+		Type.String(),
+		Type.Object({ model: Type.Optional(Type.String()) }),
+	], { description: "Coordinator config: string sets model, object for full config" })),
+	worker: Type.Optional(Type.Union([
+		Type.String(),
+		Type.Object({ model: Type.Optional(Type.String()) }),
+	], { description: "Worker config: string sets model, object for full config" })),
+	reviewer: Type.Optional(Type.Union([
+		Type.String(),
+		Type.Object({ model: Type.Optional(Type.String()) }),
+	], { description: "Reviewer config: string sets model, object for full config" })),
 	reviewCycles: Type.Optional(Type.Union([
 		Type.Number(),
 		Type.Literal(false),
@@ -507,12 +519,8 @@ export async function runCoordinationSession(options: CoordinationRunOptions): P
 		params.maxFixCycles ?? 3,
 	);
 	const settings = loadCoordinationSettings();
-	const effectiveCostThresholds = {
-		warn: params.costThresholds?.warn ?? settings.costThresholds?.warn,
-		pause: params.costThresholds?.pause ?? settings.costThresholds?.pause,
-		hard: params.costThresholds?.hard ?? settings.costThresholds?.hard,
-	};
-	let costState = initializeCostState(effectiveCostThresholds);
+	const costLimit = params.costLimit ?? settings.costLimit ?? 40;
+	let costState = initializeCostState(costLimit);
 	let reviewHistory: ReviewResult[] = [];
 	let resumeFromPhase: PipelinePhase | null = null;
 
@@ -550,9 +558,27 @@ export async function runCoordinationSession(options: CoordinationRunOptions): P
 		typeof v === "number" ? Array(v).fill("worker") : v;
 	const normalizeBoolOrObj = <T extends object>(v: boolean | T | undefined): T | undefined =>
 		typeof v === "boolean" ? { enabled: v } as T : v;
+	const normalizePhaseConfig = <T extends { model?: string }>(v: string | T | boolean | undefined): T | undefined => {
+		if (typeof v === "string") return { model: v } as T;
+		if (typeof v === "boolean") return { enabled: v } as T;
+		return v;
+	};
 
-	const paramPlanner = normalizeBoolOrObj(params.planner);
+	const paramScout = normalizePhaseConfig(params.scout);
+	const paramPlanner = normalizePhaseConfig(params.planner);
+	const paramCoordinator = normalizePhaseConfig(params.coordinator);
+	const paramWorker = normalizePhaseConfig(params.worker);
+	const paramReviewer = normalizePhaseConfig(params.reviewer);
 	const paramSupervisor = normalizeBoolOrObj(params.supervisor);
+
+	const defaultModel = options.defaultModel;
+	const models = {
+		scout: paramScout?.model || defaultModel,
+		planner: (paramPlanner as { model?: string })?.model || defaultModel,
+		coordinator: paramCoordinator?.model || defaultModel,
+		worker: paramWorker?.model || defaultModel,
+		reviewer: paramReviewer?.model || defaultModel,
+	};
 
 	const reviewCycles = params.reviewCycles ?? settings.reviewCycles ?? 5;
 	const selfReviewConfig = {
@@ -569,15 +595,14 @@ export async function runCoordinationSession(options: CoordinationRunOptions): P
 		agents: normalizeAgents(params.agents) ?? settings.agents ?? ["worker", "worker", "worker", "worker"],
 		maxFixCycles: params.maxFixCycles ?? settings.maxFixCycles ?? 3,
 		sameIssueLimit: params.sameIssueLimit ?? 2,
-		reviewModel: params.reviewModel,
 		checkTests: params.checkTests ?? settings.checkTests ?? true,
-		costThresholds: costState.thresholds,
-		pauseOnCostThreshold: params.pauseOnCostThreshold ?? false,
+		costLimit,
 		maxOutput: params.maxOutput,
+		models,
 		planner: {
-			enabled: paramPlanner?.enabled ?? settings.planner?.enabled ?? true,
-			humanCheckpoint: paramPlanner?.humanCheckpoint ?? settings.planner?.humanCheckpoint ?? false,
-			maxSelfReviewCycles: paramPlanner?.maxSelfReviewCycles ?? settings.planner?.maxSelfReviewCycles ?? 5,
+			enabled: (paramPlanner as { enabled?: boolean })?.enabled ?? settings.planner?.enabled ?? true,
+			humanCheckpoint: (paramPlanner as { humanCheckpoint?: boolean })?.humanCheckpoint ?? settings.planner?.humanCheckpoint ?? false,
+			maxSelfReviewCycles: (paramPlanner as { maxSelfReviewCycles?: number })?.maxSelfReviewCycles ?? settings.planner?.maxSelfReviewCycles ?? 5,
 		},
 		selfReview: selfReviewConfig,
 		supervisor: {
@@ -592,6 +617,7 @@ export async function runCoordinationSession(options: CoordinationRunOptions): P
 	const runtimeConfig = {
 		selfReview: pipelineConfig.selfReview,
 		supervisor: pipelineConfig.supervisor,
+		models: pipelineConfig.models,
 	};
 	await fs.writeFile(
 		path.join(coordDir, "runtime-config.json"),
@@ -615,7 +641,7 @@ export async function runCoordinationSession(options: CoordinationRunOptions): P
 			agents: params.agents,
 			maxFixCycles: params.maxFixCycles ?? 3,
 			sameIssueLimit: params.sameIssueLimit ?? 2,
-			costThresholds: costState.thresholds,
+			costLimit,
 		},
 	});
 
@@ -832,9 +858,12 @@ export async function runCoordinationSession(options: CoordinationRunOptions): P
 			);
 
 			updatePhaseStatus("coordinator", "running", pipelineContext);
+			const coordAgents = pipelineConfig.models?.coordinator
+				? augmentedAgents.map(a => a.name === "coordinator" ? { ...a, model: pipelineConfig.models!.coordinator } : a)
+				: augmentedAgents;
 			coordinatorResult = await runSingleAgent(
 				runtime,
-				augmentedAgents,
+				coordAgents,
 				"coordinator",
 				task,
 				planDir,
@@ -906,7 +935,7 @@ export async function runCoordinationSession(options: CoordinationRunOptions): P
 			cost: costState,
 		};
 
-		const isError = coordExitError || pipelineState.exitReason === "cost_abort" || pipelineState.exitReason === "stuck";
+		const isError = coordExitError || pipelineState.exitReason === "cost_limit" || pipelineState.exitReason === "stuck";
 
 		let summary: string;
 		if (pipelineState.exitReason === "clean") {
@@ -915,8 +944,8 @@ export async function runCoordinationSession(options: CoordinationRunOptions): P
 			summary = `Coordination completed with unresolved issues after ${pipelineState.fixCycle} fix cycles`;
 		} else if (pipelineState.exitReason === "max_cycles") {
 			summary = `Coordination completed - max fix cycles (${pipelineState.maxFixCycles}) reached`;
-		} else if (pipelineState.exitReason === "cost_abort") {
-			summary = `Coordination aborted - cost threshold exceeded ($${costState.total.toFixed(2)})`;
+		} else if (pipelineState.exitReason === "cost_limit") {
+			summary = `Coordination ended - cost limit reached ($${costState.total.toFixed(2)} / $${costState.limit.toFixed(2)})`;
 		} else {
 			summary = getResultOutput(coordinatorResult) ||
 				(finalState.status === "complete" ? "Coordination completed" : `Coordination ended: ${finalState.status}`);
@@ -1225,7 +1254,7 @@ export function createCoordinateTool(events: EventBus): ToolDefinition<typeof Co
 				container.addChild(new Text(`Current: ${current}`, 0, 0));
 				if (details.cost) {
 					container.addChild(new Text(
-						`Cost: $${details.cost.total.toFixed(2)} / $${details.cost.thresholds.pause.toFixed(2)} pause threshold`,
+						`Cost: $${details.cost.total.toFixed(2)} / $${details.cost.limit.toFixed(2)} limit`,
 						0, 0
 					));
 				}
@@ -1352,7 +1381,7 @@ export function createCoordinateTool(events: EventBus): ToolDefinition<typeof Co
 				for (const ev of recentEvents) {
 					const elapsed = `+${((ev.timestamp - firstTs) / 1000).toFixed(1)}s`;
 					let shortId: string;
-					if (ev.type === "cost_milestone" || ev.type === "cost_warning" || ev.type === "cost_pause") {
+					if (ev.type === "cost_milestone" || ev.type === "cost_limit_reached") {
 						shortId = "$";
 					} else if (ev.type === "phase_complete") {
 						shortId = "sys";
@@ -1401,11 +1430,8 @@ export function createCoordinateTool(events: EventBus): ToolDefinition<typeof Co
 						case "phase_complete":
 							line += theme.fg("success", `phase ${ev.phase} done ($${ev.cost.toFixed(2)})`);
 							break;
-						case "cost_warning":
-							line += theme.fg("warning", `cost warning: $${ev.total.toFixed(2)}`);
-							break;
-						case "cost_pause":
-							line += theme.fg("error", `cost pause: $${ev.total.toFixed(2)}`);
+						case "cost_limit_reached":
+							line += theme.fg("warning", `cost limit reached: $${(ev as { total: number }).total.toFixed(2)}`);
 							break;
 					}
 

@@ -91,11 +91,9 @@ This document describes the architecture and workflows of pi-coordination:
 +-------------------------------------------------------------------------------+
 |                              SCOUT PHASE                                      |
 |  Agent: coordination/scout                                                    |
-|  Tools: scan_files, bundle_files                                              |
-|  - Uses scan_files() to get file tree with token estimates                    |
-|  - Uses bundle_files() to get contents of selected files                      |
+|  - Analyzes codebase with PLANNER focus (not worker focus)                    |
 |  - Produces structured context with <file_map> and <file_contents>            |
-|  - Token-budgeted output (~100K tokens max)                                   |
+|  - Token-budgeted output (~30K tokens target)                                 |
 |  - Output: scout/main.md with file tree and full file contents                |
 +-------------------------------------------------------------------------------+
                                       |

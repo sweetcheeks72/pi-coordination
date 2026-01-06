@@ -35,10 +35,8 @@ All notable changes to pi-coordination.
 - **A2A communication** - `send_message` / `check_messages` for inter-worker messaging
 - **Structured scout context** - Scout outputs `<file_map>` and `<file_contents>` sections for planner consumption
 - **`read_context` tool** - Planner tool to read large scout context files without truncation
-- **Scout bundle tools** - `scan_files` and `bundle_files` for efficient codebase analysis
 - New coordinator tools: `spawn_from_queue`, `get_task_queue_status`
 - New worker tools: `add_discovered_task`, `share_discovery`
-- New scout tools: `scan_files`, `bundle_files`
 - Planner extension (`extensions/coordination/planner.ts`) with `read_context` tool
 - Extensions-first integration for coordinator/worker/coord_output
 - Async coordination runner with result files and durable `coordDir/async/status.json`
@@ -53,7 +51,7 @@ All notable changes to pi-coordination.
 - **Settings support**: Defaults can be configured in `~/.pi/agent/settings.json` under `coordination` key
 - **Elegant API**: `agents: 4`, `planner: true`, `reviewCycles: 5` shorthand forms
 - **Simplified self-review**: `reviewCycles: 5` replaces `selfReview: { maxCycles: 5 }` (use `false` to disable)
-- **Scout token budget**: Increased from 30K to 100K tokens
+- **Cost control**: Simplified to single `costLimit` param (default: $40) - ends gracefully when exceeded
 
 ### Fixed
 - Self-review config now properly passed to workers via `PI_SELF_REVIEW_ENABLED` and `PI_MAX_SELF_REVIEW_CYCLES` env vars
@@ -66,6 +64,8 @@ All notable changes to pi-coordination.
 
 ### Removed
 - `worker-hooks/reservation.ts` (replaced by extensions model)
+- `reviewModel` parameter (use `reviewer: { model }` instead)
+- `costThresholds` and `pauseOnCostThreshold` (replaced by simple `costLimit`)
 
 ---
 

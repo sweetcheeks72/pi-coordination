@@ -104,11 +104,8 @@ export function generateProgressDoc(
 				case "phase_complete":
 					desc = `Phase ${ev.phase} complete ($${ev.cost.toFixed(2)})`;
 					break;
-				case "cost_warning":
-					desc = `Cost warning: $${ev.total.toFixed(2)}`;
-					break;
-				case "cost_pause":
-					desc = `Cost pause: $${ev.total.toFixed(2)}`;
+				case "cost_limit_reached":
+					desc = `Cost limit reached: $${ev.total.toFixed(2)}`;
 					break;
 				default:
 					desc = ev.type;

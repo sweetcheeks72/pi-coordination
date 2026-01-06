@@ -10,7 +10,6 @@ import type {
 	EscalationResponse,
 	FileReservation,
 	CostState,
-	CostThresholds,
 	PipelinePhase,
 	ReviewIssue,
 } from "./types.js";
@@ -349,9 +348,8 @@ export class FileBasedStorage {
 					total: 0,
 					byPhase: {} as Record<PipelinePhase, number>,
 					byWorker: {},
-					warnings: 0,
-					pauseCount: 0,
-					thresholds: { warn: 1, pause: 5, hard: 10 },
+					limit: 40,
+					limitReached: false,
 				};
 			}
 
@@ -371,19 +369,10 @@ export class FileBasedStorage {
 				total: 0,
 				byPhase: {} as Record<PipelinePhase, number>,
 				byWorker: {},
-				warnings: 0,
-				pauseCount: 0,
-				thresholds: { warn: 1, pause: 5, hard: 10 },
+				limit: 40,
+				limitReached: false,
 			};
 		}
-	}
-
-	async checkThresholds(thresholds: CostThresholds): Promise<"ok" | "warn" | "pause" | "abort"> {
-		const state = await this.getCostState();
-		if (state.total >= thresholds.hard) return "abort";
-		if (state.total >= thresholds.pause) return "pause";
-		if (state.total >= thresholds.warn) return "warn";
-		return "ok";
 	}
 
 	async trackIssue(issue: ReviewIssue): Promise<void> {

@@ -1,11 +1,8 @@
 import * as fs from "node:fs/promises";
 import * as path from "node:path";
-import { fileURLToPath } from "node:url";
 import { runSingleAgent, type AgentRuntime } from "../../subagent/runner.js";
 import { discoverAgents } from "../../subagent/agents.js";
 import type { OutputLimits } from "../../subagent/types.js";
-
-const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
 export interface ScoutConfig {
 	depth: "shallow" | "deep";
@@ -38,46 +35,75 @@ export async function runScoutPhase(
 
 	await fs.mkdir(config.outputDir, { recursive: true });
 
-	const tokenBudget = config.tokenBudget || 100000;
+	const tokenBudget = config.tokenBudget || 30000;
 
 	const task = `Analyze this implementation plan and the codebase to provide context for PLANNING task breakdown.
 
 ## Plan
 ${planContent}
 
-## Instructions
+## Output Requirements
 
-1. Use \`scan_files()\` to see the codebase structure with token counts
-2. Identify files relevant to this plan:
-   - Files that need modification
-   - Type definitions and interfaces
-   - Pattern examples workers should follow
-   - Configuration files
-3. Use \`bundle_files({ files: [...] })\` to get contents (max ${tokenBudget} tokens)
-4. Output the result to \`${config.outputDir}/main.md\`
-
-## Output Format
-
-Create \`main.md\` with this structure:
+You MUST output a single file \`main.md\` with this EXACT structure:
 
 \`\`\`markdown
 <file_map>
-(tree from scan_files, add * for files to modify, + for files included below)
+/path/to/project
+├── src
+│   ├── components
+│   │   ├── Button.tsx *
+│   │   ├── Input.tsx * +
+│   │   └── ...
+│   ├── utils
+│   │   └── helpers.ts +
+│   └── index.ts * +
+├── package.json
+└── README.md
+
+(* denotes files to be modified based on the plan)
+(+ denotes file contents included below)
 </file_map>
 
 <file_contents>
-(output from bundle_files goes here)
+File: /path/to/project/src/components/Input.tsx
+\`\`\`tsx
+// Full file contents here
+\`\`\`
+
+File: /path/to/project/src/utils/helpers.ts
+\`\`\`ts
+// Full file contents here
+\`\`\`
 </file_contents>
 \`\`\`
 
-The \`bundle_files\` output is already formatted - just wrap it in the \`<file_contents>\` tags.`;
+## File Selection
+
+Mark files in the tree with:
+- \`*\` - Files that will need modification based on the plan
+- \`+\` - Files whose FULL contents are included in <file_contents>
+
+Include full contents for:
+1. Files that need modification (marked with *)
+2. Type definitions and interfaces relevant to the plan
+3. Files with patterns workers should follow
+4. Configuration files affecting the implementation
+
+## Token Budget
+Target ~${tokenBudget} tokens. Prioritize:
+- Files marked for modification (*)
+- Type definitions and interfaces
+- Pattern examples
+- Configuration files
+
+If you cannot include all relevant files, note which ones were omitted.
+
+Save output to: ${config.outputDir}/main.md`;
 
 	const agentName = config.agentName || "coordination/scout";
 	const agentsWithOverride = config.model 
 		? agents.map(a => a.name === agentName ? { ...a, model: config.model } : a)
 		: agents;
-
-	const scoutExtensionPath = path.resolve(__dirname, "..", "..", "..", "extensions", "coordination", "scout.ts");
 
 	const result = await runSingleAgent(
 		runtime,
@@ -89,7 +115,7 @@ The \`bundle_files\` output is already formatted - just wrap it in the \`<file_c
 		signal,
 		undefined,
 		(results) => ({ mode: "single", results, agentScope: "user", projectAgentsDir: null }),
-		{ outputLimits: config.outputLimits, artifactsDir: path.join(coordDir, "artifacts"), artifactLabel: "scout", extensions: [scoutExtensionPath] },
+		{ outputLimits: config.outputLimits, artifactsDir: path.join(coordDir, "artifacts"), artifactLabel: "scout" },
 	);
 
 	const contextPath = path.join(config.outputDir, "main.md");

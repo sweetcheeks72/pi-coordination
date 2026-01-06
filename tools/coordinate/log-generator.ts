@@ -196,11 +196,8 @@ export function generateCoordinationLog(data: LogData): string {
 			case "phase_complete":
 				line += `**Phase ${ev.phase} complete** (${formatDuration(ev.duration)}, $${ev.cost.toFixed(2)})`;
 				break;
-			case "cost_warning":
-				line += `**Cost warning:** $${ev.total.toFixed(2)}`;
-				break;
-			case "cost_pause":
-				line += `**Cost pause triggered:** $${ev.total.toFixed(2)}`;
+			case "cost_limit_reached":
+				line += `**Cost limit reached:** $${ev.total.toFixed(2)}`;
 				break;
 		}
 
@@ -310,10 +307,7 @@ export function generateCoordinationLog(data: LogData): string {
 			lines.push(``);
 		}
 
-		lines.push(`**Thresholds:**`);
-		lines.push(`- Warn: $${costState.thresholds.warn.toFixed(2)}`);
-		lines.push(`- Pause: $${costState.thresholds.pause.toFixed(2)}`);
-		lines.push(`- Hard: $${costState.thresholds.hard.toFixed(2)}`);
+		lines.push(`**Limit:** $${costState.limit.toFixed(2)}${costState.limitReached ? " (reached)" : ""}`);
 		lines.push(``);
 	}
 

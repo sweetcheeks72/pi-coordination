@@ -7,7 +7,6 @@ import type {
 	PipelineState,
 	PhaseResult,
 	CostState,
-	CostThresholds,
 	CoordinationState,
 	WorkerStateFile,
 	ReviewIssue,
@@ -32,11 +31,16 @@ export interface PipelineConfig {
 	agents: string[];
 	maxFixCycles: number;
 	sameIssueLimit: number;
-	reviewModel?: string;
 	checkTests: boolean;
-	costThresholds: CostThresholds;
-	pauseOnCostThreshold: boolean;
+	costLimit: number;
 	maxOutput?: OutputLimits;
+	models?: {
+		scout?: string;
+		planner?: string;
+		coordinator?: string;
+		worker?: string;
+		reviewer?: string;
+	};
 	planner?: Partial<PlannerConfig>;
 	selfReview?: Partial<SelfReviewConfig>;
 	supervisor?: Partial<SupervisorConfig & { enabled: boolean }>;
@@ -93,7 +97,7 @@ export function initializePipelineState(
 	};
 }
 
-export function initializeCostState(thresholds?: Partial<CostThresholds>): CostState {
+export function initializeCostState(costLimit: number): CostState {
 	return {
 		total: 0,
 		byPhase: {
@@ -107,13 +111,8 @@ export function initializeCostState(thresholds?: Partial<CostThresholds>): CostS
 			failed: 0,
 		},
 		byWorker: {},
-		warnings: 0,
-		pauseCount: 0,
-		thresholds: {
-			warn: thresholds?.warn ?? 1.0,
-			pause: thresholds?.pause ?? 5.0,
-			hard: thresholds?.hard ?? 10.0,
-		},
+		limit: costLimit,
+		limitReached: false,
 	};
 }
 
@@ -188,40 +187,19 @@ export async function saveProgressDoc(ctx: PipelineContext): Promise<void> {
 	await fs.writeFile(progressPath, progressContent);
 }
 
-export async function checkCostThresholds(
-	ctx: PipelineContext,
-	config: PipelineConfig,
-): Promise<"continue" | "warn" | "pause" | "abort"> {
-	const { total } = ctx.costState;
-	const { warn, pause, hard } = ctx.costState.thresholds;
+export async function checkCostLimit(ctx: PipelineContext): Promise<boolean> {
+	const { total, limit, limitReached } = ctx.costState;
 
-	if (total >= hard) {
-		await ctx.storage.appendEvent({ type: "cost_pause", total, timestamp: Date.now() });
-		await ctx.obs?.events.emit({ type: "cost_threshold_crossed", threshold: "hard", total });
-		ctx.pipelineState.exitReason = "cost_abort";
-		ctx.abort?.();
-		return "abort";
+	if (total >= limit && !limitReached) {
+		ctx.costState.limitReached = true;
+		await ctx.storage.appendEvent({ type: "cost_limit_reached", total, limit, timestamp: Date.now() });
+		await ctx.obs?.events.emit({ type: "cost_limit_reached", total, limit });
+		console.warn(`[COST LIMIT] Reached $${total.toFixed(2)} / $${limit.toFixed(2)} - ending coordination gracefully`);
+		ctx.pipelineState.exitReason = "cost_limit";
+		return true;
 	}
 
-	if (total >= pause && ctx.costState.pauseCount === 0) {
-		ctx.costState.pauseCount++;
-		await ctx.storage.appendEvent({ type: "cost_pause", total, timestamp: Date.now() });
-		await ctx.obs?.events.emit({ type: "cost_threshold_crossed", threshold: "pause", total });
-
-		if (config.pauseOnCostThreshold) {
-			// TODO: Implement escalateToUser for blocking pause
-		}
-		return "pause";
-	}
-
-	if (total >= warn && ctx.costState.warnings === 0) {
-		ctx.costState.warnings++;
-		await ctx.storage.appendEvent({ type: "cost_warning", total, timestamp: Date.now() });
-		await ctx.obs?.events.emit({ type: "cost_threshold_crossed", threshold: "warn", total });
-		return "warn";
-	}
-
-	return "continue";
+	return false;
 }
 
 function detectStuckIssues(
@@ -262,6 +240,7 @@ export async function runScoutPhaseWrapper(
 			outputDir: path.join(config.coordDir, "scout"),
 			maxFileSize: 50000,
 			outputLimits: config.maxOutput,
+			model: config.models?.scout,
 		};
 
 		const result = await runScoutPhase(
@@ -329,6 +308,7 @@ export async function runPlannerPhaseWrapper(
 			humanCheckpoint: config.planner.humanCheckpoint,
 			maxSelfReviewCycles: config.planner.maxSelfReviewCycles || 5,
 			outputLimits: config.maxOutput,
+			model: config.models?.planner,
 		};
 
 		await ctx.obs?.events.emit({
@@ -412,7 +392,7 @@ export async function runReviewPhaseWrapper(
 
 	try {
 		const reviewConfig: ReviewConfig = {
-			model: config.reviewModel,
+			model: config.models?.reviewer,
 			checkTests: config.checkTests,
 			verifyPlanGoals: true,
 			outputLimits: config.maxOutput,
@@ -569,8 +549,7 @@ export async function runReviewFixLoop(
 	config: PipelineConfig,
 ): Promise<void> {
 	while (ctx.pipelineState.fixCycle < ctx.pipelineState.maxFixCycles) {
-		const costCheck = await checkCostThresholds(ctx, config);
-		if (costCheck === "abort") {
+		if (await checkCostLimit(ctx)) {
 			return;
 		}
 
