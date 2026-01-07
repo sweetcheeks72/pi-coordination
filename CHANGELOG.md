@@ -36,6 +36,7 @@ All notable changes to pi-coordination.
 - **Dashboard `[??]` events** - Added handlers for `session_started`, `session_completed`, `phase_started`, `phase_completed`, `cost_updated`, `checkpoint_saved`, `planner_review_started`, `planner_review_complete`
 - **Agent config visibility** - Log agent configuration when spawning (model, tools, prompt mode)
 - **Override + no tools warning** - Warn at agent discovery if `system-prompt-mode: override` with no tools specified
+- **Skill doc rewrite** - Updated to current API, emphasizes passing specs directly (don't rewrite user's files)
 
 ---
 

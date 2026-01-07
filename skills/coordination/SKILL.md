@@ -5,167 +5,163 @@ description: Multi-agent coordination for parallel plan execution with the coord
 
 # Coordination Skill
 
-Multi-agent coordination for parallel plan execution.
+Multi-agent coordination for parallel task execution.
 
-**YOU HAVE THE `coordinate` TOOL AVAILABLE.** When asked to execute a plan with multiple workers, run tasks in parallel, or coordinate multi-step work - USE THE `coordinate` TOOL, not `subagent`.
-**You also have `coord_output` available** to read full worker outputs from artifacts when the coordinate tool truncates its preview.
+**YOU HAVE THE `coordinate` TOOL AVAILABLE.** When asked to execute a plan, spec, or PRD - USE THE `coordinate` TOOL.
 
-## When to Use `coordinate`
+## IMPORTANT: Pass Files Directly
 
-Use the `coordinate` tool when:
-- User asks to "run a plan with X workers"
-- User wants "parallel execution" of steps
-- A plan has multiple independent tracks
-- Work spans multiple files that different agents could handle
-- Complex work would benefit from divide-and-conquer approach
-- User mentions "coordination", "parallel workers", or "split the work"
+**DO NOT rewrite or convert the user's plan/spec.** Pass it directly to coordinate:
 
-**Do NOT use `subagent` for parallel plan execution** - use `coordinate` instead.
+```typescript
+// User says "implement spec.md" → pass it directly
+coordinate({ plan: "./spec.md" })
+
+// User says "execute my-plan.md with 8 workers"
+coordinate({ plan: "./my-plan.md", agents: 8 })
+```
+
+The planner phase will analyze and decompose ANY format - prose, specs, task lists. **You don't need to convert it first.**
+
+**Defaults:** 4 workers, planner enabled, 5 self-review cycles, supervisor enabled, $40 cost limit.
+
+## When to Use
+
+Use `coordinate` when:
+- User has a **plan**, **spec**, or **PRD** to implement
+- User says "implement", "execute", "run", "coordinate" a file
+- Work spans multiple files that could be parallelized
+
+**Just pass the file directly** — don't rewrite it, don't create a new plan from it.
+
+**Any format works:**
+- Prose PRD → Planner decomposes into tasks
+- Detailed spec → Planner extracts tasks
+- Task list → Planner validates and uses
 
 ## Tool Parameters
 
 ```typescript
 coordinate({
-  plan: string,               // Path to markdown plan file
-  agents: string[],           // Agent types, e.g. ["worker", "worker", "worker"]
-  async?: boolean,            // Run in background (default false)
-  asyncResultsDir?: string,   // Override async results dir (default /tmp/pi-async-coordination-results)
-  maxFixCycles?: number,      // Default 3
-  sameIssueLimit?: number,    // Default 2
-  reviewModel?: string,       // Override review model
-  checkTests?: boolean,       // Default true
-  maxOutput?: { bytes?: number; lines?: number }, // Truncate returned output, full output in artifacts
-  costThresholds?: { warn: number; pause: number; hard: number },
-  pauseOnCostThreshold?: boolean,
-  validate?: boolean,
-  validateStream?: boolean
+  // Required
+  plan: string,                    // Path to plan/spec markdown file
+
+  // Common options (all optional)
+  agents: number | string[],       // Worker count or array (default: 4)
+  planner: boolean | object,       // Enable planner or config (default: true)
+  reviewCycles: number | false,    // Worker self-review cycles (default: 5, false to disable)
+  supervisor: boolean | object,    // Monitor stuck workers (default: true)
+  costLimit: number,               // End gracefully at limit (default: $40)
+  
+  // Async mode
+  async: boolean,                  // Run in background (default: false)
+  
+  // Advanced
+  maxFixCycles: number,            // Review/fix iterations (default: 3)
+  validate: boolean,               // Run validation after (default: false)
+  checkTests: boolean,             // Reviewer checks tests (default: true)
+  
+  // Model overrides (string sets model, object for full config)
+  scout: string | { model: string },
+  coordinator: string | { model: string },
+  worker: string | { model: string },
+  reviewer: string | { model: string },
 })
-
-coord_output({
-  ids: string[],              // Worker IDs or labels (e.g. ["worker-04ea", "scout", "review"])
-  coordDir?: string,          // Defaults to PI_COORDINATION_DIR
-  format?: "raw" | "json" | "stripped"
-})
 ```
 
-## Example Invocations
+**Note:** `planner` serves dual purpose - `planner: false` disables it, `planner: { model: "..." }` configures it.
 
-User: "Execute plan.md with 4 workers"
--> coordinate({ plan: "./plan.md", agents: ["worker", "worker", "worker", "worker"] })
+## Examples
 
-User: "Run this plan in parallel"
--> coordinate({ plan: "./plan.md", agents: ["worker", "worker"] })
-
-User: "Split the authentication work across 3 agents"
--> coordinate({ plan: "./auth-plan.md", agents: ["worker", "worker", "worker"] })
-
-## How It Works
-
-1. **Coordinator spawns** and analyzes the plan for dependencies
-2. **Workers spawned** with detailed handshake specs defining what each owns/depends on
-3. **Contracts defined** for shared interfaces (types, functions, files)
-4. **Parallel execution** - workers run simultaneously, coordinating via contracts
-5. **Progress visible** in TUI with animated spinners and status updates
-6. **Final summary** shows completion status and any deviations
-
-## TUI Display
-
-The coordinate tool provides real-time visibility:
-
-**During startup:**
-```
-ok 0/4 agents | 0 msgs
-⠹ worker  ⠹ worker  ⠹ worker  ⠹ worker
-Coordinator starting up (waiting for LLM response)...
-```
-
-**While running:**
-```
-ok 2/4 agents | 35 msgs
-ok worker:04ea  ok worker:52e2  .. worker:952d  .. worker:7407
-+0.0s [coordinator] Spawned 4 workers
-+1.2s [worker-04ea] [tool] write
-+1.3s [worker-52e2] Creating store with CRUD operations
-```
-
-**When complete:**
-```
-ok 4/4 completed
-ok worker:04ea  ok worker:52e2  ok worker:952d  ok worker:7407
----
-## Coordination Complete
-All 4 workers executed successfully...
-```
-
-## Dependency Detection
-
-The coordinator automatically detects:
-- **File dependencies**: Step creates file X, later step imports from X
-- **Type dependencies**: Types/interfaces needed before implementations
-- **Explicit markers**: "After step X..." or "Uses X from step Y..."
-
-Example linear dependency:
-```
-Step 1: types.ts (foundational)
-    ↓
-Step 2: store.ts (imports Todo type)
-    ↓
-Step 3: handlers.ts (imports store)
-    ↓
-Step 4: routes.ts (imports handlers)
-```
-
-## Contracts Between Workers
-
-Workers coordinate via contracts:
-- **signal_contract_complete**: Worker signals it has created a dependency
-- **check_messages**: Worker checks for updates from other workers
-- **send_message**: Worker communicates status to coordinator
-
-Workers don't need to wait for files to exist - they know the expected interfaces from their handshake specs.
-
-## Available Agent Types
-
-Common agents for coordination:
-- `worker` - General-purpose implementation agent
-- `code-reviewer` - Reviews code for issues (use sparingly)
-- `scout` - Fast codebase reconnaissance
-
-Example with mixed team:
 ```typescript
+// Basic - 4 workers, planner enabled
+coordinate({ plan: "./plan.md" })
+
+// More workers
+coordinate({ plan: "./plan.md", agents: 8 })
+
+// Skip planner (plan is already a task graph)
+coordinate({ plan: "./tasks.md", planner: false })
+
+// Async mode - returns immediately, use /jobs to monitor
+coordinate({ plan: "./plan.md", async: true })
+
+// Disable self-review for speed
+coordinate({ plan: "./plan.md", reviewCycles: false })
+
+// Custom models
 coordinate({ 
-  plan: "./plan.md", 
-  agents: ["worker", "worker", "worker", "code-reviewer"] 
+  plan: "./plan.md",
+  scout: "claude-sonnet-4-20250514",
+  worker: "claude-sonnet-4-20250514"
 })
 ```
+
+## Pipeline Phases
+
+1. **Scout** — Analyzes codebase, outputs `<meta>`, `<file_map>`, `<file_contents>`
+2. **Planner** — Creates task graph from plan + scout context
+3. **Workers** — Execute tasks in parallel with self-review
+4. **Review** — Code reviewer checks all changes
+5. **Fixes** — Workers fix any issues found
+6. **Complete** — Final summary
 
 ## Plan Format
 
-Plans should be markdown with clear steps:
+Plans can be prose (PRD) or already a spec:
 
+**Prose (planner will decompose):**
 ```markdown
-# My Plan
+# Add Authentication
 
-## Step 1: Create Types
-Create `src/types.ts` with the Todo interface.
-
-## Step 2: Create Store
-Create `src/store.ts` with CRUD operations. Imports Todo from types.
-
-## Step 3: Create Handlers
-Create `src/handlers.ts` with HTTP handlers. Imports from store.
+- Login endpoint with JWT tokens
+- Password hashing with bcrypt  
+- Protected route middleware
 ```
+
+**Spec (planner will validate):**
+```markdown
+## TASK-01: Create auth types
+Files: src/types.ts
+Acceptance: AuthCredentials and User interfaces exported
+
+## TASK-02: Implement login endpoint
+Files: src/routes/auth.ts
+Depends on: TASK-01
+Acceptance: POST /login returns JWT
+```
+
+## Monitoring
+
+**During execution:** TUI shows live progress with pipeline status, workers, events.
+
+**Async mode:** Use `/jobs` command to open full dashboard:
+- Pipeline status
+- Task queue with dependencies  
+- Worker status with cost/duration
+- Event stream
 
 ## Output Retrieval
 
-When results are truncated, use:
-```
+When worker output is truncated, use `coord_output`:
+
+```typescript
 coord_output({ ids: ["worker-04ea"] })
+coord_output({ ids: ["scout", "planner", "review"] })
+coord_output({ ids: ["worker-04ea"], format: "stripped" })  // No ANSI codes
 ```
 
-## Limitations
+Parameters: `ids` (required), `coordDir` (optional), `format` ("raw" | "json" | "stripped")
 
-- Workers are separate pi processes (file-based communication)
-- Initial coordinator startup takes ~10-15s (LLM latency)
-- Plans should have clear step boundaries
-- Works best with 2-6 workers
+## DO NOT
+
+- **Don't rewrite the user's spec** — Pass it directly to coordinate
+- **Don't create a new plan file** — The planner handles any format
+- **Don't manually decompose tasks** — That's the planner's job
+
+## Tips
+
+1. **Pass directly** — User gives you a file? `coordinate({ plan: "that-file.md" })`
+2. **Let planner work** — It handles prose, specs, task lists, anything
+3. **Check /jobs** — For async runs, the dashboard shows everything
+4. **Cost aware** — Default $40 limit, increase with `costLimit` if needed
