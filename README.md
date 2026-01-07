@@ -201,21 +201,37 @@ The coordinate tool will:
 
 ## Worker Tools
 
+### Unified API (v2)
+
 | Tool | Description |
 |------|-------------|
-| `reserve_files` | Reserve files for exclusive editing |
-| `release_files` | Release file reservations |
-| `signal_contract_complete` | Signal a contract is ready |
-| `wait_for_contract` | Block until contract is ready |
-| `complete_task` | Signal worker is done (triggers self-review if enabled) |
-| `report_deviation` | Report deviation from plan approach |
-| `read_plan` | Read the full implementation plan |
-| `send_message` | Send message to another agent |
-| `check_messages` | Check inbox for new messages |
-| `update_step` | Update current step being worked on |
-| `escalate_to_user` | Ask user a question |
-| `add_discovered_task` | Add a discovered task for planner review |
-| `share_discovery` | Share learnings with other workers |
+| `agent_chat` | All communication - messages, broadcasts, escalations, inbox |
+| `agent_sync` | Contract synchronization - provide/need interfaces |
+| `agent_work` | Task lifecycle - complete, step, add task, deviation, plan |
+| `file_reservations` | File management - acquire, release, check reservations |
+
+**agent_chat actions:**
+- `agent_chat({ to: "worker:...", content: "..." })` - Send message
+- `agent_chat({ to: "all", topic: "...", content: "...", importance: "critical" })` - Broadcast discovery
+- `agent_chat({ to: "user", question: "...", options: [...] })` - Escalate to user
+- `agent_chat({ action: "inbox" })` - Check messages
+
+**agent_sync actions:**
+- `agent_sync({ action: "provide", item: "...", signature: "..." })` - Signal interface ready
+- `agent_sync({ action: "need", item: "..." })` - Wait for interface
+
+**agent_work actions:**
+- `agent_work({ action: "complete", result: "..." })` - Mark task done
+- `agent_work({ action: "step", step: N })` - Update progress
+- `agent_work({ action: "add", description: "...", reason: "..." })` - Add discovered task
+- `agent_work({ action: "deviation", description: "..." })` - Report deviation
+- `agent_work({ action: "plan" })` - Read full plan
+
+**file_reservations actions:**
+- `file_reservations({ action: "acquire", patterns: [...], ttl: 300 })` - Reserve files
+- `file_reservations({ action: "release", patterns: [...] })` - Release files
+- `file_reservations({ action: "check", path: "..." })` - Check who has file
+
 
 ## Planner Tools
 
@@ -425,6 +441,26 @@ interface Task {
 Task status flow:
 - **Planner tasks**: pending -> claimed -> complete/failed
 - **Discovered tasks**: pending_review -> pending -> claimed -> complete/failed (or rejected)
+- **Reviewer tasks**: pending (FIX-XX) -> claimed -> complete/failed
+
+## Dynamic Task Pickup
+
+Workers are spawned continuously as new tasks become available, not just at the start:
+
+1. **Initial spawn**: Up to `maxWorkers` workers claim tasks from the queue
+2. **On worker exit**: Immediately try to spawn a replacement for the next pending task
+3. **Continuous polling**: Main loop checks for new tasks every 500ms
+4. **Deadlock protection**: Exit after `dynamicSpawnTimeoutMs` (default: 30s) with no workers and no spawnable tasks
+
+This enables:
+- **Discovered tasks**: Workers can call `agent_work({ action: "add" })` to add tasks (creates DISC-XX, needs planner review)
+- **Reviewer tasks**: Code reviewer can include `newTasks` in JSON output (creates FIX-XX, auto-approved)
+- **Seamless continuation**: New tasks picked up without restarting coordination
+
+Task ID prefixes:
+- `TASK-XX`: Created by planner during initial planning
+- `DISC-XX`: Discovered by workers during implementation
+- `FIX-XX`: Created by code reviewer for issues found
 
 ## Worker Self-Review
 
@@ -442,8 +478,18 @@ The supervisor monitors worker activity and intervenes when workers appear stuck
 - **Nudge**: Sends wrap_up message after `nudgeThresholdMs` (default: 3 min)
 - **Restart**: Kills worker, releases task after `restartThresholdMs` (default: 5 min)
 - **Abandon**: Marks task failed after `maxRestarts` attempts (default: 2)
+- **Stale Cleanup**: Releases orphaned claimed tasks after `staleTaskTimeoutMs` (default: 30 min)
 
-Configure via `supervisor: { nudgeThresholdMs, restartThresholdMs, maxRestarts, checkIntervalMs }`.
+Configure via `supervisor: { nudgeThresholdMs, restartThresholdMs, maxRestarts, checkIntervalMs, dynamicSpawnTimeoutMs, staleTaskTimeoutMs }`.
+
+| Option | Default | Description |
+|--------|---------|-------------|
+| `nudgeThresholdMs` | 180000 | Send wrap_up after this inactivity |
+| `restartThresholdMs` | 300000 | Force restart after this inactivity |
+| `maxRestarts` | 2 | Max restart attempts before abandon |
+| `checkIntervalMs` | 30000 | How often to check workers |
+| `dynamicSpawnTimeoutMs` | 30000 | Exit spawning loop after this with no progress |
+| `staleTaskTimeoutMs` | 1800000 | Release claimed tasks with no worker after this |
 
 ## Observability
 

@@ -21,6 +21,8 @@ const DEFAULT_CONFIG: SupervisorConfig = {
 	restartThresholdMs: 300000,
 	maxRestarts: 2,
 	checkIntervalMs: 30000,
+	dynamicSpawnTimeoutMs: 30000,
+	staleTaskTimeoutMs: 1800000, // 30 minutes
 };
 
 export class SupervisorLoop {
@@ -129,8 +131,44 @@ export class SupervisorLoop {
 			}
 		}
 
+		// Check for stale claimed tasks (orphaned due to crashes, etc.)
+		await this.cleanupStaleTasks(now);
+
 		if (this.workers.size === 0) {
 			this.stop();
+		}
+	}
+
+	private async cleanupStaleTasks(now: number): Promise<void> {
+		const staleTimeoutMs = this.config.staleTaskTimeoutMs ?? 1800000;
+
+		try {
+			const queue = await this.taskQueue.getQueue();
+			const activeWorkerTaskIds = new Set(
+				Array.from(this.workers.values()).map(w => w.handle.taskId)
+			);
+
+			for (const task of queue.tasks) {
+				if (task.status !== "claimed") continue;
+				if (!task.claimedAt) continue;
+
+				// Skip if this task is being worked on by an active worker
+				if (activeWorkerTaskIds.has(task.id)) continue;
+
+				const claimedDuration = now - task.claimedAt;
+				if (claimedDuration >= staleTimeoutMs) {
+					// Task is stale - release it back to pending
+					await this.taskQueue.releaseTask(task.id);
+
+					await this.storage.appendEvent({
+						type: "coordinator",
+						message: `Released stale claimed task ${task.id} (claimed ${Math.round(claimedDuration / 60000)}min ago, no active worker)`,
+						timestamp: now,
+					});
+				}
+			}
+		} catch {
+			// Ignore errors in cleanup - non-critical
 		}
 	}
 

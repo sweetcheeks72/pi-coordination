@@ -155,13 +155,22 @@ export class TaskQueueManager {
 		});
 	}
 
-	async addDiscoveredTask(task: Omit<Task, "status">): Promise<Task> {
+	async addDiscoveredTask(task: Omit<Task, "status" | "id"> & { id?: string }, status: "pending" | "pending_review" = "pending_review"): Promise<Task> {
 		return this.withLock(async () => {
 			const queue = await this.getQueue();
 
+			// Auto-generate ID if not provided (atomic within lock)
+			let taskId = task.id;
+			if (!taskId) {
+				const prefix = status === "pending" ? "FIX" : "DISC";
+				const existingWithPrefix = queue.tasks.filter(t => t.id.startsWith(prefix));
+				taskId = `${prefix}-${(existingWithPrefix.length + 1).toString().padStart(2, "0")}`;
+			}
+
 			const newTask: Task = {
 				...task,
-				status: "pending_review",
+				id: taskId,
+				status,
 			};
 
 			queue.tasks.push(newTask);

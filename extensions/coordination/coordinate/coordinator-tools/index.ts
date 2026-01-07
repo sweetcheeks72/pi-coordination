@@ -1190,11 +1190,121 @@ ${planContent ? `### Full Plan\n\`\`\`markdown\n${planContent}\n\`\`\`` : ""}
 					}
 				};
 
+				// Helper to spawn a worker for the next pending task
+				const maybeSpawnNextWorker = async (): Promise<boolean> => {
+					if (activeHandles.size >= maxWorkers) return false;
+
+					const task = await taskQueue.getNextTask();
+					if (!task) return false;
+
+					// Re-check size after await - another spawn may have completed
+					if (activeHandles.size >= maxWorkers) return false;
+
+					const claimed = await taskQueue.claimTask(task.id, identity);
+					if (!claimed) return false; // Race condition, retry later
+
+					// Final check before spawning - be strict about maxWorkers
+					if (activeHandles.size >= maxWorkers) {
+						await taskQueue.releaseTask(task.id);
+						return false;
+					}
+
+					const newWorkerId = randomUUID();
+					const shortId = newWorkerId.slice(0, 4);
+					const workerIdentity = `worker:${task.id}-${shortId}`;
+
+					try {
+						await obs?.events.emit({
+							type: "task_claimed",
+							taskId: task.id,
+							workerId: workerIdentity,
+						});
+
+						const handshakeSpec = `## Task: ${task.id}
+
+${task.description}
+
+### Files
+${task.files?.map(f => `- ${f}`).join("\n") || "No specific files assigned"}
+
+### Acceptance Criteria
+${task.acceptanceCriteria?.map(c => `- ${c}`).join("\n") || "- Complete the task as described"}
+
+${planContent ? `### Full Plan\n\`\`\`markdown\n${planContent}\n\`\`\`` : ""}
+`;
+
+						const newHandle = spawnWorkerProcess(
+							{
+								agent: params.agentName || "coordination/worker",
+								handshakeSpec,
+								steps: [],
+								logicalName: task.id,
+								workerId: newWorkerId,
+								identity: workerIdentity,
+							},
+							coordDir,
+							ctx.cwd,
+							storage,
+							undefined,
+							obs || undefined,
+							params.agentName,
+						);
+
+						const handleWithTask = { ...newHandle, taskId: task.id };
+						allHandles.push(handleWithTask);
+						activeHandles.set(newWorkerId, handleWithTask);
+						supervisor?.addWorker(handleWithTask);
+
+						handleWithTask.promise.then(code => processWorkerExit(handleWithTask, code));
+						return true;
+					} catch (err) {
+						// Spawn failed - release the claimed task so it can be retried
+						console.error(`Failed to spawn worker for ${task.id}:`, err);
+						await taskQueue.releaseTask(task.id);
+						await obs?.events.emit({
+							type: "task_failed",
+							taskId: task.id,
+							workerId: newWorkerId,
+							reason: `Spawn failed: ${err}`,
+						});
+						return false;
+					}
+				};
+
+				// Wrap processWorkerExit to also try spawning next worker
+				const processWorkerExitWithSpawn = async (handle: WorkerHandle & { taskId: string }, exitCode: number) => {
+					await processWorkerExit(handle, exitCode);
+					// Try to spawn replacement for next pending task
+					await maybeSpawnNextWorker();
+				};
+
 				for (const handle of handles) {
-					handle.promise.then(code => processWorkerExit(handle, code));
+					handle.promise.then(code => processWorkerExitWithSpawn(handle, code));
 				}
 
-				while (activeHandles.size > 0) {
+				// Dynamic spawning loop with deadlock protection
+				// Continue while workers active OR we can spawn new ones
+				let noProgressCount = 0;
+				// Configurable timeout (default 30s = 60 iterations at 500ms)
+				const dynamicSpawnTimeoutMs = runtimeConfig.supervisor?.dynamicSpawnTimeoutMs ?? 30000;
+				const maxNoProgress = Math.ceil(dynamicSpawnTimeoutMs / 500);
+
+				while (true) {
+					const spawned = await maybeSpawnNextWorker();
+
+					if (activeHandles.size === 0) {
+						if (spawned) {
+							noProgressCount = 0; // Made progress, reset
+						} else {
+							noProgressCount++;
+							// After maxNoProgress iterations with no workers and no spawns, we're done
+							// (handles edge case where all pending tasks have unmet deps)
+							if (noProgressCount >= maxNoProgress) break;
+						}
+					} else {
+						noProgressCount = 0; // Workers active = progress possible
+					}
+
 					await new Promise(r => setTimeout(r, 500));
 				}
 

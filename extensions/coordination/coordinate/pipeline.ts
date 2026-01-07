@@ -17,7 +17,8 @@ import { CheckpointManager, PHASE_ORDER } from "./checkpoint.js";
 import { generateProgressDoc } from "./progress.js";
 import { runScoutPhase, type ScoutConfig } from "./phases/scout.js";
 import { runPlannerPhase, createTaskQueueFromPlanner, runPlannerBackgroundReview, type PlannerPhaseConfig } from "./phases/planner.js";
-import { runReviewPhase, type ReviewConfig, type ReviewResult } from "./phases/review.js";
+import { runReviewPhase, type ReviewConfig, type ReviewResult, type NewTaskRequest } from "./phases/review.js";
+import { TaskQueueManager } from "./task-queue.js";
 import { runFixPhase, type FixConfig } from "./phases/fix.js";
 import { ObservabilityContext } from "./observability/index.js";
 import type { Task, PlannerConfig, SelfReviewConfig, SupervisorConfig } from "./types.js";
@@ -438,6 +439,31 @@ export async function runReviewPhaseWrapper(
 			ctx.reviewHistory.map(r => r.issues),
 		);
 		await ctx.obs?.events.emit({ type: "checkpoint_saved", checkpointId, phase: "review" });
+
+		// Create tasks from reviewer's newTasks (if any)
+		if (result.newTasks && result.newTasks.length > 0) {
+			const taskQueue = new TaskQueueManager(config.coordDir);
+
+			for (const req of result.newTasks) {
+				// ID auto-generated atomically inside addDiscoveredTask (FIX-XX for pending status)
+				const task = await taskQueue.addDiscoveredTask(
+					{
+						description: req.description,
+						priority: req.priority ?? 1,
+						files: req.files,
+						acceptanceCriteria: [`Reviewer: ${req.reason}`],
+					},
+					"pending", // Trusted - skip review, generates FIX-XX ID
+				);
+
+				await ctx.obs?.events.emit({
+					type: "task_discovered",
+					taskId: task.id,
+					discoveredBy: "code-reviewer",
+					discoveredFrom: "review",
+				});
+			}
+		}
 
 		await saveProgressDoc(ctx);
 		span && ctx.obs?.spans.endSpan(span.id, "ok", { issueCount: result.issues.length }, { cost: result.cost });

@@ -40,7 +40,7 @@ When asked to implement code changes:
 
 ## Task: Coordination Worker
 
-When spawned as part of multi-agent coordination (you'll have special tools like `complete_task`, `signal_contract_complete`, `check_messages`):
+When spawned as part of multi-agent coordination (you'll have special tools like `agent_work`, `agent_chat`, `agent_sync`, `file_reservations`):
 
 1. **Follow your handshake spec** - Your task contains detailed instructions about:
    - Files you own (create/modify these)
@@ -48,16 +48,34 @@ When spawned as part of multi-agent coordination (you'll have special tools like
    - Dependencies you wait for (from other workers)
    - Files you must NOT touch (owned by others)
 
-2. **Use coordination tools**:
-   - `check_messages` - See updates from coordinator and other workers
-   - `send_message` - Communicate status or questions to coordinator
-   - `signal_contract_complete` - Signal when you've created a dependency others need
-   - `reserve_files` / `release_files` - Manage file ownership
-   - `complete_task` - Call when your work is done (REQUIRED - triggers clean exit)
+2. **Use coordination tools** - 4 semantic tools for all coordination:
+
+   **`agent_chat`** - All communication:
+   - `agent_chat({ to: "coordinator", content: "..." })` - Message coordinator
+   - `agent_chat({ to: "worker:TASK-01-abc1", content: "..." })` - Message another worker
+   - `agent_chat({ to: "all", topic: "...", content: "...", importance: "critical" })` - Broadcast discovery
+   - `agent_chat({ to: "user", question: "...", options: [...] })` - Ask user
+   - `agent_chat({ action: "inbox" })` - Check your messages
+
+   **`agent_sync`** - Interface synchronization:
+   - `agent_sync({ action: "provide", item: "UserService", signature: "..." })` - Signal interface ready
+   - `agent_sync({ action: "need", item: "UserService" })` - Wait for interface
+
+   **`agent_work`** - Task lifecycle:
+   - `agent_work({ action: "complete", result: "..." })` - REQUIRED when done
+   - `agent_work({ action: "step", step: 2, status: "..." })` - Update progress
+   - `agent_work({ action: "add", description: "...", reason: "..." })` - Discover new task
+   - `agent_work({ action: "deviation", description: "...", affectsOthers: true })` - Report deviation
+   - `agent_work({ action: "plan" })` - Read full plan
+
+   **`file_reservations`** - File conflict prevention:
+   - `file_reservations({ action: "acquire", patterns: ["src/auth/**"], ttl: 300 })` - Reserve files
+   - `file_reservations({ action: "release", patterns: ["src/auth/**"] })` - Release files
+   - `file_reservations({ action: "check", path: "src/auth/login.ts" })` - Check who has file
 
 3. **Coordinate via contracts, not files** - You don't need to wait for files to exist. Your handshake spec tells you the expected interfaces. Create your code assuming dependencies match the spec.
 
-4. **Always call complete_task** - When your assigned work is done, call `complete_task` with a summary. This signals completion and exits cleanly.
+4. **Always call agent_work({ action: "complete" })** - When your assigned work is done, call this with a summary. This signals completion and exits cleanly.
 
 ---
 

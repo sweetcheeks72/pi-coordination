@@ -19,6 +19,13 @@ export interface ReviewConfig {
 	outputLimits?: OutputLimits;
 }
 
+export interface NewTaskRequest {
+	description: string;
+	files?: string[];
+	priority?: number;  // 0=critical, 1=high, 2=medium, 3=low (default: 1)
+	reason: string;
+}
+
 export interface ReviewResult {
 	issues: ReviewIssue[];
 	summary: string;
@@ -26,6 +33,7 @@ export interface ReviewResult {
 	filesReviewed: string[];
 	duration: number;
 	cost: number;
+	newTasks?: NewTaskRequest[];
 }
 
 export async function runReviewPhase(
@@ -94,8 +102,19 @@ Return a JSON object (no markdown code fences, just raw JSON):
       "description": "What's wrong",
       "suggestedFix": "How to fix it"
     }
+  ],
+  "newTasks": [
+    {
+      "description": "What needs to be done",
+      "files": ["files/to/modify.ts"],
+      "priority": 1,
+      "reason": "Why this task is needed"
+    }
   ]
-}`;
+}
+
+Note: Use "issues" for quick fixes that original workers can handle.
+Use "newTasks" for larger work that needs a dedicated worker (e.g., new features, architectural changes, security fixes).`;
 
 	const agentsWithOverride = config.model
 		? agents.map(a => a.name === "code-reviewer" ? { ...a, model: config.model } : a)
@@ -118,7 +137,7 @@ Return a JSON object (no markdown code fences, just raw JSON):
 	if (result.truncated && result.artifactPaths?.outputPath) {
 		output = await fs.readFile(result.artifactPaths.outputPath, "utf-8").catch(() => output);
 	}
-	let parsed: { allPassing: boolean; summary: string; issues: Partial<ReviewIssue>[] };
+	let parsed: { allPassing: boolean; summary: string; issues: Partial<ReviewIssue>[]; newTasks?: NewTaskRequest[] };
 	
 	try {
 		const jsonMatch = output.match(/\{[\s\S]*\}/);
@@ -142,6 +161,12 @@ Return a JSON object (no markdown code fences, just raw JSON):
 		fixAttempts: 0,
 	})) as ReviewIssue[];
 
+	// Validate newTasks format
+	const newTasks = (parsed.newTasks || []).filter(t => 
+		t.description && typeof t.description === "string" &&
+		t.reason && typeof t.reason === "string"
+	);
+
 	return {
 		issues,
 		summary: parsed.summary || "",
@@ -149,5 +174,6 @@ Return a JSON object (no markdown code fences, just raw JSON):
 		filesReviewed: modifiedFiles,
 		duration: Date.now() - startTime,
 		cost: result.usage.cost,
+		newTasks: newTasks.length > 0 ? newTasks : undefined,
 	};
 }

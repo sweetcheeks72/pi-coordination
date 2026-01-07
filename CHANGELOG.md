@@ -7,6 +7,15 @@ All notable changes to pi-coordination.
 ## 2026-01-06
 
 ### Added
+- **Unified Worker Tool API** - Consolidated 13 worker tools into 4 semantic tools:
+  - `agent_chat` - All communication (messages, broadcasts, escalations, inbox)
+  - `agent_sync` - Contract synchronization (provide/need interfaces)
+  - `agent_work` - Task lifecycle (complete, step, add discovered task, deviation, read plan)
+  - `file_reservations` - File conflict prevention (acquire, release, check)
+- **Dynamic Task Pickup** - Workers now spawn continuously as new tasks become available (discovered tasks, reviewer tasks), not just initial batch
+- **Reviewer newTasks** - Code reviewer can add new tasks via `newTasks` field in JSON output, creates FIX-XX tasks
+- **Atomic Task ID Generation** - DISC-XX and FIX-XX IDs generated inside `addDiscoveredTask()` with file locking
+- **Stale Task Cleanup** - Supervisor cleans up orphaned claimed tasks after configurable timeout
 - **Coordination Dashboard** - Full-screen TUI for monitoring async coordination jobs via `/coord` command
   - Pipeline status with phase indicators (pending/running/complete/failed)
   - Task queue section with status, dependencies, and worker assignments
@@ -18,11 +27,15 @@ All notable changes to pi-coordination.
   - Worker actions: wrap_up, restart, abort via keyboard shortcuts
   - Mini footer for persistent status after dashboard exit
 - **Philosophy section** in README explaining the "Ralph Wiggum on steroids" pattern
+- New supervisor config options: `dynamicSpawnTimeoutMs` (default: 30s), `staleTaskTimeoutMs` (default: 30min)
 
 ### Changed
 - Consolidated `tools/` into `extensions/coordination/` - all code now lives in the extension folder
+- Old 13 worker tools deprecated with console warnings, will be removed in future release
 
 ### Fixed
+- Race condition in dynamic spawning that could exceed maxWorkers limit
+- `agent_sync({ action: "need" })` now returns immediately if contract already ready
 - Supervisor worker state file path now uses correct `worker-{id}.json` format (was looking in non-existent `workers/` subdirectory)
 - Dashboard reads pipeline state from checkpoint files (not non-existent `pipeline-state.json`), with fallback to `progress.md` parsing
 - Dashboard checkpoint sorting now parses timestamps correctly (was sorting alphabetically by phase name)

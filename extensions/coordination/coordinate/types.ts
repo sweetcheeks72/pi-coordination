@@ -332,6 +332,8 @@ export interface SupervisorConfig {
 	restartThresholdMs: number;
 	maxRestarts: number;
 	checkIntervalMs: number;
+	dynamicSpawnTimeoutMs?: number;  // Timeout for dynamic spawning deadlock detection (default: 30000)
+	staleTaskTimeoutMs?: number;      // Timeout for considering claimed tasks stale (default: 1800000 = 30min)
 }
 
 export interface PlannerReviewResult {

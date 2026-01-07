@@ -42,9 +42,23 @@ Return a JSON object (no markdown code fences):
       "description": "What's wrong",
       "suggestedFix": "How to fix it"
     }
+  ],
+  "newTasks": [
+    {
+      "description": "What needs to be done",
+      "files": ["files/to/modify.ts"],
+      "priority": 1,
+      "reason": "Why this task is needed"
+    }
   ]
 }
 ```
+
+### When to use issues vs newTasks
+
+- **issues**: Quick fixes that the original workers can handle (typos, missing null checks, off-by-one errors). These go back to workers for immediate fixes.
+
+- **newTasks**: Larger work that needs a dedicated worker (new features, architectural changes, security fixes, missing functionality not covered in original plan). These become new tasks in the queue.
 
 ## Guidelines
 
