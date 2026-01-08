@@ -102,6 +102,11 @@ import { ObservabilityContext } from "./observability/index.js";
 import { validateCoordination } from "./validation/index.js";
 import type { ValidationResult } from "./validation/types.js";
 import { createStreamingValidator, type StreamingValidator } from "./validation/streaming.js";
+import { detectInputType, type InputType } from "./detection.js";
+import { runInputTypeTUI } from "./input-type-tui.js";
+import { generateClarifyingQuestions } from "./question-generator.js";
+import { runInlineQuestionsTUI, type Answer } from "./inline-questions-tui.js";
+import { augmentPRD } from "./augment-prd.js";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const require = createRequire(import.meta.url);
@@ -193,6 +198,11 @@ interface CoordinationRuntime extends AgentRuntime {
 
 const CoordinateParams = Type.Object({
 	plan: Type.String({ description: "Path to markdown file (spec, PRD, or plan) - planner decomposes any format" }),
+	mode: Type.Optional(Type.Union([
+		Type.Literal("spec"),
+		Type.Literal("plan"),
+		Type.Literal("request"),
+	], { description: "Force routing mode: spec (direct), plan (planner only), request (full analysis). Auto-detects if not specified." })),
 	agents: Type.Optional(Type.Union([
 		Type.Array(Type.String()),
 		Type.Number(),
@@ -489,6 +499,73 @@ export async function runCoordinationSession(options: CoordinationRunOptions): P
 		};
 	}
 
+	// ─────────────────────────────────────────────────────────────────────────
+	// Smart Routing: Detect input type and route appropriately
+	// ─────────────────────────────────────────────────────────────────────────
+	let routingMode: InputType;
+	let routingClarifications: Answer[] = [];
+
+	if (params.mode) {
+		// Mode explicitly specified - skip detection and TUI
+		routingMode = params.mode;
+	} else {
+		// Auto-detect and confirm with user
+		const detected = detectInputType(planContent);
+		
+		// Only show TUI if we have a TTY
+		if (process.stdin.isTTY && process.stdout.isTTY) {
+			const tuiResult = await runInputTypeTUI({ detected, signal });
+			
+			if (tuiResult === null) {
+				// User pressed Esc or aborted - abort coordination
+				return {
+					result: {
+						content: [{ type: "text", text: "Coordination aborted by user" }],
+						isError: false,
+					},
+					coordDir,
+					traceId: options.traceId || "",
+				};
+			}
+			
+			routingMode = tuiResult.type;
+		} else {
+			// No TTY - use detected default
+			routingMode = detected.type;
+		}
+	}
+
+	// For "request" mode, generate and ask clarifying questions
+	let questionGenerationCost = 0;
+	if (routingMode === "request" && process.stdin.isTTY && process.stdout.isTTY) {
+		try {
+			const questionResult = await generateClarifyingQuestions(runtime, planContent, { depth: "deep" });
+			questionGenerationCost = questionResult.cost;
+			
+			if (questionResult.questions.length > 0) {
+				// Note: Interview tool integration disabled - subagents run headless without UI context,
+				// so the interview tool would always fail. Using inline TUI for all question counts.
+				// TODO: Add direct tool invocation mechanism to enable browser-based interview
+				const tuiResult = await runInlineQuestionsTUI({
+					questions: questionResult.questions,
+					signal,
+				});
+				routingClarifications = tuiResult.answers;
+				planContent = augmentPRD(planContent, routingClarifications);
+			}
+		} catch (err) {
+			// Question generation failed - continue without clarifications
+			console.error(`Warning: Failed to generate clarifying questions: ${err}`);
+		}
+	}
+
+	// Determine which phases to skip based on routing mode
+	const skipScout = routingMode === "spec" || routingMode === "plan";
+	const skipPlanner = routingMode === "spec";
+
+	// Log routing decision
+	console.log(`[routing] Mode: ${routingMode} | Scout: ${skipScout ? "skip" : "run"} | Planner: ${skipPlanner ? "skip" : "run"} | Clarifications: ${routingClarifications.length}`);
+
 	const initialState: CoordinationState = {
 		sessionId: coordSessionId,
 		planPath,
@@ -623,8 +700,10 @@ export async function runCoordinationSession(options: CoordinationRunOptions): P
 		costLimit,
 		maxOutput: params.maxOutput,
 		models,
+		skipScout, // Smart routing: skip scout for spec/plan modes
 		planner: {
-			enabled: (paramPlanner as { enabled?: boolean })?.enabled ?? settings.planner?.enabled ?? true,
+			// Smart routing: disable planner for spec mode (already has TASK-XX format)
+			enabled: skipPlanner ? false : ((paramPlanner as { enabled?: boolean })?.enabled ?? settings.planner?.enabled ?? true),
 			humanCheckpoint: (paramPlanner as { humanCheckpoint?: boolean })?.humanCheckpoint ?? settings.planner?.humanCheckpoint ?? false,
 			maxSelfReviewCycles: (paramPlanner as { maxSelfReviewCycles?: number })?.maxSelfReviewCycles ?? settings.planner?.maxSelfReviewCycles ?? 5,
 		},
@@ -648,6 +727,26 @@ export async function runCoordinationSession(options: CoordinationRunOptions): P
 		JSON.stringify(runtimeConfig, null, 2),
 	);
 
+	// Save routing decision info
+	const routingInfo = {
+		mode: routingMode,
+		skipScout,
+		skipPlanner,
+		clarificationsCount: routingClarifications.length,
+		questionGenerationCost,
+		clarifications: routingClarifications.map(a => ({
+			question: a.question,
+			value: a.value,
+			wasTimeout: a.wasTimeout,
+			wasCustom: a.wasCustom,
+		})),
+		timestamp: Date.now(),
+	};
+	await fs.writeFile(
+		path.join(coordDir, "routing-info.json"),
+		JSON.stringify(routingInfo, null, 2),
+	);
+
 	const obs = await ObservabilityContext.create(
 		coordDir,
 		runtime.cwd,
@@ -666,6 +765,8 @@ export async function runCoordinationSession(options: CoordinationRunOptions): P
 			maxFixCycles: params.maxFixCycles ?? 3,
 			sameIssueLimit: params.sameIssueLimit ?? 2,
 			costLimit,
+			routingMode, // Smart routing mode used
+			clarificationsCount: routingClarifications.length,
 		},
 	});
 

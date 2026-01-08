@@ -4,6 +4,37 @@ All notable changes to pi-coordination.
 
 ---
 
+## 2026-01-08
+
+### Added
+- **Smart Input Routing** - Auto-detects input type and routes to minimize overhead:
+  - **Spec** (has TASK-XX + files/deps/acceptance) → Skips scout and planner, executes immediately
+  - **Plan** (has code blocks/file paths/phases) → Skips scout, runs planner for task extraction
+  - **Request** (prose only) → Full pipeline with clarifying questions
+- **Input Type TUI** - Interactive confirmation of detected type with 60s timeout, arrow/j/k navigation
+- **Clarifying Questions** - LLM generates in-depth design review questions for request mode:
+  - Questions cover architecture, tradeoffs, edge cases, security, testing, UI/UX
+  - Sequential inline TUI with 60s per-question timer (resets on interaction)
+  - Select options with always-visible "Other" text field for custom input
+  - Context hints explaining why each question matters
+  - Esc to skip all remaining questions (uses sensible defaults)
+- **PRD Augmentation** - Answers appended to original content as `## Clarifications` section
+- **Routing Decision Logging** - Console log and `routing-info.json` with mode, skipped phases, clarifications
+- **`mode` parameter** - Explicit override: `coordinate({ plan: "input.md", mode: "spec" | "plan" | "request" })`
+
+### Changed
+- Detection uses separate signal arrays for each type (prevents spec signals leaking into plan results)
+- Pipeline `skipScout` config option for smart routing integration
+- Planner `enabled: false` when in spec mode (already has TASK-XX format)
+
+### Fixed
+- Input type TUI missing `finished` guard (could render after cleanup)
+- Inline questions TUI context line ANSI codes broke box alignment (now calculates visual length separately)
+- Truncate function exceeded maxLen for small values (now handles maxLen ≤ 3)
+- Newlines in question text/context broke TUI box (now sanitized to single line)
+
+---
+
 ## 2026-01-07
 
 ### Added

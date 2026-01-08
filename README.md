@@ -25,6 +25,7 @@ A **plan** here isn't a sequential checklist — it's a **task graph**. Independ
 
 ## Features
 
+- **Smart Input Routing**: Auto-detects input type (spec/plan/request) and skips unnecessary phases
 - **Multi-Phase Pipeline**: Scout -> Planner -> Coordinator -> Workers -> Review -> Fixes -> Complete
 - **Planner Phase**: Dedicated planning agent with self-review loop for task decomposition
 - **Task Queue Model**: Priority-based task distribution with dependencies and dynamic assignment
@@ -129,6 +130,7 @@ coordinate({ plan: "./plan.md", planner: false })
 ```typescript
 coordinate({
   plan: "./plan.md",
+  mode: "request",              // "spec" | "plan" | "request" (auto-detected if omitted)
   agents: 4,                    // or ["worker", "worker", ...]
   logPath: "./logs",
   resume: "workers-1234567",
@@ -157,6 +159,30 @@ To disable logging, set `logPath: ""`.
 
 You can also set `PI_COORDINATION_LOG_DIR` environment variable to change the default log directory.
 
+### Smart Routing
+
+The coordinate tool automatically detects your input type and routes appropriately:
+
+| Input Type | Detection | Phases Run |
+|------------|-----------|------------|
+| **Spec** | Has `TASK-XX` + files/deps/acceptance | Coordinator → Workers → Review |
+| **Plan** | Has code blocks, file paths, phases | Planner → Coordinator → Workers → Review |
+| **Request** | Prose only | Scout → Questions → Planner → Full pipeline |
+
+**Override detection:**
+```typescript
+coordinate({ plan: "./input.md", mode: "spec" })    // Skip scout + planner
+coordinate({ plan: "./input.md", mode: "plan" })    // Skip scout only
+coordinate({ plan: "./input.md", mode: "request" }) // Full pipeline with questions
+```
+
+**Clarifying questions** (request mode only):
+- LLM generates in-depth design review questions
+- Interactive TUI with 60s per-question timer
+- Select options + "Other" text field for custom input
+- Esc to skip all remaining (uses sensible defaults)
+- Answers appended to PRD as `## Clarifications` section
+
 ### Example Prompt
 
 > Execute plan.md with 4 workers
@@ -174,15 +200,18 @@ The coordinate tool will:
 
 ## Pipeline Phases
 
-| Phase | Description |
-|-------|-------------|
-| **scout** | Deep codebase analysis before coordination (provides context to planner/workers) |
-| **planner** | Creates task graph from plan with self-review (enabled by default, disable with `planner: false`) |
-| **coordinator** | Spawns workers from task queue, manages supervisor loop |
-| **workers** | Parallel execution of tasks with self-review |
-| **review** | Code reviewer checks all changes against plan goals |
-| **fixes** | Same workers fix issues found in review |
-| **complete** | All done, generate final report |
+| Phase | Description | Skipped When |
+|-------|-------------|--------------|
+| **scout** | Deep codebase analysis before coordination | mode=spec, mode=plan |
+| **questions** | Clarifying questions TUI for ambiguous requests | mode=spec, mode=plan |
+| **planner** | Creates task graph from plan with self-review | mode=spec |
+| **coordinator** | Spawns workers from task queue, manages supervisor loop | — |
+| **workers** | Parallel execution of tasks with self-review | — |
+| **review** | Code reviewer checks all changes against plan goals | — |
+| **fixes** | Same workers fix issues found in review | — |
+| **complete** | All done, generate final report | — |
+
+Smart routing auto-detects the input type and skips unnecessary phases. Override with `mode: "spec" | "plan" | "request"`.
 
 ## Coordinator Tools
 
@@ -676,6 +705,7 @@ coordDir/
 ├── tasks.json                    # Task queue
 ├── state.json                    # CoordinationState
 ├── cost.json                     # CostState
+├── routing-info.json             # Smart routing decision (mode, skipped phases, clarifications)
 ├── events.jsonl                  # All coordination events
 ├── progress.md                   # Human-readable progress
 ├── discoveries.json              # Shared discoveries
@@ -705,6 +735,11 @@ extensions/coordination/           # Symlinked to ~/.pi/agent/extensions/coordin
 │   ├── index.ts                  # coordinate() tool
 │   ├── dashboard.ts              # /jobs command TUI + MiniDashboard widget
 │   ├── pipeline.ts               # Multi-phase orchestration
+│   ├── detection.ts              # Smart routing input type detection
+│   ├── input-type-tui.ts         # Input type confirmation TUI
+│   ├── question-generator.ts     # LLM clarifying question generation
+│   ├── inline-questions-tui.ts   # Sequential questions TUI
+│   ├── augment-prd.ts            # PRD augmentation with answers
 │   ├── state.ts                  # FileBasedStorage
 │   ├── task-queue.ts             # TaskQueueManager
 │   ├── supervisor.ts             # Stuck worker detection

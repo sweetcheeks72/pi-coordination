@@ -42,6 +42,7 @@ export interface PipelineConfig {
 		worker?: string;
 		reviewer?: string;
 	};
+	skipScout?: boolean; // Smart routing: skip scout phase for spec/plan modes
 	planner?: Partial<PlannerConfig>;
 	selfReview?: Partial<SelfReviewConfig>;
 	supervisor?: Partial<SupervisorConfig & { enabled: boolean }>;
@@ -230,6 +231,13 @@ export async function runScoutPhaseWrapper(
 	ctx: PipelineContext,
 	config: PipelineConfig,
 ): Promise<void> {
+	// Smart routing: skip scout phase for spec/plan modes
+	if (config.skipScout) {
+		updatePhaseStatus("scout", "skipped", ctx);
+		ctx.pipelineState.scoutContext = ""; // No scout context when skipped
+		return;
+	}
+
 	const span = ctx.obs?.spans.startSpan("phase:scout", "phase");
 	await ctx.obs?.snapshots.capture("phase_start", "scout");
 
@@ -352,6 +360,7 @@ export async function runPlannerPhaseWrapper(
 	config: PipelineConfig,
 ): Promise<Task[]> {
 	if (!config.planner?.enabled) {
+		updatePhaseStatus("planner", "skipped", ctx);
 		return [];
 	}
 
