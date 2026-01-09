@@ -38,7 +38,6 @@ import {
 
 interface CoordinationSettings {
 	agents?: string[] | number;
-	planner?: boolean | { enabled?: boolean; humanCheckpoint?: boolean; maxSelfReviewCycles?: number };
 	reviewCycles?: number | false;
 	supervisor?: boolean | { enabled?: boolean; nudgeThresholdMs?: number; restartThresholdMs?: number; maxRestarts?: number; checkIntervalMs?: number };
 	costLimit?: number;
@@ -48,7 +47,6 @@ interface CoordinationSettings {
 
 interface NormalizedSettings {
 	agents?: string[];
-	planner?: { enabled?: boolean; humanCheckpoint?: boolean; maxSelfReviewCycles?: number };
 	reviewCycles?: number | false;
 	supervisor?: { enabled?: boolean; nudgeThresholdMs?: number; restartThresholdMs?: number; maxRestarts?: number; checkIntervalMs?: number };
 	costLimit?: number;
@@ -59,7 +57,6 @@ interface NormalizedSettings {
 function normalizeSettings(raw: CoordinationSettings): NormalizedSettings {
 	return {
 		agents: typeof raw.agents === "number" ? Array(raw.agents).fill("worker") : raw.agents,
-		planner: typeof raw.planner === "boolean" ? { enabled: raw.planner } : raw.planner,
 		reviewCycles: raw.reviewCycles,
 		supervisor: typeof raw.supervisor === "boolean" ? { enabled: raw.supervisor } : raw.supervisor,
 		costLimit: raw.costLimit,
@@ -102,11 +99,11 @@ import { ObservabilityContext } from "./observability/index.js";
 import { validateCoordination } from "./validation/index.js";
 import type { ValidationResult } from "./validation/types.js";
 import { createStreamingValidator, type StreamingValidator } from "./validation/streaming.js";
-import { detectInputType, type InputType } from "./detection.js";
-import { runInputTypeTUI } from "./input-type-tui.js";
-import { generateClarifyingQuestions } from "./question-generator.js";
-import { runInlineQuestionsTUI, type Answer } from "./inline-questions-tui.js";
-import { augmentPRD } from "./augment-prd.js";
+// Note: question-generator.ts and inline-questions-tui.ts are kept for the plan tool
+// import { generateClarifyingQuestions } from "./question-generator.js";
+// import { runInlineQuestionsTUI, type Answer } from "./inline-questions-tui.js";
+import { parseSpec } from "./spec-parser.js";
+import { validateSpec, formatValidationResult } from "./spec-validator.js";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const require = createRequire(import.meta.url);
@@ -197,12 +194,7 @@ interface CoordinationRuntime extends AgentRuntime {
 }
 
 const CoordinateParams = Type.Object({
-	plan: Type.String({ description: "Path to markdown file (spec, PRD, or plan) - planner decomposes any format" }),
-	mode: Type.Optional(Type.Union([
-		Type.Literal("spec"),
-		Type.Literal("plan"),
-		Type.Literal("request"),
-	], { description: "Force routing mode: spec (direct), plan (planner only), request (full analysis). Auto-detects if not specified." })),
+	plan: Type.String({ description: "Path to TASK-XX format spec file. Use 'plan' tool first to create specs from prose/PRDs." }),
 	agents: Type.Optional(Type.Union([
 		Type.Array(Type.String()),
 		Type.Number(),
@@ -221,20 +213,6 @@ const CoordinateParams = Type.Object({
 	costLimit: Type.Optional(Type.Number({ description: "Cost limit in dollars - ends gracefully before next review cycle (default: 40)" })),
 	validate: Type.Optional(Type.Boolean({ description: "Run validation after completion (default: false)" })),
 	validateStream: Type.Optional(Type.Boolean({ description: "Stream invariant warnings in real-time (default: false)" })),
-	scout: Type.Optional(Type.Union([
-		Type.String(),
-		Type.Object({ model: Type.Optional(Type.String()) }),
-	], { description: "Scout config: string sets model, object for full config" })),
-	planner: Type.Optional(Type.Union([
-		Type.Boolean(),
-		Type.String(),
-		Type.Object({
-			enabled: Type.Optional(Type.Boolean()),
-			model: Type.Optional(Type.String()),
-			humanCheckpoint: Type.Optional(Type.Boolean()),
-			maxSelfReviewCycles: Type.Optional(Type.Number()),
-		}),
-	], { description: "Planner config: boolean enables/disables, string sets model, object for full config" })),
 	coordinator: Type.Optional(Type.Union([
 		Type.String(),
 		Type.Object({ model: Type.Optional(Type.String()) }),
@@ -339,8 +317,8 @@ ${coordDir}
 3. **Create contracts for dependencies** (if any exist)
    - Call create_contract() for each cross-worker dependency BEFORE spawning workers
    - Use logical worker names (worker-A, worker-B, etc.) that match spawn_workers logicalName
-   - Workers will use wait_for_contract() to block until dependencies are ready
-   - Workers will use signal_contract_complete() when they finish producing the dependency
+   - Workers will use agent_sync({ action: 'need', item: '...' }) to block until dependencies are ready
+   - Workers will use agent_sync({ action: 'provide', item: '...' }) when they finish producing the dependency
 
 4. **Call spawn_workers()** with detailed handshake specs
    - This spawns workers in parallel and WAITS for all to complete
@@ -376,21 +354,21 @@ spawn_workers({
       "logicalName": "worker-A",
       "steps": [1],
       "adjacentWorkers": ["worker-B", "worker-C"],
-      "handshakeSpec": "Create src/types.ts with User interface (id: string, name: string). After creating the file, call signal_contract_complete({ item: 'User type', file: 'src/types.ts' })."
+      "handshakeSpec": "Create src/types.ts with User interface (id: string, name: string). After creating the file, call agent_sync({ action: 'provide', item: 'User type', file: 'src/types.ts' })."
     },
     {
       "agent": "worker",
       "logicalName": "worker-B",
       "steps": [2],
       "adjacentWorkers": ["worker-A"],
-      "handshakeSpec": "First call wait_for_contract({ item: 'User type' }) to wait for the User type to be ready. Then create src/service.ts with createUser function that imports User from ./types."
+      "handshakeSpec": "First call agent_sync({ action: 'need', item: 'User type' }) to wait for the User type to be ready. Then create src/service.ts with createUser function that imports User from ./types."
     },
     {
       "agent": "worker",
       "logicalName": "worker-C",
       "steps": [3],
       "adjacentWorkers": ["worker-A"],
-      "handshakeSpec": "First call wait_for_contract({ item: 'User type' }) to wait for the User type to be ready. Then create src/validator.ts with validateUser function that imports User from ./types."
+      "handshakeSpec": "First call agent_sync({ action: 'need', item: 'User type' }) to wait for the User type to be ready. Then create src/validator.ts with validateUser function that imports User from ./types."
     }
   ]
 })
@@ -411,8 +389,8 @@ spawn_workers({
 - Be specific about file paths, function names, types
 - Include what to import and export
 - Describe the expected implementation details
-- For providers: include "call signal_contract_complete({ item: 'X' }) when done"
-- For waiters: include "call wait_for_contract({ item: 'X' }) before starting work"`;
+- For providers: include "call agent_sync({ action: 'provide', item: 'X' }) when done"
+- For waiters: include "call agent_sync({ action: 'need', item: 'X' }) before starting work"`;
 }
 
 const asyncWatchers = new Map<string, fsSync.FSWatcher>();
@@ -500,71 +478,55 @@ export async function runCoordinationSession(options: CoordinationRunOptions): P
 	}
 
 	// ─────────────────────────────────────────────────────────────────────────
-	// Smart Routing: Detect input type and route appropriately
+	// Spec Validation: Validate TASK-XX format
 	// ─────────────────────────────────────────────────────────────────────────
-	let routingMode: InputType;
-	let routingClarifications: Answer[] = [];
+	// Parse and validate the spec format
+	const parsedSpec = parseSpec(planContent, planPath);
+	const specValidation = validateSpec(parsedSpec);
 
-	if (params.mode) {
-		// Mode explicitly specified - skip detection and TUI
-		routingMode = params.mode;
-	} else {
-		// Auto-detect and confirm with user
-		const detected = detectInputType(planContent);
-		
-		// Only show TUI if we have a TTY
-		if (process.stdin.isTTY && process.stdout.isTTY) {
-			const tuiResult = await runInputTypeTUI({ detected, signal });
-			
-			if (tuiResult === null) {
-				// User pressed Esc or aborted - abort coordination
-				return {
-					result: {
-						content: [{ type: "text", text: "Coordination aborted by user" }],
-						isError: false,
-					},
-					coordDir,
-					traceId: options.traceId || "",
-				};
-			}
-			
-			routingMode = tuiResult.type;
-		} else {
-			// No TTY - use detected default
-			routingMode = detected.type;
-		}
+	// ─────────────────────────────────────────────────────────────────────────
+	// Spec Validation: Require valid TASK-XX format
+	// ─────────────────────────────────────────────────────────────────────────
+	if (!specValidation.valid) {
+		// Spec validation failed - return helpful error
+		const errorReport = formatValidationResult(specValidation);
+		return {
+			result: {
+				content: [{
+					type: "text",
+					text: `Invalid spec format. The coordinate tool requires a valid TASK-XX format spec.
+
+${errorReport}
+
+To create a valid spec, use the 'plan' tool:
+  plan({ input: "${planPath}" })
+
+Or fix the spec file to include TASK-XX format tasks:
+
+## TASK-01: [Title]
+Priority: P1
+Files: src/file.ts (create)
+Depends on: none
+Acceptance: [testable criteria]
+
+See: pi-coordination README for spec format documentation.`,
+				}],
+				isError: true,
+			},
+			coordDir,
+			traceId: options.traceId || "",
+		};
 	}
 
-	// For "request" mode, generate and ask clarifying questions
-	let questionGenerationCost = 0;
-	if (routingMode === "request" && process.stdin.isTTY && process.stdout.isTTY) {
-		try {
-			const questionResult = await generateClarifyingQuestions(runtime, planContent, { depth: "deep" });
-			questionGenerationCost = questionResult.cost;
-			
-			if (questionResult.questions.length > 0) {
-				// Note: Interview tool integration disabled - subagents run headless without UI context,
-				// so the interview tool would always fail. Using inline TUI for all question counts.
-				// TODO: Add direct tool invocation mechanism to enable browser-based interview
-				const tuiResult = await runInlineQuestionsTUI({
-					questions: questionResult.questions,
-					signal,
-				});
-				routingClarifications = tuiResult.answers;
-				planContent = augmentPRD(planContent, routingClarifications);
-			}
-		} catch (err) {
-			// Question generation failed - continue without clarifications
-			console.error(`Warning: Failed to generate clarifying questions: ${err}`);
-		}
+	// Log validation info
+	console.log(`[spec-validation] Valid spec: ${parsedSpec.tasks.length} tasks`);
+	if (specValidation.warnings.length > 0) {
+		console.log(`[spec-validation] Warnings: ${specValidation.warnings.map(w => w.message).join("; ")}`);
 	}
 
-	// Determine which phases to skip based on routing mode
-	const skipScout = routingMode === "spec" || routingMode === "plan";
-	const skipPlanner = routingMode === "spec";
-
-	// Log routing decision
-	console.log(`[routing] Mode: ${routingMode} | Scout: ${skipScout ? "skip" : "run"} | Planner: ${skipPlanner ? "skip" : "run"} | Clarifications: ${routingClarifications.length}`);
+	// Two-track architecture: coordinate always runs on valid specs
+	// Scout and planner phases are now in the plan tool
+	console.log(`[coordinate] Starting execution with ${parsedSpec.tasks.length} tasks`);
 
 	const initialState: CoordinationState = {
 		sessionId: coordSessionId,
@@ -665,8 +627,6 @@ export async function runCoordinationSession(options: CoordinationRunOptions): P
 		return v;
 	};
 
-	const paramScout = normalizePhaseConfig(params.scout);
-	const paramPlanner = normalizePhaseConfig(params.planner);
 	const paramCoordinator = normalizePhaseConfig(params.coordinator);
 	const paramWorker = normalizePhaseConfig(params.worker);
 	const paramReviewer = normalizePhaseConfig(params.reviewer);
@@ -678,9 +638,8 @@ export async function runCoordinationSession(options: CoordinationRunOptions): P
 		agents.find(a => a.name === name)?.model;
 	
 	// Model resolution: param > agent frontmatter > pi's defaultModel
+	// Note: scout and planner are omitted - those phases are now in plan tool
 	const models = {
-		scout: paramScout?.model || getAgentModel("coordination/scout") || defaultModel,
-		planner: (paramPlanner as { model?: string })?.model || getAgentModel("coordination/planner") || defaultModel,
 		coordinator: paramCoordinator?.model || getAgentModel("coordination/coordinator") || defaultModel,
 		worker: paramWorker?.model || getAgentModel("coordination/worker") || defaultModel,
 		reviewer: paramReviewer?.model || getAgentModel("coordination/reviewer") || defaultModel,
@@ -705,12 +664,12 @@ export async function runCoordinationSession(options: CoordinationRunOptions): P
 		costLimit,
 		maxOutput: params.maxOutput,
 		models,
-		skipScout, // Smart routing: skip scout for spec/plan modes
+		skipScout: true, // Two-track: scout phase is now in plan tool
 		planner: {
-			// Smart routing: disable planner for spec mode (already has TASK-XX format)
-			enabled: skipPlanner ? false : ((paramPlanner as { enabled?: boolean })?.enabled ?? settings.planner?.enabled ?? true),
-			humanCheckpoint: (paramPlanner as { humanCheckpoint?: boolean })?.humanCheckpoint ?? settings.planner?.humanCheckpoint ?? false,
-			maxSelfReviewCycles: (paramPlanner as { maxSelfReviewCycles?: number })?.maxSelfReviewCycles ?? settings.planner?.maxSelfReviewCycles ?? 5,
+			// Two-track: planner phase is now in plan tool, always disabled in coordinate
+			enabled: false,
+			humanCheckpoint: false,
+			maxSelfReviewCycles: 0,
 		},
 		selfReview: selfReviewConfig,
 		supervisor: {
@@ -732,24 +691,17 @@ export async function runCoordinationSession(options: CoordinationRunOptions): P
 		JSON.stringify(runtimeConfig, null, 2),
 	);
 
-	// Save routing decision info
-	const routingInfo = {
-		mode: routingMode,
-		skipScout,
-		skipPlanner,
-		clarificationsCount: routingClarifications.length,
-		questionGenerationCost,
-		clarifications: routingClarifications.map(a => ({
-			question: a.question,
-			value: a.value,
-			wasTimeout: a.wasTimeout,
-			wasCustom: a.wasCustom,
-		})),
+	// Save execution info
+	const executionInfo = {
+		mode: "spec" as const,  // Always spec mode with two-track architecture
+		skipScout: true,        // Scout is now in plan tool
+		skipPlanner: true,      // Planner is now in plan tool
+		taskCount: parsedSpec.tasks.length,
 		timestamp: Date.now(),
 	};
 	await fs.writeFile(
-		path.join(coordDir, "routing-info.json"),
-		JSON.stringify(routingInfo, null, 2),
+		path.join(coordDir, "execution-info.json"),
+		JSON.stringify(executionInfo, null, 2),
 	);
 
 	const obs = await ObservabilityContext.create(
@@ -770,8 +722,7 @@ export async function runCoordinationSession(options: CoordinationRunOptions): P
 			maxFixCycles: params.maxFixCycles ?? 3,
 			sameIssueLimit: params.sameIssueLimit ?? 2,
 			costLimit,
-			routingMode, // Smart routing mode used
-			clarificationsCount: routingClarifications.length,
+			taskCount: parsedSpec.tasks.length,
 		},
 	});
 

@@ -68,13 +68,42 @@ export class TaskQueueManager {
 				queue.tasks.filter((t) => t.status === "complete").map((t) => t.id)
 			);
 
+			// Get blocked parent task IDs (parents waiting for subtasks)
+			const blockedParentIds = new Set(
+				queue.tasks
+					.filter((t) => t.status === "blocked" && t.blockedBy?.length)
+					.map((t) => t.id)
+			);
+
 			const available = queue.tasks
 				.filter((t) => t.status === "pending")
 				.filter((t) => {
+					// All explicit dependencies must be complete
 					const deps = t.dependsOn || [];
-					return deps.every((depId) => completedIds.has(depId));
+					if (!deps.every((depId) => completedIds.has(depId))) return false;
+
+					// For subtasks (TASK-XX.Y): check if parent is blocked waiting for subtasks
+					// This is when subtasks become available
+					if (t.parentTaskId) {
+						// Subtask only runs when parent is blocked waiting for it
+						return blockedParentIds.has(t.parentTaskId);
+					}
+
+					return true;
 				})
-				.sort((a, b) => a.priority - b.priority);
+				.sort((a, b) => {
+					// Sort by priority (P0=0 first, then P1=1, P2=2, P3=3)
+					const pa = a.priority ?? 2; // Default to P2
+					const pb = b.priority ?? 2;
+
+					if (pa !== pb) return pa - pb;
+
+					// Then by dependency count (fewer deps = more foundational)
+					const depsA = a.dependsOn?.length ?? 0;
+					const depsB = b.dependsOn?.length ?? 0;
+
+					return depsA - depsB;
+				});
 
 			if (available.length === 0) return null;
 
@@ -108,6 +137,24 @@ export class TaskQueueManager {
 			task.status = "complete";
 			task.completedAt = Date.now();
 			task.completedBy = completedBy;
+
+			// Check if this is a subtask - if so, try to unblock parent
+			if (task.parentTaskId) {
+				const parent = queue.tasks.find((t) => t.id === task.parentTaskId);
+				if (parent && parent.status === "blocked") {
+					// Check if all subtasks are complete
+					const subtasks = queue.tasks.filter(
+						(t) => t.parentTaskId === task.parentTaskId
+					);
+					const allComplete = subtasks.every((t) => t.status === "complete");
+
+					if (allComplete) {
+						// Unblock parent
+						parent.status = "pending";
+						parent.blockedBy = undefined;
+					}
+				}
+			}
 
 			this.updateBlockedTasks(queue);
 
@@ -187,6 +234,96 @@ export class TaskQueueManager {
 			.sort((a, b) => a.priority - b.priority);
 	}
 
+	/**
+	 * Create subtasks for a parent task and block the parent.
+	 * Subtasks are TASK-XX.Y format and run in parallel.
+	 */
+	async createSubtasks(
+		parentTaskId: string,
+		subtasks: Array<{
+			title: string;
+			description: string;
+			files?: string[];
+			priority?: number;
+		}>,
+		maxSubtasks: number = 5,
+	): Promise<{ success: boolean; subtaskIds: string[]; error?: string }> {
+		return this.withLock(async () => {
+			const queue = await this.getQueue();
+			const parent = queue.tasks.find((t) => t.id === parentTaskId);
+
+			if (!parent) {
+				return { success: false, subtaskIds: [], error: `Parent task ${parentTaskId} not found` };
+			}
+
+			// Count existing subtasks
+			const existingSubtasks = queue.tasks.filter(
+				(t) => t.parentTaskId === parentTaskId
+			);
+
+			if (existingSubtasks.length + subtasks.length > maxSubtasks) {
+				return {
+					success: false,
+					subtaskIds: [],
+					error: `Too many subtasks for ${parentTaskId} (max ${maxSubtasks})`,
+				};
+			}
+
+			const subtaskIds: string[] = [];
+			const startNumber = existingSubtasks.length + 1;
+
+			for (let i = 0; i < subtasks.length; i++) {
+				const s = subtasks[i];
+				const subtaskId = `${parentTaskId}.${startNumber + i}`;
+
+				const newTask: Task = {
+					id: subtaskId,
+					description: `${s.title}\n\n${s.description}`,
+					priority: s.priority ?? parent.priority ?? 2,
+					status: "pending",
+					files: s.files || [],
+					dependsOn: [],
+					parentTaskId,
+				};
+
+				queue.tasks.push(newTask);
+				subtaskIds.push(subtaskId);
+			}
+
+			// Block parent until subtasks complete
+			parent.status = "blocked";
+			parent.blockedBy = subtaskIds;
+
+			await fs.writeFile(this.queuePath, JSON.stringify(queue, null, 2));
+
+			return { success: true, subtaskIds };
+		});
+	}
+
+	/**
+	 * Get a task by ID.
+	 */
+	async getTask(taskId: string): Promise<Task | null> {
+		const queue = await this.getQueue();
+		return queue.tasks.find((t) => t.id === taskId) || null;
+	}
+
+	/**
+	 * Update a task.
+	 */
+	async updateTask(taskId: string, updates: Partial<Task>): Promise<void> {
+		await this.withLock(async () => {
+			const queue = await this.getQueue();
+			const task = queue.tasks.find((t) => t.id === taskId);
+
+			if (!task) return;
+
+			Object.assign(task, updates);
+
+			await fs.writeFile(this.queuePath, JSON.stringify(queue, null, 2));
+		});
+	}
+
 	async approveTask(taskId: string, modifications?: Partial<Task>): Promise<void> {
 		await this.withLock(async () => {
 			const queue = await this.getQueue();
@@ -251,9 +388,18 @@ export class TaskQueueManager {
 		for (const task of queue.tasks) {
 			if (task.status !== "blocked") continue;
 
+			// Check explicit dependencies
 			const deps = task.dependsOn || [];
-			if (deps.every((depId) => completedIds.has(depId))) {
+			const depsComplete = deps.every((depId) => completedIds.has(depId));
+
+			// Check blockedBy (for parent tasks waiting on subtasks)
+			const blockedBy = task.blockedBy || [];
+			const blockedByComplete = blockedBy.every((id) => completedIds.has(id));
+
+			// Only unblock if both explicit deps and blockedBy are complete
+			if (depsComplete && (blockedBy.length === 0 || blockedByComplete)) {
 				task.status = "pending";
+				task.blockedBy = undefined;
 			}
 		}
 	}

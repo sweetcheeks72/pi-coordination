@@ -1,8 +1,9 @@
 # Test Spec - Ready to Execute
 
-This spec has explicit task structure and should skip scout + planner.
+This spec has explicit task structure in TASK-XX format.
 
 ## TASK-01: Create greeting module
+Priority: P1
 
 Create a simple greeting module.
 
@@ -11,6 +12,7 @@ Create a simple greeting module.
 **Acceptance:** Module exports `greet(name: string): string` that returns "Hello, {name}!"
 
 ## TASK-02: Create test file
+Priority: P2
 
 Create tests for the greeting module.
 

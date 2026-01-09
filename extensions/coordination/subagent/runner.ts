@@ -9,6 +9,7 @@ import { getFinalOutput, getResultOutput } from "./render.js";
 import { createArtifactPaths } from "./artifacts.js";
 import { truncateOutputHead } from "./truncate.js";
 import type { OnUpdateCallback, OutputLimits, SingleResult, SubagentDetails } from "./types.js";
+import { runAgentSDK, isSDKAvailable } from "./sdk-runner.js";
 
 const UPDATE_THROTTLE_MS = 250;
 const MAX_RECENT_TOOLS = 5;
@@ -46,7 +47,7 @@ export async function runSingleAgent(
 	signal: AbortSignal | undefined,
 	onUpdate: OnUpdateCallback | undefined,
 	makeDetails: (results: SingleResult[]) => SubagentDetails,
-	options?: { outputLimits?: OutputLimits; artifactsDir?: string; artifactLabel?: string; extensions?: string[]; attachments?: string[] },
+	options?: { outputLimits?: OutputLimits; artifactsDir?: string; artifactLabel?: string; extensions?: string[]; attachments?: string[]; useSubprocess?: boolean },
 ): Promise<SingleResult> {
 	const agent = agents.find((a) => a.name === agentName);
 
@@ -63,6 +64,24 @@ export async function runSingleAgent(
 		};
 	}
 
+	// Try to use SDK runner if available (unless explicitly using subprocess)
+	if (!options?.useSubprocess && await isSDKAvailable()) {
+		return runAgentSDK({
+			cwd: cwd ?? runtime.cwd,
+			agent,
+			task,
+			signal,
+			onUpdate,
+			makeDetails,
+			outputLimits: options?.outputLimits,
+			artifactsDir: options?.artifactsDir,
+			artifactLabel: options?.artifactLabel,
+			step,
+			extensions: options?.extensions,
+		});
+	}
+
+	// Fall back to subprocess execution
 	// Log agent configuration for observability
 	const hasTools = agent.tools && agent.tools.length > 0;
 	const toolsList = hasTools 

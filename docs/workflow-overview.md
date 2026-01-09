@@ -1,812 +1,791 @@
 # Pi Coordination Workflow Overview
 
-This document describes the architecture and workflows of pi-coordination:
+This document describes the **two-track architecture** of pi-coordination:
 
-- Planner phase with embedded self-review
-- Task queue model for work distribution
-- Worker self-review loop
-- Supervisor for stuck worker intervention
-- A2A (Agent-to-Agent) messaging
-- Discovered task workflow
+- **Plan Tool** — Creates TASK-XX specs from prose/PRDs
+- **Coordinate Tool** — Executes validated specs with parallel workers
 
 ---
 
-## Architecture Overview
+## Two-Track Architecture
 
 ```
-+=====================================================================================+
-||                           PI-COORDINATION ARCHITECTURE                            ||
-+=====================================================================================+
-|                                                                                     |
-|   User invokes:  coordinate({ plan: "./plan.md", agents: 4,                        |
-|                              planner: true, supervisor: true, ... })               |
-|                                                                                     |
-|   +-------------------------------------------------------------------------+       |
-|   |                        Coordinate Tool (index.ts)                       |       |
-|   |                                                                         |       |
-|   |  - Reads plan file                                                      |       |
-|   |  - Initializes FileBasedStorage + TaskQueueManager                      |       |
-|   |  - Creates ObservabilityContext                                         |       |
-|   |  - Runs pipeline phases                                                 |       |
-|   +-------------------------------------------------------------------------+       |
-|                                      |                                              |
-|                                      v                                              |
-|   +-------------------------------------------------------------------------+       |
-|   |                           Pipeline Phases                               |       |
-|   |                                                                         |       |
-|   |  scout --> planner --> coordinator --> workers --> review --> fixes     |       |
-|   |              |              |             |                             |       |
-|   |              |              |             +---> self-review loop        |       |
-|   |              |              +---> spawns from task queue                |       |
-|   |              +---> generates tasks.json + background review             |       |
-|   +-------------------------------------------------------------------------+       |
-|                                      |                                              |
-|                                      v                                              |
-|   +----------------------------------+--------------------------------------+       |
-|   |          Planner Agent           |           Worker Agents              |       |
-|   |  (coordination/planner)          |    (coordination/worker)             |       |
-|   |                                  |                                      |       |
-|   |  - Receives: PRD + scout context |  Tools:                              |       |
-|   |  - Outputs: Task graph (JSON)    |  - complete_task (with self-review) |       |
-|   |  - Embedded self-review          |  - add_discovered_task              |       |
-|   |  - Background discovered task    |  - share_discovery                  |       |
-|   |    review loop                   |  - reserve_files / release_files    |       |
-|   +----------------------------------+  - wait_for_contract                |       |
-|                                      |  - signal_contract_complete         |       |
-|   +----------------------------------+  - send_message / check_messages    |       |
-|   |          Coordinator Agent       +--------------------------------------+       |
-|   |  (coordination/coordinator)      |                                      |       |
-|   |                                  |                                      |       |
-|   |  Tools:                          |                                      |       |
-|   |  - spawn_from_queue              |          Supervisor Loop             |       |
-|   |  - get_task_queue_status         |  - Monitors worker activity          |       |
-|   |  - check_status                  |  - Nudges inactive workers           |       |
-|   |  - broadcast                     |  - Restarts stuck workers            |       |
-|   |  - done                          |  - Abandons after max restarts       |       |
-|   +----------------------------------+--------------------------------------+       |
-|                                      |                                              |
-|                                      v                                              |
-|   +-------------------------------------------------------------------------+       |
-|   |                         Shared State                                    |       |
-|   |                                                                         |       |
-|   |  - tasks.json (task queue)        - progress.md (shared memory)         |       |
-|   |  - state.json (coordination)      - nudges/ (supervisor -> worker)      |       |
-|   |  - worker-*.json (per-worker)     - a2a-messages/ (agent-to-agent)      |       |
-|   |  - discoveries.json               - events.jsonl                        |       |
-|   +-------------------------------------------------------------------------+       |
-|                                                                                     |
-+=====================================================================================+
+┌─────────────────────────────────────────────────────────────────────────────┐
+│                           TWO-TRACK ARCHITECTURE                            │
+├─────────────────────────────────────────────────────────────────────────────┤
+│                                                                             │
+│   User Input                                                                │
+│   ─────────────────────────────────────────────────────────────────────     │
+│                                                                             │
+│   Prose/PRD/Idea                    TASK-XX Spec                            │
+│   "Add authentication"              (already structured)                    │
+│         │                                 │                                 │
+│         ▼                                 │                                 │
+│   ┌───────────────┐                       │                                 │
+│   │  PLAN TOOL    │                       │                                 │
+│   │               │                       │                                 │
+│   │  Interview    │                       │                                 │
+│   │      ↓        │                       │                                 │
+│   │  Scout        │                       │                                 │
+│   │      ↓        │                       │                                 │
+│   │  Elaborate    │                       │                                 │
+│   │      ↓        │                       │                                 │
+│   │  Structure    │                       │                                 │
+│   │      ↓        │                       │                                 │
+│   │  Handoff      │                       │                                 │
+│   └───────┬───────┘                       │                                 │
+│           │                               │                                 │
+│           ▼                               │                                 │
+│        spec.md ───────────────────────────┤                                 │
+│                                           │                                 │
+│                                           ▼                                 │
+│                                   ┌───────────────┐                         │
+│                                   │ COORDINATE    │                         │
+│                                   │               │                         │
+│                                   │  Validate     │                         │
+│                                   │      ↓        │                         │
+│                                   │  Dispatch     │                         │
+│                                   │      ↓        │                         │
+│                                   │  Workers      │                         │
+│                                   │      ↓        │                         │
+│                                   │  Review       │                         │
+│                                   │      ↓        │                         │
+│                                   │  Fixes        │                         │
+│                                   └───────────────┘                         │
+│                                                                             │
+└─────────────────────────────────────────────────────────────────────────────┘
 ```
 
 ---
 
-## Pipeline Phase Flow
+## Plan Tool
+
+The plan tool converts prose, PRDs, or ideas into structured TASK-XX format specs through an interactive flow.
+
+### Usage
+
+```typescript
+// New plan from prose
+plan({ input: "Add JWT authentication" })
+
+// New plan from file
+plan({ input: "./requirements.md" })
+
+// Refine existing spec
+plan({ continue: "./auth-spec.md" })
+
+// Skip interview (use defaults)
+plan({ input: "./prd.md", skipInterview: true })
+```
+
+### Plan Tool Phases
 
 ```
-                                  +--------+
-                                  | Start  |
-                                  +--------+
-                                      |
-                                      v
-+-------------------------------------------------------------------------------+
-|                              SCOUT PHASE                                      |
-|  Agent: coordination/scout                                                    |
-|  - Analyzes codebase with PLANNER focus (not worker focus)                    |
-|  - Produces structured context with <file_map> and <file_contents>            |
-|  - Token-budgeted output (~30K tokens target)                                 |
-|  - Output: scout/main.md with file tree and full file contents                |
-+-------------------------------------------------------------------------------+
-                                      |
-                                      v
-+-------------------------------------------------------------------------------+
-|                              PLANNER PHASE                                    |
-|  Agent: coordination/planner                                                  |
-|  - Uses read_context tool to read scout context without truncation            |
-|  - Generates task graph as JSON with embedded self-review                     |
-|  - Creates tasks.json with all tasks in "pending" status                      |
-|  - Starts background review loop for discovered tasks                         |
-|  - Output: tasks.json                                                         |
-+-------------------------------------------------------------------------------+
-                                      |
-                                      v
-+-------------------------------------------------------------------------------+
-|                           COORDINATOR PHASE                                   |
-|  Agent: coordination/coordinator                                              |
-|  - Uses spawn_from_queue to spawn workers per-task                            |
-|  - Supervisor loop monitors all workers                                       |
-|  - Waits for all workers to complete                                          |
-|  - Handles restarts for exit code 42                                          |
-+-------------------------------------------------------------------------------+
-                                      |
-                                      v
-+-------------------------------------------------------------------------------+
-|                            WORKERS PHASE                                      |
-|  Agent: coordination/worker (one per task)                                    |
-|  - Each worker receives single task in handshakeSpec                          |
-|  - Self-review loop before complete_task succeeds                             |
-|  - Can discover new tasks (pending_review status)                             |
-|  - Can share discoveries with other workers                                   |
-|  - Responds to supervisor nudges                                              |
-+-------------------------------------------------------------------------------+
-                                      |
-                                      v
-+-------------------------------------------------------------------------------+
-|                            REVIEW PHASE                                       |
-|  Agent: coordination/reviewer                                                 |
-|  - Analyzes all changes made during coordination                              |
-|  - Returns issues or allPassing: true                                         |
-+-------------------------------------------------------------------------------+
-                                      |
-                          +-----------+-----------+
-                          |                       |
-                          v                       v
-                    [allPassing]            [has issues]
-                          |                       |
-                          v                       v
-                    +---------+           +---------------+
-                    |  DONE   |           |  FIX PHASE    |
-                    +---------+           +---------------+
+┌─────────────────────────────────────────────────────────────────────────────┐
+│                            PLAN TOOL PHASES                                 │
+├─────────────────────────────────────────────────────────────────────────────┤
+│                                                                             │
+│  ┌────────────────────────────────────────────────────────────────────────┐ │
+│  │ PHASE 1: Interview                                     [60s per Q]    │ │
+│  │                                                                        │ │
+│  │  Multi-round interactive interview to gather requirements:             │ │
+│  │                                                                        │ │
+│  │  Round 1: Discovery (text questions)                                   │ │
+│  │    "What are you building?"                                            │ │
+│  │    "What does success look like?"                                      │ │
+│  │                                                                        │ │
+│  │  Round 2: Technical (select options)                                   │ │
+│  │    Framework? [React|Vue|Svelte]                                       │ │
+│  │    Include tests? [Yes|No]                                             │ │
+│  │                                                                        │ │
+│  │  Round 3+: Clarifications based on LLM analysis                        │ │
+│  │                                                                        │ │
+│  │  Behaviors:                                                            │ │
+│  │  - ESC on Q1 = abort planning                                          │ │
+│  │  - Timeout = use default, continue                                     │ │
+│  │  - Ctrl+D = skip remaining questions                                   │ │
+│  └────────────────────────────────────────────────────────────────────────┘ │
+│                                      │                                      │
+│                                      ▼                                      │
+│  ┌────────────────────────────────────────────────────────────────────────┐ │
+│  │ PHASE 2: Scout (targeted)                                              │ │
+│  │                                                                        │ │
+│  │  Questions derived from interview findings:                            │ │
+│  │  • Existing patterns for this feature?                                 │ │
+│  │  • Related models/types?                                               │ │
+│  │  • Test patterns in use?                                               │ │
+│  │  • Configuration/environment setup?                                    │ │
+│  │                                                                        │ │
+│  │  Output: ScoutResult with:                                             │ │
+│  │  - metaPrompt (~15K tokens) - Synthesized guidance                     │ │
+│  │  - contextDoc (~85K tokens) - Relevant file contents                   │ │
+│  └────────────────────────────────────────────────────────────────────────┘ │
+│                                      │                                      │
+│                                      ▼                                      │
+│  ┌────────────────────────────────────────────────────────────────────────┐ │
+│  │ PHASE 3: Elaborate (frontier model)                                    │ │
+│  │                                                                        │ │
+│  │  ~100K token context injected directly (no tool calls):                │ │
+│  │  - Original request                                                    │ │
+│  │  - Interview transcript                                                │ │
+│  │  - Scout metaPrompt + contextDoc                                       │ │
+│  │                                                                        │ │
+│  │  Output: 1000-3000 word detailed implementation plan                   │ │
+│  │  - Reasoning and justifications                                        │ │
+│  │  - Edge cases and error handling                                       │ │
+│  │  - Technical decisions with rationale                                  │ │
+│  └────────────────────────────────────────────────────────────────────────┘ │
+│                                      │                                      │
+│                                      ▼                                      │
+│  ┌────────────────────────────────────────────────────────────────────────┐ │
+│  │ PHASE 4: Structure                                                     │ │
+│  │                                                                        │ │
+│  │  Convert elaborated plan to TASK-XX format:                            │ │
+│  │                                                                        │ │
+│  │  ## TASK-01: Create auth types                                         │ │
+│  │  Priority: P1                                                          │ │
+│  │  Files: src/auth/types.ts (create)                                     │ │
+│  │  Depends on: none                                                      │ │
+│  │  Acceptance: Exports User, Token interfaces                            │ │
+│  │                                                                        │ │
+│  │  Validates output, retries if invalid (up to 2 retries)                │ │
+│  └────────────────────────────────────────────────────────────────────────┘ │
+│                                      │                                      │
+│                                      ▼                                      │
+│  ┌────────────────────────────────────────────────────────────────────────┐ │
+│  │ PHASE 5: Handoff                                       [60s timeout]  │ │
+│  │                                                                        │ │
+│  │  Spec saved to: auth-spec.md                                           │ │
+│  │  Tasks: 6 | Files: 8 | P0: 1, P1: 3, P2: 2                            │ │
+│  │                                                                        │ │
+│  │  What would you like to do?                                            │ │
+│  │  ● Execute now ──────────────────▶ coordinate({ plan: "spec.md" })     │ │
+│  │  ○ Refine further ───────────────▶ plan({ continue: "spec.md" })       │ │
+│  │  ○ Save and exit                                                       │ │
+│  │                                                                        │ │
+│  │  [timeout = Save and exit]                                             │ │
+│  └────────────────────────────────────────────────────────────────────────┘ │
+│                                                                             │
+└─────────────────────────────────────────────────────────────────────────────┘
+```
+
+### Plan Tool Options
+
+```typescript
+plan({
+  // Input (exactly one required)
+  input: string,                    // File path or inline text for NEW plans
+  continue: string,                 // Path to existing spec to REFINE
+
+  // Output
+  output: string,                   // Where to save spec (default: specs/<name>-spec.md)
+  format: "markdown" | "json",      // Output format (default: markdown)
+
+  // Models
+  model: string,                    // Model for elaboration (default: frontier)
+  scoutModel: string,               // Model for scout (default: fast)
+
+  // Behavior
+  maxInterviewRounds: number,       // Limit interview rounds (default: 5 new, 3 refine)
+  skipInterview: boolean,           // Skip interview phase
+  skipScout: boolean,               // Skip scout phase
+})
 ```
 
 ---
 
-## Scout Context Format
+## Coordinate Tool
 
-The scout outputs a structured context file with two sections:
+The coordinate tool executes validated TASK-XX format specs with parallel workers.
 
-### Output Structure
+### Usage
+
+```typescript
+// Execute a spec
+coordinate({ plan: "./auth-spec.md" })
+
+// With more workers
+coordinate({ plan: "./spec.md", agents: 8 })
+
+// Async mode (returns immediately)
+coordinate({ plan: "./spec.md", async: true })
+```
+
+### Spec Validation
+
+The coordinate tool **requires** valid TASK-XX format specs. If validation fails:
+
+```
+Invalid spec format. The coordinate tool requires a valid TASK-XX format spec.
+
+Errors:
+- No valid TASK-XX format tasks found
+- Task TASK-02 depends on non-existent task TASK-99
+
+To create a valid spec, use the 'plan' tool:
+  plan({ input: "./your-file.md" })
+```
+
+### Coordinate Tool Phases
+
+```
+┌─────────────────────────────────────────────────────────────────────────────┐
+│                         COORDINATE TOOL PHASES                              │
+├─────────────────────────────────────────────────────────────────────────────┤
+│                                                                             │
+│  ┌────────────────────────────────────────────────────────────────────────┐ │
+│  │ PHASE 1: Validate                                                      │ │
+│  │                                                                        │ │
+│  │  ✓ Has TASK-XX sections                                                │ │
+│  │  ✓ All task IDs valid (TASK-\d{2,}(.\d+)?)                            │ │
+│  │  ✓ No circular dependencies                                            │ │
+│  │  ✓ Entry point exists (task with no deps)                              │ │
+│  │  ✓ All dependencies reference existing tasks                           │ │
+│  │  ✓ Required fields present (Priority, Files, Depends on, Acceptance)   │ │
+│  │                                                                        │ │
+│  │  Invalid? → Error with actionable fix suggestions                      │ │
+│  └────────────────────────────────────────────────────────────────────────┘ │
+│                                      │                                      │
+│                                      ▼                                      │
+│  ┌────────────────────────────────────────────────────────────────────────┐ │
+│  │ PHASE 2: Dispatch (priority-aware)                                     │ │
+│  │                                                                        │ │
+│  │  Ready tasks = no deps OR all deps complete                            │ │
+│  │  Sort: P0 → P1 → P2 → P3, then by dependency count                     │ │
+│  │                                                                        │ │
+│  │  ┌─────────┐  ┌─────────┐  ┌─────────┐  ┌─────────┐                    │ │
+│  │  │ TASK-01 │  │ TASK-02 │  │ TASK-03 │  │ TASK-04 │                    │ │
+│  │  │   P0    │  │   P1    │  │   P1    │  │   P2    │                    │ │
+│  │  │ ready ✓ │  │ blocked │  │ blocked │  │ blocked │                    │ │
+│  │  └─────────┘  └─────────┘  └─────────┘  └─────────┘                    │ │
+│  └────────────────────────────────────────────────────────────────────────┘ │
+│                                      │                                      │
+│                                      ▼                                      │
+│  ┌────────────────────────────────────────────────────────────────────────┐ │
+│  │ PHASE 3: Workers (parallel execution)                                  │ │
+│  │                                                                        │ │
+│  │  ┌──────────────┐  ┌──────────────┐  ┌──────────────┐                  │ │
+│  │  │   Worker A   │  │   Worker B   │  │   Worker C   │                  │ │
+│  │  │   TASK-01    │  │   TASK-02    │  │   TASK-03    │                  │ │
+│  │  │   working    │  │   waiting    │  │   waiting    │                  │ │
+│  │  └──────────────┘  └──────────────┘  └──────────────┘                  │ │
+│  │                                                                        │ │
+│  │  Features:                                                             │ │
+│  │  • Self-review loop before completion                                  │ │
+│  │  • Can create subtasks (TASK-XX.Y format, max 5 per parent)           │ │
+│  │  • Worker context persisted to context.md                              │ │
+│  │  • Smart auto-continue on failure                                      │ │
+│  └────────────────────────────────────────────────────────────────────────┘ │
+│                                      │                                      │
+│                                      ▼                                      │
+│  ┌────────────────────────────────────────────────────────────────────────┐ │
+│  │ PHASE 4: Review (code-reviewer)                                        │ │
+│  │                                                                        │ │
+│  │  Checks all modified files against acceptance criteria:                │ │
+│  │  • Tests pass?                                                         │ │
+│  │  • Acceptance criteria met?                                            │ │
+│  │  • No regressions?                                                     │ │
+│  │  • Code quality issues?                                                │ │
+│  └────────────────────────────────────────────────────────────────────────┘ │
+│                                      │                                      │
+│                         ┌────────────┴────────────┐                         │
+│                         │                         │                         │
+│                         ▼                         ▼                         │
+│                   [All passing]            [Has issues]                     │
+│                         │                         │                         │
+│                         ▼                         ▼                         │
+│                    ┌─────────┐           ┌───────────────┐                  │
+│                    │ COMPLETE │           │  FIX PHASE    │                  │
+│                    └─────────┘           │  (up to 3x)   │                  │
+│                                          └───────────────┘                  │
+│                                                                             │
+└─────────────────────────────────────────────────────────────────────────────┘
+```
+
+### Coordinate Tool Options
+
+```typescript
+coordinate({
+  // Required
+  plan: string,                     // Path to TASK-XX format spec file
+
+  // Workers
+  agents: number | string[],        // Worker count or array (default: 4)
+
+  // Review
+  reviewCycles: number | false,     // Worker self-review cycles (default: 5)
+  maxFixCycles: number,             // Review/fix iterations (default: 3)
+  checkTests: boolean,              // Reviewer checks tests (default: true)
+  sameIssueLimit: number,           // Times same issue can recur before giving up (default: 2)
+
+  // Supervisor
+  supervisor: boolean | {           // Monitor stuck workers (default: true)
+    enabled?: boolean,
+    nudgeThresholdMs?: number,      // Before wrap_up nudge (default: 180000)
+    restartThresholdMs?: number,    // Before force restart (default: 300000)
+    maxRestarts?: number,           // Before abandoning (default: 2)
+    checkIntervalMs?: number,       // Check frequency (default: 30000)
+  },
+
+  // Cost
+  costLimit: number,                // End gracefully at limit (default: 40)
+
+  // Resume
+  resume: string,                   // Checkpoint ID to resume from
+
+  // Async
+  async: boolean,                   // Run in background (default: false)
+  asyncResultsDir: string,          // Override results directory
+
+  // Output
+  logPath: string,                  // Where to save coordination log
+  maxOutput: { bytes?, lines? },    // Truncation limits
+
+  // Validation
+  validate: boolean,                // Run validation after (default: false)
+  validateStream: boolean,          // Stream warnings (default: false)
+
+  // Model overrides
+  coordinator: string | { model: string },
+  worker: string | { model: string },
+  reviewer: string | { model: string },
+})
+```
+
+---
+
+## TASK-XX Spec Format
+
+The coordinate tool requires specs in this format:
 
 ```markdown
-<file_map>
-/path/to/project
-├── src
-│   ├── components
-│   │   ├── Button.tsx *
-│   │   ├── Input.tsx * +
-│   │   └── ...
-│   ├── utils
-│   │   └── helpers.ts +
-│   └── index.ts * +
-├── package.json
-└── README.md
+# Project Title
 
-(* denotes files to be modified based on the plan)
-(+ denotes file contents included below)
-</file_map>
-
-<file_contents>
-File: /path/to/project/src/components/Input.tsx
-```tsx
-export function Input() { ... }
-```
-
-File: /path/to/project/src/utils/helpers.ts
-```ts
-export function helper() { ... }
-```
-</file_contents>
-```
-
-### File Markers
-
-| Marker | Meaning |
-|--------|---------|
-| `*` | File will need modification based on the plan |
-| `+` | Full file contents included in `<file_contents>` |
-
-### Planner Tool: read_context
-
-The planner uses `read_context` to read scout context without truncation:
-
-```typescript
-read_context({ path: "scout/main.md" })                          // Full context
-read_context({ path: "scout/main.md", section: "file_map" })     // Just file tree
-read_context({ path: "scout/main.md", section: "file_contents" }) // Just contents
-```
+Optional description of the project.
 
 ---
 
-## Task Queue Model
+## TASK-01: Create auth types
+Priority: P1
+Files: src/auth/types.ts (create)
+Depends on: none
+Acceptance: Exports User, Token, Session interfaces
 
-### tasks.json Schema
+Optional detailed description of the task.
 
-```typescript
-interface TaskQueue {
-  version: "2.0";
-  planPath: string;
-  planHash: string;
-  createdAt: number;
-  tasks: Task[];
-}
+## TASK-02: Implement JWT utilities
+Priority: P1
+Files: src/auth/jwt.ts (create), src/auth/types.ts (modify)
+Depends on: TASK-01
+Acceptance: signToken and verifyToken functions work correctly
 
-interface Task {
-  id: string;                    // e.g., "TASK-01"
-  description: string;
-  priority: number;              // 0=critical, 1=high, 2=medium, 3=low
-  status: TaskStatus;
-  files?: string[];              // Files to modify
-  creates?: string[];            // New files to create
-  dependsOn?: string[];          // Task IDs this depends on
-  acceptanceCriteria?: string[];
-  
-  // Claiming
-  claimedBy?: string;            // Worker identity
-  claimedAt?: number;
-  
-  // Completion
-  completedAt?: number;
-  completedBy?: string;
-  
-  // Failure handling
-  restartCount?: number;
-  failureReason?: string;
-  
-  // Discovered tasks only
-  discoveredFrom?: string;       // Task ID that discovered this
-  reviewed?: boolean;
-  reviewedAt?: number;
-  reviewResult?: "ok" | "modified" | "rejected";
-  reviewNotes?: string;
-}
-
-type TaskStatus =
-  | "pending_review"  // Discovered by worker, awaiting planner review
-  | "pending"         // Available to claim
-  | "blocked"         // Dependencies not met (computed)
-  | "claimed"         // Worker is working on it
-  | "complete"        // Successfully done
-  | "failed"          // Failed after max retries
-  | "rejected";       // Rejected by planner (discovered tasks only)
+## TASK-03: Add login endpoint
+Priority: P1
+Files: src/routes/auth.ts (create)
+Depends on: TASK-01, TASK-02
+Acceptance: POST /login returns JWT token on valid credentials
 ```
 
-### Task Status Flow
+### Required Fields
 
-```
-PLANNER-GENERATED TASKS:
+| Field | Format | Description |
+|-------|--------|-------------|
+| Header | `## TASK-XX: Title` | Task ID (TASK-01, TASK-02, etc.) and title |
+| Priority | `Priority: P0\|P1\|P2\|P3` | P0 = critical, P3 = low |
+| Files | `Files: path (action)` | Files with (create), (modify), or (delete) |
+| Depends on | `Depends on: TASK-XX` | Dependencies or "none" |
+| Acceptance | `Acceptance: criteria` | Testable completion criteria |
 
-  pending ──────> claimed ──────> complete
-      │               │
-      │               └──────> failed
-      │
-      └──> blocked (computed from dependsOn)
+### Task ID Formats
 
-
-WORKER-DISCOVERED TASKS:
-
-  pending_review ──> pending ──> claimed ──> complete
-         │              │           │
-         │              │           └──> failed
-         │              │
-         │              └──> blocked
-         │
-         └──> rejected (by planner)
-```
-
-### Task Queue Operations
-
-```
-+------------------------------------------------------------------+
-|                    TASK QUEUE OPERATIONS                         |
-|                    (TaskQueueManager class)                      |
-+------------------------------------------------------------------+
-
-  getNextTask()
-  ┌─────────────────────────────────────────────────────────────┐
-  │ 1. Acquire lock on tasks.json                               │
-  │ 2. Find highest priority task where:                        │
-  │    - status === "pending" (NOT pending_review)              │
-  │    - all dependsOn tasks are "complete"                     │
-  │ 3. Return task (does NOT claim - separate operation)        │
-  │ 4. Release lock                                             │
-  └─────────────────────────────────────────────────────────────┘
-
-  claimTask(taskId, claimedBy)
-  ┌─────────────────────────────────────────────────────────────┐
-  │ 1. Acquire lock                                             │
-  │ 2. Verify task.status === "pending"                         │
-  │ 3. Set status = "claimed", claimedBy, claimedAt             │
-  │ 4. Release lock                                             │
-  │ 5. Return task (or null if already claimed)                 │
-  └─────────────────────────────────────────────────────────────┘
-
-  markTaskComplete(taskId, completedBy)
-  ┌─────────────────────────────────────────────────────────────┐
-  │ 1. Set status = "complete", completedAt, completedBy        │
-  │ 2. Update blocked tasks (deps now met -> pending)           │
-  └─────────────────────────────────────────────────────────────┘
-
-  markTaskFailed(taskId, reason, maxRestarts=2)
-  ┌─────────────────────────────────────────────────────────────┐
-  │ 1. Increment restartCount                                   │
-  │ 2. If restartCount >= maxRestarts: status = "failed"        │
-  │ 3. Else: status = "pending" (available for retry)           │
-  │ 4. Return whether retry is possible                         │
-  └─────────────────────────────────────────────────────────────┘
-
-  releaseTask(taskId)
-  ┌─────────────────────────────────────────────────────────────┐
-  │ Reset to pending, clear claimedBy/claimedAt                 │
-  │ (Used when worker stuck or killed)                          │
-  └─────────────────────────────────────────────────────────────┘
-
-  addDiscoveredTask(task)
-  ┌─────────────────────────────────────────────────────────────┐
-  │ Add task with status = "pending_review"                     │
-  │ Not claimable until planner approves                        │
-  └─────────────────────────────────────────────────────────────┘
-
-  approveTask(taskId, modifications?)
-  ┌─────────────────────────────────────────────────────────────┐
-  │ Change status from pending_review to pending                │
-  │ Optionally apply modifications from planner                 │
-  └─────────────────────────────────────────────────────────────┘
-
-  rejectTask(taskId, reason)
-  ┌─────────────────────────────────────────────────────────────┐
-  │ Set status = "rejected", record reason                      │
-  └─────────────────────────────────────────────────────────────┘
-```
+| Format | Example | Description |
+|--------|---------|-------------|
+| `TASK-XX` | TASK-01 | Main spec task |
+| `TASK-XX.Y` | TASK-01.1 | Subtask (max 5 per parent) |
+| `DISC-XX` | DISC-01 | Discovered task |
+| `FIX-XX` | FIX-01 | Fix task from reviewer |
 
 ---
 
-## Worker Self-Review Loop
+## Worker Context & Auto-Continue
 
-The self-review loop ensures workers review their own code before completion.
+Workers maintain persistent context that survives crashes and enables intelligent restarts.
 
-### Flow
+### Worker Context File
 
-```
-+===============================================================================+
-||                         WORKER SELF-REVIEW LOOP                             ||
-+===============================================================================+
+Each task has a `workers/<task-id>/context.md` file:
 
-  Worker implements task
-          |
-          v
-  Worker calls complete_task()
-          |
-          v
-  ┌─────────────────────────────────────┐
-  │ tool_call handler intercepts        │
-  │ - Stores pendingCompletion          │
-  │ - Returns { block: true }           │
-  └─────────────────────────────────────┘
-          |
-          v
-  agent_end fires
-          |
-          v
-  ┌─────────────────────────────────────┐
-  │ Check for "No issues found."        │
-  └─────────────────────────────────────┘
-          |
-     ┌────┴────┐
-     |         |
-     v         v
- [Found]   [Not found]
-     |         |
-     v         v
- ┌───────┐  ┌─────────────────────────┐
- │ PASS  │  │ count >= maxCycles?     │
- │       │  └─────────────────────────┘
- │       │         |
- │       │    ┌────┴────┐
- │       │    |         |
- │       │    v         v
- │       │  [Yes]     [No]
- │       │    |         |
- │       │    v         v
- │       │  PASS    ┌───────────────────┐
- │       │  (limit) │ Inject self-review│
- │       │          │ prompt, count++   │
- │       │          └───────────────────┘
- │       │                  |
- │       │                  v
- │       │          Agent reviews code
- │       │                  |
- │       │                  v
- │       │          agent_end fires again
- │       │                  |
- │       │                  +──> [Back to check]
- └───────┘
-     |
-     v
-  pi.sendMessage("Now call complete_task()...")
-          |
-          v
-  complete_task() succeeds (selfReview.passed = true)
+```markdown
+# Task Context: TASK-03
+
+## Files Modified
+- ✓ migrations/003_pool.sql (complete)
+- ⚠️ src/db/users.ts (partial - line 45 error)
+
+## Discoveries
+- Legacy connection in src/legacy/db.js
+
+## Last Actions
+- [14:25:01] ✓ write: migrations/003_pool.sql
+- [14:25:15] ✗ edit: src/db/users.ts (syntax error)
+
+## Continuation Notes
+- Don't recreate migrations/003_pool.sql
+- Fix syntax error at src/db/users.ts:45
 ```
 
-### Self-Review Prompt
+### Auto-Continue Flow
 
 ```
-Great, now I want you to carefully read over all of the new code you just wrote
-and other existing code you just modified with "fresh eyes," looking super
-carefully for any obvious bugs, errors, problems, issues, confusion, etc.
-
-[If PI_SELF_REVIEW_SPEC_PATH is set]:
-Make sure you re-read the spec before you review:
-<spec_path>
-
-If any issues are found, proceed to fix them without being asked to do so.
-If no issues are found then your response MUST contain these exact words:
-"No issues found."
+┌─────────────────────────────────────────────────────────────────────────────┐
+│                          AUTO-CONTINUE FLOW                                 │
+│                   (at spawn level, NOT coordinator)                         │
+├─────────────────────────────────────────────────────────────────────────────┤
+│                                                                             │
+│   Worker exits non-zero                                                     │
+│         │                                                                   │
+│         ▼                                                                   │
+│   ┌─────────────────────────────────────────────────┐                       │
+│   │ Load workers/<task-id>/context.md               │                       │
+│   │ • Files modified (with status)                  │                       │
+│   │ • Discoveries                                   │                       │
+│   │ • Last actions before failure                   │                       │
+│   │ • Continuation notes                            │                       │
+│   └─────────────────────────────────────────────────┘                       │
+│         │                                                                   │
+│         ▼                                                                   │
+│   restartCount > maxRestarts?                                               │
+│         │                                                                   │
+│     ┌───┴───┐                                                               │
+│     │       │                                                               │
+│    YES     NO                                                               │
+│     │       │                                                               │
+│     ▼       ▼                                                               │
+│   FAIL   Build continuation prompt:                                         │
+│          ┌─────────────────────────────────────────────────────────────┐    │
+│          │ ## Task: TASK-03 (Continuation - Attempt 2)                 │    │
+│          │                                                             │    │
+│          │ ### ⚠️ CONTINUATION FROM FAILED ATTEMPT                     │    │
+│          │ Previous attempt exited with code 1.                        │    │
+│          │                                                             │    │
+│          │ ### Files Already Modified (verify before recreating)       │    │
+│          │ - ✓ migrations/003_pool.sql (complete)                      │    │
+│          │ - ⚠️ src/db/users.ts (partial - fix line 45)                │    │
+│          │                                                             │    │
+│          │ ### Instructions                                            │    │
+│          │ 1. Verify which previous files are valid                    │    │
+│          │ 2. Don't redo completed work                                │    │
+│          │ 3. Focus on fixing the specific failure                     │    │
+│          └─────────────────────────────────────────────────────────────┘    │
+│         │                                                                   │
+│         ▼                                                                   │
+│   Spawn new worker with context                                             │
+│   (no coordinator involvement!)                                             │
+│                                                                             │
+└─────────────────────────────────────────────────────────────────────────────┘
 ```
-
-### Configuration
-
-| Environment Variable | Default | Description |
-|---------------------|---------|-------------|
-| `PI_SELF_REVIEW_ENABLED` | `"true"` | Set to `"false"` to disable |
-| `PI_MAX_SELF_REVIEW_CYCLES` | `5` | Max review cycles before proceeding |
-| `PI_SELF_REVIEW_SPEC_PATH` | (none) | Optional spec path to include in prompt |
 
 ---
 
 ## Supervisor Loop
 
-The supervisor monitors workers and intervenes when they appear stuck.
+The supervisor monitors workers and intervenes when stuck.
 
-### Architecture
-
-```
-+===============================================================================+
-||                            SUPERVISOR LOOP                                  ||
-+===============================================================================+
-
-  SupervisorLoop starts with worker handles
-          |
-          v
-  ┌─────────────────────────────────────┐
-  │ setInterval(checkAllWorkers, 30s)   │
-  └─────────────────────────────────────┘
-          |
-          v
-  For each tracked worker:
-          |
-          v
-  ┌─────────────────────────────────────┐
-  │ 1. Check if process still alive     │
-  │    - If dead, remove from tracking  │
-  │                                     │
-  │ 2. Check worker state file mtime    │
-  │    - If modified, update activity   │
-  │                                     │
-  │ 3. Calculate inactiveMs             │
-  └─────────────────────────────────────┘
-          |
-          v
-  ┌─────────────────────────────────────────────────────────────┐
-  │                                                             │
-  │  inactiveMs >= restartThresholdMs (5 min)?                  │
-  │      |                                                      │
-  │      YES ──> handleStuckWorker()                            │
-  │              - restartCount++                               │
-  │              - If > maxRestarts: abandonWorker()            │
-  │              - Else: send "restart" nudge, kill, release    │
-  │                                                             │
-  │  inactiveMs >= nudgeThresholdMs (3 min) && not nudged?      │
-  │      |                                                      │
-  │      YES ──> nudgeWorker()                                  │
-  │              - Send "wrap_up" nudge                         │
-  │              - Worker receives on next turn_start           │
-  │                                                             │
-  └─────────────────────────────────────────────────────────────┘
-```
-
-### Nudge Protocol
+### Nudge + Auto-Continue
 
 ```
-Supervisor                    Nudge Files                     Worker
-    |                             |                              |
-    | sendNudge(workerId, {       |                              |
-    |   type: "wrap_up",          |                              |
-    |   message: "...",           |                              |
-    |   timestamp: ...            |                              |
-    | })                          |                              |
-    |                             |                              |
-    +-----> nudges/{workerId}.json                               |
-                                  |                              |
-                                  |      turn_start fires        |
-                                  |<-----------------------------+
-                                  |                              |
-                                  +----> consumeNudgeSync()      |
-                                        (reads and deletes)      |
-                                              |                  |
-                                              v                  |
-                                  ┌─────────────────────────┐    |
-                                  │ type === "wrap_up"      │    |
-                                  │   -> inject message     │    |
-                                  │                         │    |
-                                  │ type === "restart"      │    |
-                                  │   -> process.exit(42)   │    |
-                                  │                         │    |
-                                  │ type === "abort"        │    |
-                                  │   -> process.exit(1)    │    |
-                                  └─────────────────────────┘    |
+┌─────────────────────────────────────────────────────────────────────────────┐
+│                    NUDGE + AUTO-CONTINUE (complementary)                    │
+├─────────────────────────────────────────────────────────────────────────────┤
+│                                                                             │
+│  Worker running                                                             │
+│       │                                                                     │
+│       │ ═══ context.md updated continuously ═══                             │
+│       │                                                                     │
+│       │ (inactive 3 min)                                                    │
+│       ▼                                                                     │
+│  Supervisor: sendNudge(wrap_up) ──▶ Worker tries to wrap up                 │
+│       │                                                                     │
+│       │ (still stuck 5 min)                                                 │
+│       ▼                                                                     │
+│  Supervisor: sendNudge(restart) + kill ──▶ Worker exits                     │
+│       │                                                                     │
+│       │ (exit code 143)                                                     │
+│       ▼                                                                     │
+│  Auto-continue: Load context → Build prompt → Spawn new worker              │
+│                                                                             │
+├─────────────────────────────────────────────────────────────────────────────┤
+│  NUDGE = Detection + Intervention (proactive)                               │
+│  AUTO-CONTINUE = Smart Recovery (reactive, after exit)                      │
+└─────────────────────────────────────────────────────────────────────────────┘
 ```
+
+### Nudge Types
+
+| Type | Trigger | Effect |
+|------|---------|--------|
+| `wrap_up` | 3 min inactive | Message injected: "Wrap up your work" |
+| `restart` | 5 min inactive | Worker killed, auto-continue spawns replacement |
+| `abort` | Manual/critical | Worker exits immediately |
 
 ### Supervisor Configuration
 
 | Config | Default | Description |
 |--------|---------|-------------|
-| `nudgeThresholdMs` | 180000 (3 min) | Time before sending wrap_up nudge |
-| `restartThresholdMs` | 300000 (5 min) | Time before forcing restart |
+| `nudgeThresholdMs` | 180000 (3 min) | Before sending wrap_up nudge |
+| `restartThresholdMs` | 300000 (5 min) | Before forcing restart |
 | `maxRestarts` | 2 | Restarts before abandoning task |
 | `checkIntervalMs` | 30000 (30s) | How often to check workers |
 
 ---
 
+## Worker Self-Review Loop
+
+Workers review their own code before calling `agent_work({ action: 'complete' })`.
+
+```
+┌─────────────────────────────────────────────────────────────────────────────┐
+│                         WORKER SELF-REVIEW LOOP                             │
+├─────────────────────────────────────────────────────────────────────────────┤
+│                                                                             │
+│  Worker implements task                                                     │
+│         │                                                                   │
+│         ▼                                                                   │
+│  Worker calls agent_work({ action: 'complete' })                            │
+│         │                                                                   │
+│         ▼                                                                   │
+│  ┌────────────────────────────────────────┐                                 │
+│  │ Intercepted - check for self-review    │                                 │
+│  └────────────────────────────────────────┘                                 │
+│         │                                                                   │
+│         ▼                                                                   │
+│  "No issues found." in response?                                            │
+│         │                                                                   │
+│     ┌───┴───┐                                                               │
+│    YES     NO                                                               │
+│     │       │                                                               │
+│     ▼       ▼                                                               │
+│   PASS   count >= maxCycles?                                                │
+│     │       │                                                               │
+│     │   ┌───┴───┐                                                           │
+│     │  YES     NO                                                           │
+│     │   │       │                                                           │
+│     │   ▼       ▼                                                           │
+│     │  PASS   Inject self-review prompt                                     │
+│     │  (limit) "Review your code with fresh eyes..."                        │
+│     │               │                                                       │
+│     │               ▼                                                       │
+│     │          Agent reviews, fixes issues                                  │
+│     │               │                                                       │
+│     │               └───────────▶ [back to check]                           │
+│     │                                                                       │
+│     ▼                                                                       │
+│  agent_work({ action: 'complete' }) succeeds                                │
+│                                                                             │
+└─────────────────────────────────────────────────────────────────────────────┘
+```
+
+### Self-Review Configuration
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `PI_SELF_REVIEW_ENABLED` | `"true"` | Set to `"false"` to disable |
+| `PI_MAX_SELF_REVIEW_CYCLES` | `5` | Max cycles before proceeding |
+| `PI_SELF_REVIEW_SPEC_PATH` | (none) | Spec path to include in prompt |
+
+---
+
+## Subtask Support
+
+Workers can break complex tasks into subtasks (TASK-XX.Y format).
+
+```
+┌─────────────────────────────────────────────────────────────────────────────┐
+│                            SUBTASK CREATION                                 │
+├─────────────────────────────────────────────────────────────────────────────┤
+│                                                                             │
+│  Worker on TASK-03 realizes task is complex                                 │
+│         │                                                                   │
+│         ▼                                                                   │
+│  Creates subtasks via add_subtask tool:                                     │
+│                                                                             │
+│  ┌─────────────────────────────────────────────────────────────────┐        │
+│  │ TASK-03.1: Create migration        ─┐                          │        │
+│  │ TASK-03.2: Update queries           ├─ All run in parallel     │        │
+│  │ TASK-03.3: Add indexes             ─┘                          │        │
+│  └─────────────────────────────────────────────────────────────────┘        │
+│                                                                             │
+│  Constraints:                                                               │
+│  • Max 5 subtasks per parent                                                │
+│  • Subtasks depend on parent (implicit)                                     │
+│  • Subtasks run in parallel (no inter-subtask deps)                         │
+│  • Parent blocked until ALL subtasks complete                               │
+│  • No nested subtasks (TASK-03.1.1 not allowed)                             │
+│                                                                             │
+└─────────────────────────────────────────────────────────────────────────────┘
+```
+
+---
+
+## Dependency Graph
+
+Dependencies are tracked in `deps.json`:
+
+### Dependency Types
+
+| Type | Meaning | Example |
+|------|---------|---------|
+| `blocks` | Hard dep - A must complete before B | TASK-01 blocks TASK-02 |
+| `parent` | Structural - B is subtask of A | TASK-03.1 parent TASK-03 |
+| `waits-for` | Dynamic fanout | TASK-05 waits for TASK-03.* |
+| `discovered` | Audit trail | DISC-01 discovered from TASK-02 |
+| `related` | Soft link (informational) | TASK-04 related TASK-06 |
+
+### Dependency Resolution
+
+```
+isTaskReady(taskId):
+  1. Get all "blocks" deps where task is "from"
+  2. For each blocker, check if status === "complete"
+  3. If parent task, check areSubtasksComplete(parentId)
+  4. Ready if all blockers complete AND all subtasks complete
+```
+
+---
+
 ## A2A (Agent-to-Agent) Messaging
 
-Workers can communicate directly via filesystem-based messaging.
+Workers communicate via filesystem-based messages.
 
 ### Message Types
 
-```typescript
-type A2APayload =
-  | { type: "file_release_request"; file: string; reason: string; urgency: "low" | "medium" | "high" }
-  | { type: "file_release_response"; file: string; granted: boolean; eta?: number; reason?: string }
-  | { type: "discovery"; topic: string; content: string; importance: "fyi" | "important" | "critical" }
-  | { type: "task_handoff"; taskId: string; reason: string; context: string }
-  | { type: "help_request"; taskId: string; blocker: string; needsFrom?: string }
-  | { type: "status_update"; taskId: string; progress: number; eta?: number }
-  | { type: "completion_notice"; taskId: string; filesModified: string[] };
-
-interface A2AMessage {
-  id: string;
-  from: string;           // Worker identity
-  to: string | "all";     // Recipient or broadcast
-  timestamp: number;
-  type: A2AMessageType;
-  payload: A2APayload;
-  inReplyTo?: string;     // For request/response correlation
-}
-```
+| Type | Use Case | Status |
+|------|----------|--------|
+| `file_release_request` | Ask another worker to release a file | Implemented |
+| `file_release_response` | Grant/deny file release | Implemented |
+| `discovery` | Share important finding | Implemented |
+| `completion_notice` | Notify task done | Implemented |
+| `task_handoff` | Hand off work | Defined (not yet implemented) |
+| `help_request` | Ask for help | Defined (not yet implemented) |
+| `status_update` | Progress update | Defined (not yet implemented) |
 
 ### Message Flow
 
 ```
-Worker A                      a2a-messages/                    Worker B
-    |                              |                               |
-    | sendMessage(to: "all", {     |                               |
-    |   type: "discovery",         |                               |
-    |   topic: "Found pattern",    |                               |
-    |   content: "...",            |                               |
-    |   importance: "important"    |                               |
-    | })                           |                               |
-    |                              |                               |
-    +-----> {timestamp}-{id}.json  |                               |
-                                   |                               |
-                                   |       turn_start              |
-                                   |<------------------------------+
-                                   |                               |
-                                   +----> checkMessagesSync()      |
-                                         (filters by to: "all")    |
-                                               |                   |
-                                               v                   |
-                                   ┌─────────────────────────┐     |
-                                   │ Display to worker:      │     |
-                                   │ "[Worker A] shared      │     |
-                                   │  [IMPORTANT]: Found..." │     |
-                                   └─────────────────────────┘     |
-                                               |                   |
-                                               +----> markRead()   |
+Worker A                      messages/                       Worker B
+    │                             │                               │
+    │ agent_chat({ to: "all",     │                               │
+    │   topic: "Found pattern",   │                               │
+    │   content: "Details..."     │                               │
+    │ })                          │                               │
+    │                             │                               │
+    +────▶ {timestamp}-{id}.json  │                               │
+                                  │      turn_start               │
+                                  │◀──────────────────────────────+
+                                  │                               │
+                                  +────▶ checkMessages()          │
+                                         (filters by "to")        │
+                                               │                  │
+                                               ▼                  │
+                                  "[Worker A] discovered:         │
+                                   Found pattern..."              │
 ```
 
-### Common Use Cases
+### Read Tracking
 
-| Use Case | Message Type | Example |
-|----------|--------------|---------|
-| Need a file another worker has | `file_release_request` | "I need src/types.ts to add new interface" |
-| Share important finding | `discovery` | "Found existing auth middleware we should reuse" |
-| Hand off work to specialist | `task_handoff` | "This needs database expertise" |
-| Blocked on another worker | `help_request` | "Can't proceed until API types are done" |
-| Notify dependents | `completion_notice` | "Types ready, you can now use them" |
+Messages are tracked via `message-read.json`:
+
+```json
+{
+  "worker:TASK-01": ["msg-001", "msg-002"],
+  "worker:TASK-02": ["msg-001"]
+}
+```
+
+Workers don't re-receive already-read messages.
 
 ---
 
 ## File Reservation System
 
-Workers can reserve files for exclusive editing to prevent conflicts.
+Workers reserve files for exclusive editing.
 
 ### Tools
 
 | Tool | Description |
 |------|-------------|
-| `reserve_files` | Reserve files/patterns for exclusive editing with TTL |
-| `release_files` | Release reservations when done |
-
-### Usage
-
-```typescript
-// Reserve files before editing
-reserve_files({
-  patterns: ["src/auth/**", "src/types.ts"],
-  exclusive: true,
-  ttl: 300  // 5 minutes
-})
-
-// Release when done
-release_files({ patterns: ["src/auth/**", "src/types.ts"] })
-```
-
-### Conflict Handling
-
-When a file is already reserved:
-1. Tool returns conflict info with holder identity
-2. Worker can use A2A `file_release_request` to negotiate
-3. Holder can respond with `file_release_response` (granted/denied with ETA)
+| `file_reservations` | Unified tool with `action: 'acquire' \| 'release' \| 'check'` |
 
 ### Auto-Release
 
-Reservations are automatically released when:
-- Worker calls `release_files`
-- Worker completes task (`complete_task`)
+Reservations auto-release when:
+- Worker calls `file_reservations({ action: 'release' })`
+- Worker calls `agent_work({ action: 'complete' })`
 - TTL expires
 - Worker process exits
 
 ---
 
-## Discovered Task Workflow
+## Coordinator Context
 
-Workers can discover new tasks during implementation.
+The coordinator maintains session context in `coordinator-context.md`:
 
-### Flow
+```markdown
+# Coordinator Context
 
-```
-+===============================================================================+
-||                      DISCOVERED TASK WORKFLOW                               ||
-+===============================================================================+
+## Session
+- ID: abc123
+- Plan: auth-spec.md
+- Status: running
+- Started: 2024-01-15T10:30:00Z
 
-  Worker discovers new work needed
-          |
-          v
-  add_discovered_task({
-    id: "TASK-DISC-01",
-    description: "Handle null case",
-    priority: 2,
-    files: ["src/store.ts"],
-    reason: "getUser crashes if ID not found"
-  })
-          |
-          v
-  ┌─────────────────────────────────────┐
-  │ Task added to queue with            │
-  │ status: "pending_review"            │
-  │ discoveredFrom: <current_task_id>   │
-  │                                     │
-  │ NOT CLAIMABLE YET                   │
-  └─────────────────────────────────────┘
-          |
-          v
-  ┌─────────────────────────────────────┐
-  │ Planner Background Review Loop      │
-  │ (runs every 5 seconds)              │
-  │                                     │
-  │ getTasksForReview() -> tasks        │
-  │                                     │
-  │ For each pending_review task:       │
-  │   - Is it within scope?             │
-  │   - Is it duplicated?               │
-  │   - Does it conflict with files?    │
-  │   - Are dependencies correct?       │
-  └─────────────────────────────────────┘
-          |
-     ┌────┴────────────┐
-     |                 |
-     v                 v
- [Approve]         [Reject]
-     |                 |
-     v                 v
- status:           status:
- "pending"         "rejected"
- (now claimable)   reviewNotes: "reason"
+## Assignments
+| Task | Worker | Attempt | Outcome | Duration |
+|------|--------|---------|---------|----------|
+| TASK-01 | worker-a | 1 | success | 45s |
+| TASK-02 | worker-b | 1 | failed | 120s |
+| TASK-02 | worker-c | 2 | success | 90s |
+
+## Worker Performance
+| Worker | Tasks | Success Rate | Avg Duration |
+|--------|-------|--------------|--------------|
+| worker-a | 3 | 100% | 52s |
+| worker-b | 2 | 50% | 105s |
+
+## Failure Patterns
+- TASK-02: 2 failures, common error: "connection timeout"
+
+## Continuation Notes
+- Worker-b struggles with database tasks
+- TASK-03 may need timeout increase
 ```
 
 ---
 
-## Spawn From Queue Flow
+## Observability
 
-```
-spawn_from_queue({ maxWorkers: 3 })
-          |
-          v
-  ┌─────────────────────────────────────┐
-  │ While handles.length < maxWorkers:  │
-  │   1. getNextTask() from queue       │
-  │   2. claimTask() atomically         │
-  │   3. Build handshakeSpec with task  │
-  │   4. spawnWorkerProcess()           │
-  │   5. Add handle to list             │
-  └─────────────────────────────────────┘
-          |
-          v
-  ┌─────────────────────────────────────┐
-  │ Start SupervisorLoop with handles   │
-  └─────────────────────────────────────┘
-          |
-          v
-  ┌─────────────────────────────────────┐
-  │ For each worker exit:               │
-  │                                     │
-  │   exit 0:                           │
-  │     markTaskComplete()              │
-  │                                     │
-  │   exit 42:                          │
-  │     releaseTask()                   │
-  │     spawn replacement (if retries   │
-  │     remaining)                      │
-  │                                     │
-  │   other:                            │
-  │     markTaskFailed()                │
-  └─────────────────────────────────────┘
-          |
-          v
-  ┌─────────────────────────────────────┐
-  │ Wait until all workers done         │
-  │ (activeHandles.size === 0)          │
-  └─────────────────────────────────────┘
-          |
-          v
-  Stop supervisor, return results
-```
+### Event Types
 
----
+| Event | Description |
+|-------|-------------|
+| `phase_started` | Pipeline phase started |
+| `phase_completed` | Pipeline phase completed |
+| `task_claimed` | Task claimed by worker |
+| `task_completed` | Task completed |
+| `worker_started` | Worker process started |
+| `worker_completed` | Worker finished |
+| `worker_failed` | Worker crashed |
+| `worker_restarting` | Auto-continue triggered |
+| `cost_milestone` | Cost threshold reached |
 
-## Agent Organization
+### Files
 
-Subdirectory-based agent naming avoids conflicts with generic agents.
-
-### Structure
-
-```
-~/.pi/agent/agents/
-├── coordination/                    <- Symlinks to pi-coordination/agents/
-│   ├── coordinator.md              <- coordination/coordinator
-│   ├── worker.md                   <- coordination/worker
-│   ├── scout.md                    <- coordination/scout
-│   ├── planner.md                  <- coordination/planner
-│   └── reviewer.md                 <- coordination/reviewer
-├── worker.md                        <- Generic worker (unchanged)
-└── scout.md                         <- Generic scout (unchanged)
-```
-
----
-
-## Configuration
-
-### coordinate() Options
-
-```typescript
-coordinate({
-  plan: "./plan.md",
-  agents: 4,                      // or ["worker", "worker", ...]
-  
-  planner: true,                  // or { enabled, model, humanCheckpoint, maxSelfReviewCycles }
-  reviewCycles: 5,                // worker self-review cycles (false to disable)
-  supervisor: true,               // or { nudgeThresholdMs, restartThresholdMs, maxRestarts, checkIntervalMs }
-  costLimit: 40,                  // dollars, ends gracefully when exceeded
-  
-  // Per-phase model overrides
-  scout: "claude-sonnet-4-5",
-  coordinator: "claude-sonnet-4-5",
-  worker: "claude-sonnet-4-5",
-  reviewer: "claude-sonnet-4-5",
-})
-```
-
-### Environment Variables
-
-| Variable | Set By | Used By | Description |
-|----------|--------|---------|-------------|
-| `PI_COORDINATION_DIR` | Coordinate tool | All | Path to coordination directory |
-| `PI_WORKER_ID` | Coordinator | Worker | Worker UUID |
-| `PI_AGENT_IDENTITY` | Coordinator | Worker | Worker identity string |
-| `PI_SELF_REVIEW_ENABLED` | Coordinate tool | Worker | Enable self-review loop |
-| `PI_MAX_SELF_REVIEW_CYCLES` | Coordinate tool | Worker | Max self-review cycles |
-| `PI_SELF_REVIEW_SPEC_PATH` | User | Worker | Spec path to include in review prompt |
-| `PI_TRACE_ID` | Coordinate tool | All | Trace ID for observability |
+| File | Content |
+|------|---------|
+| `events.jsonl` | All coordination events |
+| `decisions.jsonl` | Coordinator decisions |
+| `traces/spans.jsonl` | Timing spans |
+| `snapshots/*.json` | State snapshots |
 
 ---
 
@@ -814,70 +793,71 @@ coordinate({
 
 ```
 coordDir/
-├── tasks.json                    # Task queue
 ├── state.json                    # CoordinationState
-├── cost.json                     # CostState
-├── events.jsonl                  # All coordination events
+├── tasks.json                    # Task queue
+├── deps.json                     # Dependency graph
+├── cost.json                     # Cost tracking
 ├── progress.md                   # Human-readable progress
-├── discoveries.json              # Shared discoveries
-├── a2a-read.json                 # Tracks read A2A messages per worker
+├── coordinator-context.md        # Coordinator session context
+├── execution-info.json           # Mode and task count
 │
-├── worker-{workerId}.json        # Per-worker state files (in coordDir root)
+├── workers/                      # Per-task worker state
+│   └── TASK-01/
+│       ├── context.md            # Survives restarts
+│       ├── attempt-001.json
+│       └── attempt-002.json
 │
-├── nudges/                       # Supervisor -> Worker nudges
-│   └── {workerId}.json           # Consumed on read
-│
-├── a2a-messages/                 # Agent-to-agent messages
+├── messages/                     # A2A messages
 │   └── {timestamp}-{id}.json
+├── message-read.json             # Read tracking
 │
-├── scout/                        # Scout outputs
-│   ├── main.md
-│   └── files/
+├── nudges/                       # Supervisor -> Worker
+│   └── {workerId}.json
 │
-├── checkpoints/                  # Phase checkpoints
-│   └── {phase}-{timestamp}.json  # Contains PipelineState
+├── reservations/                 # File reservations
+├── escalation-responses/         # User Q&A responses
+├── discoveries.json              # Shared discoveries
 │
 ├── artifacts/                    # Per-agent artifacts
-│   ├── planner-*/
-│   ├── planner-review-*/
 │   ├── coordinator-*/
-│   ├── scout-*/
 │   └── worker:*-*/
 │
-└── traces/                       # Observability traces
+├── traces/                       # Observability
+│   └── spans.jsonl
+├── snapshots/                    # State snapshots
+├── events.jsonl                  # Event stream
+└── decisions.jsonl               # Decision log
 ```
 
 ---
 
-## Observable Events
+## Agent Organization
 
-### CoordinationEvent Types (events.jsonl)
+```
+~/.pi/agent/agents/
+├── coordination/                 # Symlinks to pi-coordination/agents/
+│   ├── coordinator.md
+│   ├── planner.md
+│   ├── worker.md
+│   ├── scout.md
+│   └── reviewer.md
+├── worker.md                     # Generic worker (unchanged)
+└── scout.md                      # Generic scout (unchanged)
+```
 
-| Event Type | Description |
-|------------|-------------|
-| `tool_call` | Worker called a tool (includes workerId, tool name, optional file) |
-| `tool_result` | Tool execution completed (includes success boolean) |
-| `waiting` | Worker waiting for something (contract, file, etc.) |
-| `contract_received` | Worker received a contract from another worker |
-| `worker_started` | Worker process started |
-| `worker_completed` | Worker finished successfully |
-| `worker_failed` | Worker failed with error message |
-| `cost_milestone` | Cost threshold reached (includes totals by worker) |
-| `coordinator` | Coordinator message (nudges, restarts, status updates) |
-| `phase_complete` | Pipeline phase completed (includes duration, cost) |
-| `cost_limit_reached` | Cost limit exceeded, coordination stopping |
+---
 
-### A2A Message Types
+## Environment Variables
 
-| Message Type | Description |
-|--------------|-------------|
-| `file_release_request` | Request another worker release a file |
-| `file_release_response` | Response to file release request |
-| `discovery` | Share a discovery with other workers |
-| `task_handoff` | Hand off a task to another worker |
-| `help_request` | Request help with a blocker |
-| `status_update` | Progress update on a task |
-| `completion_notice` | Notify others of task completion |
+| Variable | Set By | Used By | Description |
+|----------|--------|---------|-------------|
+| `PI_COORDINATION_DIR` | Coordinate tool | All | Path to coordination directory |
+| `PI_WORKER_ID` | Coordinator | Worker | Worker UUID |
+| `PI_AGENT_IDENTITY` | Coordinator | Worker | Worker identity string |
+| `PI_TRACE_ID` | Coordinate tool | All | Observability trace ID |
+| `PI_SELF_REVIEW_ENABLED` | Coordinate tool | Worker | Enable self-review |
+| `PI_MAX_SELF_REVIEW_CYCLES` | Coordinate tool | Worker | Max self-review cycles |
+| `PI_SELF_REVIEW_SPEC_PATH` | User | Worker | Spec path for review prompt |
 
 ---
 
@@ -885,11 +865,10 @@ coordDir/
 
 | Symptom | Check | Resolution |
 |---------|-------|------------|
-| No tasks.json created | Check if planner phase enabled | Ensure `planner: true` or `planner: { enabled: true }` |
-| Workers not spawning | Check tasks.json status | Verify tasks have status "pending" |
-| Self-review not triggering | Check PI_SELF_REVIEW_ENABLED | Should not be "false" |
-| Self-review stuck | Check PI_MAX_SELF_REVIEW_CYCLES | Increase if needed |
-| Worker stuck, not nudged | Check supervisor enabled | Verify supervisor.enabled: true |
-| Discovered task not claimable | Check planner background loop | Task needs status "pending" not "pending_review" |
-| A2A messages not showing | Check a2a-messages/ directory | Verify messages being created |
-| Agent not found | Run install.sh | Symlinks must exist in ~/.pi/agent/agents/coordination/ |
+| "Invalid spec format" | Spec has TASK-XX? | Use `plan` tool to create valid spec |
+| Workers not spawning | tasks.json status | Verify tasks are "pending" not "blocked" |
+| Self-review stuck | PI_MAX_SELF_REVIEW_CYCLES | Increase or set reviewCycles: false |
+| Worker stuck, not nudged | supervisor enabled | Verify supervisor: true |
+| Context not persisting | workers/ directory | Check coordDir permissions |
+| Messages not received | message-read.json | Check if already marked read |
+| Agent not found | install.sh run | Verify symlinks in ~/.pi/agent/agents/coordination/ |

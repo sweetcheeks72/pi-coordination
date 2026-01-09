@@ -1,5 +1,5 @@
 /**
- * Test utilities for smart routing integration tests
+ * Test utilities for coordination integration tests
  */
 
 import * as fs from "node:fs";
@@ -10,18 +10,14 @@ import { EventEmitter } from "node:events";
 // Types
 // ─────────────────────────────────────────────────────────────────────────────
 
-export interface RoutingInfo {
-	mode: "spec" | "plan" | "request";
+/**
+ * Execution info for coordinate tool (two-track architecture)
+ */
+export interface ExecutionInfo {
+	mode: "spec";
 	skipScout: boolean;
 	skipPlanner: boolean;
-	clarificationsCount: number;
-	questionGenerationCost?: number;
-	clarifications: Array<{
-		question: string;
-		value: string | boolean;
-		wasTimeout: boolean;
-		wasCustom: boolean;
-	}>;
+	taskCount: number;
 	timestamp: number;
 }
 
@@ -51,8 +47,11 @@ export interface TestResult {
 // Observability readers
 // ─────────────────────────────────────────────────────────────────────────────
 
-export function readRoutingInfo(coordDir: string): RoutingInfo | null {
-	const filePath = path.join(coordDir, "routing-info.json");
+/**
+ * Read execution info from coordinate tool (two-track architecture)
+ */
+export function readExecutionInfo(coordDir: string): ExecutionInfo | null {
+	const filePath = path.join(coordDir, "execution-info.json");
 	if (!fs.existsSync(filePath)) return null;
 	return JSON.parse(fs.readFileSync(filePath, "utf-8"));
 }

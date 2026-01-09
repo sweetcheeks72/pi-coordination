@@ -52,16 +52,18 @@ export default function registerWorkerExtension(pi: ExtensionAPI): void {
 	let lastA2ACheck = Date.now();
 
 	pi.on("tool_call", async (event) => {
-		if (event.toolName !== "complete_task") return;
+		if (event.toolName !== "agent_work") return;
+		if (event.input.action !== "complete") return;
 
 		if (!selfReviewEnabled) return;
-
 		if (selfReview.passed) return;
 
-		selfReview.pendingCompletion = {
-			result: event.input.result as string,
-			filesModified: event.input.filesModified as string[] | undefined,
-		};
+		const result = typeof event.input.result === "string" ? event.input.result : "Task finished";
+		const filesModified = Array.isArray(event.input.filesModified)
+			? (event.input.filesModified as string[])
+			: undefined;
+
+		selfReview.pendingCompletion = { result, filesModified };
 
 		return {
 			block: true,
@@ -88,7 +90,7 @@ export default function registerWorkerExtension(pi: ExtensionAPI): void {
 			pi.sendMessage(
 				{
 					customType: "self-review-complete",
-					content: `Self-review passed. Now call complete_task() with your original summary: "${selfReview.pendingCompletion.result}"`,
+					content: `Self-review passed. Now call agent_work({ action: 'complete', result: '${selfReview.pendingCompletion.result.replace(/'/g, "\\'")}' })`,
 					display: true,
 				},
 				{ triggerTurn: true },
@@ -104,7 +106,7 @@ export default function registerWorkerExtension(pi: ExtensionAPI): void {
 			pi.sendMessage(
 				{
 					customType: "self-review-limit",
-					content: `Max self-review cycles (${maxSelfReviewCycles}) reached. Proceeding. Call complete_task() now with: "${selfReview.pendingCompletion.result}"`,
+					content: `Max self-review cycles (${maxSelfReviewCycles}) reached. Proceeding. Call agent_work({ action: 'complete', result: '${selfReview.pendingCompletion.result.replace(/'/g, "\\'")}' }) now.`,
 					display: true,
 				},
 				{ triggerTurn: true },

@@ -197,12 +197,12 @@ export class FileBasedStorage {
 		);
 	}
 
-	async sendMessage(msg: CoordinationMessage): Promise<void> {
+	async sendMessage(msg: CoordinationMessage & { expiresAt?: number }): Promise<void> {
 		const filename = `${msg.timestamp}-${msg.id}.json`;
 		await fs.writeFile(path.join(this._coordDir, "messages", filename), JSON.stringify(msg));
 	}
 
-	async getMessages(filter?: { to?: string; since?: number }): Promise<CoordinationMessage[]> {
+	async getMessages(filter?: { to?: string; since?: number; includeExpired?: boolean }): Promise<CoordinationMessage[]> {
 		const dir = path.join(this._coordDir, "messages");
 		let files: string[];
 		try {
@@ -211,11 +211,15 @@ export class FileBasedStorage {
 			return [];
 		}
 
+		const now = Date.now();
 		const messages: CoordinationMessage[] = [];
 		for (const file of files.sort()) {
 			if (!file.endsWith(".json")) continue;
 			const content = await fs.readFile(path.join(dir, file), "utf-8");
-			const msg: CoordinationMessage = JSON.parse(content);
+			const msg: CoordinationMessage & { expiresAt?: number } = JSON.parse(content);
+
+			// Filter expired messages (TASK-28)
+			if (!filter?.includeExpired && msg.expiresAt && msg.expiresAt < now) continue;
 
 			if (filter?.since && msg.timestamp < filter.since) continue;
 			if (filter?.to && msg.to !== filter.to && msg.to !== "all") continue;
@@ -223,6 +227,93 @@ export class FileBasedStorage {
 			messages.push(msg);
 		}
 		return messages;
+	}
+
+	/**
+	 * Get unread messages for a worker (TASK-27).
+	 * Uses message-read.json to track which messages each worker has seen.
+	 */
+	async getUnreadMessages(workerId: string, filter?: { to?: string; since?: number }): Promise<CoordinationMessage[]> {
+		const readIds = await this.getReadMessageIds(workerId);
+		const allMessages = await this.getMessages(filter);
+
+		return allMessages.filter((msg) => !readIds.has(msg.id));
+	}
+
+	/**
+	 * Mark messages as read by a worker.
+	 */
+	async markMessagesRead(workerId: string, messageIds: string[]): Promise<void> {
+		await this.withLock("message-read", async () => {
+			const readState = await this.loadMessageReadState();
+			const workerReads = readState[workerId] || [];
+
+			for (const id of messageIds) {
+				if (!workerReads.includes(id)) {
+					workerReads.push(id);
+				}
+			}
+
+			readState[workerId] = workerReads;
+			await this.saveMessageReadState(readState);
+		});
+	}
+
+	/**
+	 * Get read message IDs for a worker.
+	 */
+	async getReadMessageIds(workerId: string): Promise<Set<string>> {
+		const readState = await this.loadMessageReadState();
+		return new Set(readState[workerId] || []);
+	}
+
+	private async loadMessageReadState(): Promise<Record<string, string[]>> {
+		const readPath = path.join(this._coordDir, "message-read.json");
+		try {
+			const content = await fs.readFile(readPath, "utf-8");
+			return JSON.parse(content);
+		} catch {
+			return {};
+		}
+	}
+
+	private async saveMessageReadState(state: Record<string, string[]>): Promise<void> {
+		const readPath = path.join(this._coordDir, "message-read.json");
+		await fs.writeFile(readPath, JSON.stringify(state, null, 2));
+	}
+
+	/**
+	 * Clean up expired messages from disk.
+	 */
+	async cleanupExpiredMessages(): Promise<number> {
+		const dir = path.join(this._coordDir, "messages");
+		let files: string[];
+		try {
+			files = await fs.readdir(dir);
+		} catch {
+			return 0;
+		}
+
+		const now = Date.now();
+		let cleaned = 0;
+
+		for (const file of files) {
+			if (!file.endsWith(".json")) continue;
+			const filePath = path.join(dir, file);
+			try {
+				const content = await fs.readFile(filePath, "utf-8");
+				const msg: CoordinationMessage & { expiresAt?: number } = JSON.parse(content);
+
+				if (msg.expiresAt && msg.expiresAt < now) {
+					await fs.unlink(filePath);
+					cleaned++;
+				}
+			} catch {
+				// Skip invalid files
+			}
+		}
+
+		return cleaned;
 	}
 
 	async reserveFiles(

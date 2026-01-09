@@ -3,6 +3,7 @@ import * as path from "node:path";
 import type { ExtensionAPI, ExtensionContext } from "@mariozechner/pi-coding-agent";
 import { createCoordinateTool } from "./coordinate/index.js";
 import { createCoordOutputTool } from "./coord-output/index.js";
+import { createPlanTool } from "./plan/index.js";
 import { CoordinationDashboard, MiniFooter, MiniDashboard } from "./coordinate/dashboard.js";
 
 interface CoordinationResult {
@@ -175,6 +176,7 @@ function renderWidget(ctx: ExtensionContext, jobs: AsyncJobState[]): void {
 
 export default function registerCoordinationExtension(pi: ExtensionAPI): void {
 	pi.registerTool(createCoordinateTool(pi.events));
+	pi.registerTool(createPlanTool(pi.events));
 	pi.registerTool(createCoordOutputTool());
 
 	const asyncJobs = new Map<string, AsyncJobState>();

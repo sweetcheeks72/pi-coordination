@@ -259,12 +259,16 @@ export type TaskStatus =
 	| "claimed"
 	| "complete"
 	| "failed"
-	| "rejected";
+	| "rejected"
+	| "discovered"; // Runtime discovered task
+
+export type TaskPriority = "P0" | "P1" | "P2" | "P3";
 
 export interface Task {
 	id: string;
 	description: string;
-	priority: number;
+	priority: number; // Numeric for sorting (0=P0, 1=P1, 2=P2, 3=P3)
+	priorityLabel?: TaskPriority; // String label
 	status: TaskStatus;
 	files?: string[];
 	creates?: string[];
@@ -281,6 +285,9 @@ export interface Task {
 	reviewedAt?: number;
 	reviewResult?: "ok" | "modified" | "rejected";
 	reviewNotes?: string;
+	// Subtask support
+	parentTaskId?: string; // For subtasks (TASK-XX.Y) - the parent task ID
+	blockedBy?: string[]; // Task IDs blocking this task (e.g., subtasks)
 }
 
 export interface TaskQueue {

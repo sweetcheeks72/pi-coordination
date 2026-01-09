@@ -4,34 +4,106 @@ All notable changes to pi-coordination.
 
 ---
 
+## 2026-01-09
+
+### Added
+- **Test Infrastructure** - Comprehensive test helpers for coordination testing:
+  - `tests/helpers/mock-worker.ts` - Simulates worker lifecycle (start, tool calls, crash, timeout, OOM)
+  - `tests/helpers/mock-llm.ts` - Deterministic LLM responses for testing plan/coordinate flows
+  - `tests/helpers/observability-assertions.ts` - Typed assertions for events, spans, decisions, resources
+- **Unit Tests** - Spec parser and validator tests:
+  - `tests/unit/spec-parser.test.ts` - 17 tests covering TASK_ID_PATTERNS, parseSpec, edge cases
+  - `tests/unit/spec-validator.test.ts` - 18 tests covering validation rules, error detection, warnings
+- **Test Fixtures** - Spec fixtures for testing:
+  - `tests/fixtures/specs/valid-simple.md` - Simple 2-task spec
+  - `tests/fixtures/specs/valid-with-subtasks.md` - Spec with TASK-XX.Y subtasks
+  - `tests/fixtures/specs/valid-with-deps.md` - Spec with P0-P3 priorities and multi-deps
+  - `tests/fixtures/specs/invalid-circular.md` - Circular dependency test case
+  - `tests/fixtures/specs/invalid-missing-files.md` - Missing files warning test
+  - `tests/fixtures/specs/invalid-bad-task-id.md` - Invalid task ID format test
+- **Context Fixtures** - Coordination state fixtures:
+  - `tests/fixtures/context/partial-progress.md` - In-progress coordination
+  - `tests/fixtures/context/with-errors.md` - Coordination with errors
+  - `tests/fixtures/context/completed.md` - Completed coordination
+
+### Fixed
+- **parseSpec multi-line section matching** - Task header regex failed on multi-line sections due to `$` anchor matching end-of-string instead of end-of-line; now extracts first line before matching
+- **observability-assertions type alignment** - Updated `Span`, `Decision`, `CausalLink`, `ResourceEvent` interfaces to match actual `observability/types.ts`
+- **assertNoResourceLeaks wrong field** - Changed `action: "acquired"/"released"` to `event: "created"/"released"` to match actual ResourceEvent type
+
+### Changed
+- Updated `tests/README.md` with comprehensive test documentation including unit tests, fixtures, and all helper modules
+- Updated worker self-review interception to hook `agent_work` (`action: "complete"`) instead of legacy `complete_task`
+- Updated docs/examples to reference unified worker tools only
+
+### Removed
+- Removed legacy worker tool aliases from `coordinate/worker-tools` (only `agent_chat`, `agent_sync`, `agent_work`, `file_reservations` remain)
+
+---
+
 ## 2026-01-08
 
 ### Added
-- **Smart Input Routing** - Auto-detects input type and routes to minimize overhead:
-  - **Spec** (has TASK-XX + files/deps/acceptance) → Skips scout and planner, executes immediately
-  - **Plan** (has code blocks/file paths/phases) → Skips scout, runs planner for task extraction
-  - **Request** (prose only) → Full pipeline with clarifying questions
-- **Input Type TUI** - Interactive confirmation of detected type with 60s timeout, arrow/j/k navigation
-- **Clarifying Questions** - LLM generates in-depth design review questions for request mode:
-  - Questions cover architecture, tradeoffs, edge cases, security, testing, UI/UX
-  - Sequential inline TUI with 60s per-question timer (resets on interaction)
-  - Select options with always-visible "Other" text field for custom input
-  - Context hints explaining why each question matters
-  - Esc to skip all remaining questions (uses sensible defaults)
-- **PRD Augmentation** - Answers appended to original content as `## Clarifications` section
-- **Routing Decision Logging** - Console log and `routing-info.json` with mode, skipped phases, clarifications
-- **`mode` parameter** - Explicit override: `coordinate({ plan: "input.md", mode: "spec" | "plan" | "request" })`
+- **Two-Track Architecture** - Separated planning from execution:
+  - **`plan` tool** - Creates TASK-XX specs from prose/PRDs via interview → scout → elaborate → structure → handoff
+  - **`coordinate` tool** - Executes validated TASK-XX specs with parallel workers
+- **Plan Tool Phases**:
+  - **Interview** - Multi-round interactive questions with 60s timeout per question
+  - **Scout (targeted)** - Codebase analysis guided by interview findings, outputs metaPrompt + contextDoc
+  - **Elaborate** - Frontier model produces 1000-3000 word detailed plan (no tool calls, ~100K context)
+  - **Structure** - Converts elaborated plan to TASK-XX format with validation retries
+  - **Handoff** - Interactive choice: execute now, refine further, or save and exit
+- **Spec Validation** - Coordinate tool validates TASK-XX format before execution:
+  - Checks for valid task IDs, required fields, dependency references
+  - Detects circular dependencies
+  - Returns actionable error messages with fix suggestions
+- **Worker Context Persistence** - `workers/<task-id>/context.md` tracks:
+  - Files modified (with complete/partial/failed status)
+  - Discoveries made during work
+  - Last actions before failure
+  - Continuation notes for smart restarts
+- **Smart Auto-Continue** - Failed workers restart at spawn level (not coordinator):
+  - Loads context.md from previous attempt
+  - Builds continuation prompt with what was done and what failed
+  - Spawns new worker with rich context
+  - Respects max restart limit
+- **Coordinator Context** - `coordinator-context.md` tracks session state:
+  - Assignment history (task → worker mappings)
+  - Worker performance metrics
+  - Failure patterns
+  - Escalation Q&A history
+- **Dependency Graph Module** - Formal dependency types in `deps.json`:
+  - `blocks` - Hard dependency (A must complete before B)
+  - `parent` - Structural (TASK-XX.Y is subtask of TASK-XX)
+  - `waits-for` - Dynamic fanout
+  - `discovered` - Audit trail
+  - `related` - Soft informational link
+- **Subtask Support** - Workers can create TASK-XX.Y subtasks:
+  - Max 5 subtasks per parent
+  - Subtasks run in parallel
+  - Parent blocked until all subtasks complete
+- **Message Read Tracking** - `message-read.json` prevents duplicate message delivery
+- **Execution Info** - `execution-info.json` replaces `routing-info.json` (simpler format)
 
 ### Changed
-- Detection uses separate signal arrays for each type (prevents spec signals leaking into plan results)
-- Pipeline `skipScout` config option for smart routing integration
-- Planner `enabled: false` when in spec mode (already has TASK-XX format)
+- **Coordinate tool now requires valid TASK-XX spec** - No more auto-detection/conversion
+- **Scout and planner phases moved to plan tool** - Coordinate always skips these
+- **Removed `mode` parameter** - No longer needed with two-track architecture
+- **Removed `scout` and `planner` parameters from coordinate** - These phases are now in plan tool
+- **Pipeline phases simplified** - Coordinate: validate → dispatch → workers → review → fixes
+- **Updated skill documentation** - Reflects two-track architecture
+- **Updated workflow-overview.md** - Complete rewrite for new architecture
 
-### Fixed
-- Input type TUI missing `finished` guard (could render after cleanup)
-- Inline questions TUI context line ANSI codes broke box alignment (now calculates visual length separately)
-- Truncate function exceeded maxLen for small values (now handles maxLen ≤ 3)
-- Newlines in question text/context broke TUI box (now sanitized to single line)
+### Removed
+- `detection.ts` - Smart routing detection logic
+- `detection.test.ts` - Detection tests
+- `input-type-tui.ts` - Mode selection TUI (no longer needed)
+- `augment-prd.ts` - PRD augmentation (moved to plan tool interview)
+- `augment-prd.test.ts` - Augmentation tests
+- `tests/fixtures/plan.md` - Plan mode fixture
+- `tests/fixtures/request.md` - Request mode fixture
+- `tests/routing-unit.test.ts` - Routing unit tests
+- `tests/routing-integration.test.ts` - Routing integration tests (replaced by observability.test.ts)
 
 ---
 
@@ -184,14 +256,14 @@ All notable changes to pi-coordination.
 ### Added
 - **Planner phase** with Ralph self-review loop for task decomposition before coordination
 - **Task queue model** replacing step-based work distribution (priority levels, dependencies, dynamic assignment)
-- **Worker self-review loop** via tool interception on `complete_task` (configurable via `selfReview`)
+- **Worker self-review loop** via tool interception on `agent_work` (`action: "complete"`, configurable via `selfReview`)
 - **Supervisor loop** monitors worker activity, nudges or restarts stuck workers (configurable via `supervisor`)
-- **Discovered tasks workflow** - workers can add tasks via `add_discovered_task`, planner reviews before adding to queue
-- **A2A communication** - `send_message` / `check_messages` for inter-worker messaging
+- **Discovered tasks workflow** - workers can add tasks via `agent_work({ action: "add" })`, planner reviews before adding to queue
+- **A2A communication** - `agent_chat` (send/inbox) for inter-worker messaging
 - **Structured scout context** - Scout outputs `<file_map>` and `<file_contents>` sections for planner consumption
 - **`read_context` tool** - Planner tool to read large scout context files without truncation
 - New coordinator tools: `spawn_from_queue`, `get_task_queue_status`
-- New worker tools: `add_discovered_task`, `share_discovery`
+- New worker tools: `agent_chat`, `agent_sync`, `agent_work`, `file_reservations`
 - Planner extension (`extensions/coordination/planner.ts`) with `read_context` tool
 - Extensions-first integration for coordinator/worker/coord_output
 - Async coordination runner with result files and durable `coordDir/async/status.json`

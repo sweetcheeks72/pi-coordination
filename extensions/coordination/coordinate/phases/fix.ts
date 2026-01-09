@@ -145,7 +145,7 @@ ${issues.map(i => `### ${i.file}${i.line ? `:${i.line}` : ""}
 ${i.suggestedFix ? `Suggested fix: ${i.suggestedFix}` : ""}
 `).join("\n")}
 
-Fix each issue. After fixing all issues, call complete_task().
+Fix each issue. After fixing all issues, call agent_work({ action: 'complete' }).
 
 Your original task was:
 ${worker.handshakeSpec}

@@ -23,28 +23,57 @@ A **plan** here isn't a sequential checklist — it's a **task graph**. Independ
 - **Review cycles** — Dedicated quality gate after workers complete
 - **Real-time monitoring** — TUI dashboard for visibility
 
+## Two-Track Architecture
+
+The coordination system is split into two focused tools:
+
+```
+┌─────────────────────────────────────────────────────────────┐
+│                        plan tool                             │
+│  Input: Prose, idea, PRD        Output: Spec file            │
+│                                                              │
+│  ┌──────────┐  ┌──────────┐  ┌──────────┐  ┌──────────┐     │
+│  │Interview │→ │  Scout   │→ │Elaborate │→ │Structure │     │
+│  │ 60s/Q    │  │ targeted │  │ NO tools │  │ TASK-XX  │     │
+│  └──────────┘  └──────────┘  └──────────┘  └──────────┘     │
+└─────────────────────────────────────────────────────────────┘
+                              ↓
+                         spec.md
+                              ↓
+┌─────────────────────────────────────────────────────────────┐
+│                     coordinate tool                          │
+│  Input: TASK-XX Spec            Output: Completed work       │
+│                                                              │
+│  ┌──────────┐  ┌──────────┐  ┌──────────┐  ┌──────────┐     │
+│  │ Validate │→ │Dispatch  │→ │ Execute  │→ │  Review  │     │
+│  │ (strict) │  │(priority)│  │(workers) │  │(verify)  │     │
+│  └──────────┘  └──────────┘  └──────────┘  └──────────┘     │
+└─────────────────────────────────────────────────────────────┘
+```
+
+- **`plan` tool**: Converts ideas/PRDs into structured TASK-XX specs via interview + scout + LLM elaboration
+- **`coordinate` tool**: Executes TASK-XX specs with parallel workers, strict validation, and review cycles
+
 ## Features
 
-- **Smart Input Routing**: Auto-detects input type (spec/plan/request) and skips unnecessary phases
-- **Multi-Phase Pipeline**: Scout -> Planner -> Coordinator -> Workers -> Review -> Fixes -> Complete
-- **Planner Phase**: Dedicated planning agent with self-review loop for task decomposition
-- **Task Queue Model**: Priority-based task distribution with dependencies and dynamic assignment
+- **Two-Track Architecture**: Separate planning (interactive) from execution (automated)
+- **Interactive Interview**: Multi-round questions with 60s timeout, sensible defaults
+- **Targeted Scout**: Codebase analysis guided by interview findings
+- **Task Queue Model**: Priority-based (P0-P3) task distribution with dependencies
+- **Subtask Support**: Workers can break down complex tasks into TASK-XX.Y subtasks
 - **Parallel Execution**: Spawn multiple workers to execute tasks simultaneously
-- **Worker Self-Review**: Each worker reviews their own code before marking complete
+- **Worker Context Persistence**: Tool events tracked across restarts for smart recovery
+- **Smart Auto-Continue**: Failed workers restart with context from previous attempt
 - **Supervisor Loop**: Monitors workers for inactivity, sends nudges, restarts stuck workers
 - **Discovered Tasks**: Workers can add new tasks during implementation for planner review
-- **A2A Messaging**: Agent-to-agent communication for file negotiation and discovery sharing
-- **Dependency Management**: Pre-assign files and create contracts between workers
+- **A2A Messaging**: Agent-to-agent communication with read tracking and expiration
+- **Dependency Graph**: Formal dependency types (blocks, parent, waits-for, discovered)
 - **Review Cycles**: Automated code review with fix iterations
 - **Cost Controls**: Configurable cost limit with graceful shutdown
 - **Async Mode**: Fire-and-forget coordination with completion notifications
-- **Artifacts + Truncation**: Full prompt/output JSONL artifacts with optional output truncation
-- **Checkpointing**: Save/restore at phase boundaries for resumable sessions
-- **Real-time TUI**: Phase timeline, worker status, and event stream
-- **Coordination Dashboard**: Full-screen `/jobs` command for monitoring async coordination
-- **Coordination Logs**: Comprehensive markdown logs with executive summary
-- **Full Observability**: Events, spans, causality tracking, snapshots, structured errors
-- **Validation Layer**: Invariant checking, content validation, streaming warnings, markdown reports
+- **Full Observability**: Events, spans, decisions, causality tracking, snapshots
+- **Coordination Dashboard**: Full-screen `/jobs` command for monitoring
+- **Validation Layer**: Invariant checking, content validation, streaming warnings
 
 ## Installation
 
@@ -72,9 +101,22 @@ Default options can be configured in `~/.pi/agent/settings.json` under the `coor
 {
   "coordination": {
     "agents": 4,
-    "planner": true,
     "reviewCycles": 5,
-    "supervisor": true
+    "supervisor": true,
+    "costLimit": 40
+  }
+}
+```
+
+**Plan tool settings:**
+```json
+{
+  "coordination": {
+    "plan": {
+      "maxInterviewRounds": 5,
+      "tokenBudget": 100000,
+      "contextRatio": 0.85
+    }
   }
 }
 ```
@@ -85,8 +127,7 @@ Use `false` to disable features:
 {
   "coordination": {
     "reviewCycles": false,
-    "supervisor": { "nudgeThresholdMs": 120000 },
-    "costLimit": 40
+    "supervisor": { "nudgeThresholdMs": 120000 }
   }
 }
 ```
@@ -95,42 +136,66 @@ Options passed to `coordinate()` override settings, which override built-in defa
 
 ## Usage
 
-### Basic Usage
+### Two-Step Workflow
 
+**Step 1: Create a spec with `plan`**
 ```typescript
-coordinate({ plan: "./plan.md" })
+plan({ input: "Add user authentication with JWT" })
 ```
 
-With smart defaults, this runs the full pipeline: scout -> planner -> coordinator -> workers -> review -> fixes.
+This runs an interactive interview, scouts the codebase, and produces a TASK-XX spec file.
 
-Defaults:
-- `agents`: 4 workers
-- `planner`: enabled
-- `reviewCycles`: 5
-- `supervisor`: enabled
+**Step 2: Execute with `coordinate`**
+```typescript
+coordinate({ plan: "./specs/auth-spec.md" })
+```
 
-### Common Configurations
+This validates the spec and executes tasks with parallel workers.
+
+### Plan Tool
 
 ```typescript
-// 8 workers (reviewCycles defaults to 5)
-coordinate({ plan: "./plan.md", agents: 8 })
+// From an idea
+plan({ input: "Add user authentication with JWT" })
+
+// From an existing PRD file
+plan({ input: "./requirements/auth.md" })
+
+// Refine an existing spec
+plan({ continue: "./specs/auth-spec.md" })
+
+// Skip interview, go straight to scout
+plan({ input: "./requirements/auth.md", skipInterview: true })
+
+// Custom output location
+plan({ input: "Add auth", output: "./specs/auth-spec.md" })
+```
+
+**Plan tool phases:**
+1. **Interview** — Multi-round questions (60s timeout per question)
+2. **Scout** — Targeted codebase analysis based on interview findings
+3. **Elaborate** — Frontier model creates detailed plan (~100K token context)
+4. **Structure** — Convert to TASK-XX format with validation
+5. **Handoff** — Show summary, offer execute/refine/exit
+
+### Coordinate Tool
+
+```typescript
+// Basic execution (requires valid TASK-XX spec)
+coordinate({ plan: "./spec.md" })
+
+// 8 workers
+coordinate({ plan: "./spec.md", agents: 8 })
 
 // Custom review cycles
-coordinate({ plan: "./plan.md", reviewCycles: 3 })
+coordinate({ plan: "./spec.md", reviewCycles: 3 })
 
 // Disable self-review
-coordinate({ plan: "./plan.md", reviewCycles: false })
+coordinate({ plan: "./spec.md", reviewCycles: false })
 
-// Disable planner (manual coordinator flow)
-coordinate({ plan: "./plan.md", planner: false })
-```
-
-### With All Options
-
-```typescript
+// With all options
 coordinate({
-  plan: "./plan.md",
-  mode: "request",              // "spec" | "plan" | "request" (auto-detected if omitted)
+  plan: "./spec.md",
   agents: 4,                    // or ["worker", "worker", ...]
   logPath: "./logs",
   resume: "workers-1234567",
@@ -139,84 +204,66 @@ coordinate({
   checkTests: true,
   async: false,
   maxOutput: { lines: 200 },
-  costLimit: 40,                // End gracefully when cost exceeds limit (default: $40)
+  costLimit: 40,                // End gracefully when cost exceeds limit
   validate: true,
-  planner: true,                // or { humanCheckpoint: true, maxSelfReviewCycles: 3 }
   reviewCycles: 5,              // worker self-review cycles (false to disable)
   supervisor: true,             // or { nudgeThresholdMs: 180000, ... }
-  // Per-phase model overrides (string sets model, object for full config)
-  scout: "claude-sonnet-4-5",
-  planner: { model: "claude-opus-4-5", maxSelfReviewCycles: 3 },
   coordinator: "claude-opus-4-5",
   worker: "claude-sonnet-4-5",
   reviewer: "claude-opus-4-5"
 })
 ```
 
-**Model Resolution Order**: For each phase (scout, planner, coordinator, worker, reviewer), models are resolved in this priority:
-1. Per-call parameter (e.g., `scout: "model-name"`)
+**Note:** The `coordinate` tool requires a valid TASK-XX format spec. If your input isn't a valid spec, you'll get an error suggesting to use the `plan` tool first.
+
+**Model Resolution Order**: For each phase, models are resolved in this priority:
+1. Per-call parameter (e.g., `worker: "model-name"`)
 2. Agent frontmatter `model:` field in `~/.pi/agent/agents/coordination/*.md`
 3. Pi's global `defaultModel` from `~/.pi/agent/settings.json`
 
-**Provider Resolution**: When multiple providers offer the same model ID, resolution follows provider registration order: `openai-codex` > `github-copilot` > `openrouter`. To target a specific provider, use explicit format: `"openai-codex/gpt-5.2"` or `"openrouter/anthropic/claude-sonnet-4-5"`.
+To disable logging, set `logPath: ""` or use `PI_COORDINATION_LOG_DIR` env var.
 
-To disable logging, set `logPath: ""`.
+### Example Flow
 
-You can also set `PI_COORDINATION_LOG_DIR` environment variable to change the default log directory.
+> "Add authentication to the API"
 
-### Smart Routing
-
-The coordinate tool automatically detects your input type and routes appropriately:
-
-| Input Type | Detection | Phases Run |
-|------------|-----------|------------|
-| **Spec** | Has `TASK-XX` + files/deps/acceptance | Coordinator → Workers → Review |
-| **Plan** | Has code blocks, file paths, phases | Planner → Coordinator → Workers → Review |
-| **Request** | Prose only | Scout → Questions → Planner → Full pipeline |
-
-**Override detection:**
-```typescript
-coordinate({ plan: "./input.md", mode: "spec" })    // Skip scout + planner
-coordinate({ plan: "./input.md", mode: "plan" })    // Skip scout only
-coordinate({ plan: "./input.md", mode: "request" }) // Full pipeline with questions
 ```
+1. plan({ input: "Add authentication to the API" })
+   ├── Interview: "What auth method? OAuth, JWT, session?"
+   ├── Scout: Finds existing routes, middleware patterns
+   ├── Elaborate: Creates detailed implementation plan
+   └── Structure: Outputs auth-spec.md with TASK-01 through TASK-05
 
-**Clarifying questions** (request mode only):
-- LLM generates in-depth design review questions
-- Interactive TUI with 60s per-question timer
-- Select options + "Other" text field for custom input
-- Esc to skip all remaining (uses sensible defaults)
-- Answers appended to PRD as `## Clarifications` section
-
-### Example Prompt
-
-> Execute plan.md with 4 workers
-
-The coordinate tool will:
-1. Scout analyzes codebase for context
-2. Planner decomposes plan into task graph with self-review
-3. Coordinator spawns workers from task queue
-4. Workers execute tasks in parallel with self-review before completion
-5. Supervisor monitors worker activity, nudges or restarts stuck workers
-6. Code reviewer checks all changes
-7. Fix workers address any issues found
-8. TUI shows real-time progress
-9. Final summary shows completion status
+2. coordinate({ plan: "./auth-spec.md" })
+   ├── Validate: Checks TASK-XX format, dependencies
+   ├── Dispatch: Assigns TASK-01 (types) first (no deps)
+   ├── Workers: Execute tasks in parallel
+   ├── Review: Code reviewer checks changes
+   └── Complete: All tasks done, summary generated
+```
 
 ## Pipeline Phases
 
-| Phase | Description | Skipped When |
-|-------|-------------|--------------|
-| **scout** | Deep codebase analysis before coordination | mode=spec, mode=plan |
-| **questions** | Clarifying questions TUI for ambiguous requests | mode=spec, mode=plan |
-| **planner** | Creates task graph from plan with self-review | mode=spec |
-| **coordinator** | Spawns workers from task queue, manages supervisor loop | — |
-| **workers** | Parallel execution of tasks with self-review | — |
-| **review** | Code reviewer checks all changes against plan goals | — |
-| **fixes** | Same workers fix issues found in review | — |
-| **complete** | All done, generate final report | — |
+### Plan Tool Phases
 
-Smart routing auto-detects the input type and skips unnecessary phases. Override with `mode: "spec" | "plan" | "request"`.
+| Phase | Description |
+|-------|-------------|
+| **interview** | Multi-round questions (60s timeout each), gathers requirements |
+| **scout** | Targeted codebase analysis based on interview findings |
+| **elaborate** | Frontier model creates detailed plan (~100K context, no tools) |
+| **structure** | Convert to TASK-XX format with validation |
+| **handoff** | Show summary, offer execute/refine/exit (60s timeout) |
+
+### Coordinate Tool Phases
+
+| Phase | Description |
+|-------|-------------|
+| **validate** | Strict TASK-XX format validation |
+| **coordinator** | Spawns workers from task queue, manages supervisor loop |
+| **workers** | Parallel execution of tasks with self-review |
+| **review** | Code reviewer checks all changes against plan goals |
+| **fixes** | Same workers fix issues found in review |
+| **complete** | All done, generate final report |
 
 ## Coordinator Tools
 
@@ -276,79 +323,85 @@ Smart routing auto-detects the input type and skips unnecessary phases. Override
 
 ## Scout Context Format
 
-The scout outputs a structured context file for the planner with three sections:
+The targeted scout produces two outputs for the elaborate phase:
+
+1. **contextDoc** (~85K tokens) — Raw file contents with structure
+2. **metaPrompt** (~15K tokens) — Synthesized guidance combining interview + codebase analysis
+
+### Context Document Format
 
 ````markdown
-<meta>
-<architecture>
-How the codebase is organized, package structure, entry points
-</architecture>
-
-<patterns>
-Code patterns to follow, naming conventions, error handling
-</patterns>
-
-<key_files>
-Central files many things depend on, integration points
-</key_files>
-
-<dependencies>
-What depends on what, suggested modification order
-</dependencies>
-
-<gotchas>
-Things that might trip someone up, deprecated code, tight coupling
-</gotchas>
-
-<task_recommendations>
-Suggested task breakdown, what to parallelize vs sequence
-</task_recommendations>
-
-<scope_constraints>
-Implement EXACTLY what plan specifies, no extras
-</scope_constraints>
-
-<omitted>
-Files not included due to budget (list them so planner knows they exist)
-</omitted>
-</meta>
-
 <file_map>
 /path/to/project
 ├── src
-│   ├── components
-│   │   ├── Button.tsx *
-│   │   ├── Input.tsx * +
-│   │   └── ...
-│   └── index.ts +
-├── package.json
-└── README.md
-
-(* = needs modification, + = contents included below)
+│   ├── types.ts        * +    (* = needs modification, + = contents included)
+│   ├── store.ts        * +
+│   ├── routes/
+│   │   ├── index.ts    * +
+│   │   └── users.ts      +    (reference only)
+│   └── middleware/
+│       └── auth.ts       +    (pattern example)
+├── tests/
+│   └── users.test.ts   * +
+└── package.json          +
 </file_map>
 
 <file_contents>
-File: src/components/Input.tsx:1-45 (component)
-```tsx
-export function Input() { ... }
+File: src/types.ts (full file - 45 lines)
+```typescript
+export interface User {
+  id: string;
+  email: string;
+  // ...
+}
 ```
 
-File: src/index.ts (full file - 12 lines)
-```ts
-export * from './components';
+File: src/routes/index.ts:1-30,85-120 (relevant sections)
+```typescript
+// Lines 1-30: Route setup
+import { Router } from 'express';
+// ...
 ```
 </file_contents>
 ````
 
-**Token budget**: Scout targets ~30k tokens. If output exceeds budget, it's automatically split:
-- `main.md` — Meta + file_map + highest priority file_contents
-- `overflow.md` — Remaining file_contents (planner can read if needed)
+### Meta Prompt Format
 
-The planner receives scout context as a direct attachment (no tool call needed). For on-demand access:
-- `read_context({ path: "scout/main.md" })` - Full context
-- `read_context({ path: "scout/main.md", section: "meta" })` - Scout's analysis and recommendations
-- `read_context({ path: "scout/main.md", section: "file_map" })` - Just the file tree
-- `read_context({ path: "scout/main.md", section: "file_contents" })` - Just file contents
+````markdown
+# Planning Guidance
+
+## Request Summary
+User wants to add JWT authentication to the Express API.
+From interview: prefer httpOnly cookies, need refresh tokens.
+
+## Architecture Analysis
+
+### Current State
+- Express 4.x with TypeScript
+- Routes in src/routes/, middleware in src/middleware/
+- Existing User type needs extension
+
+### Integration Points
+| What | Where | Action |
+|------|-------|--------|
+| Auth types | src/types.ts | Add AuthToken, Session interfaces |
+| Auth middleware | src/middleware/auth.ts | Create new file |
+
+### Patterns to Follow
+- Middleware pattern: See existing `src/middleware/logging.ts`
+- Route pattern: See `src/routes/users.ts`
+
+### Dependency Order
+1. Types (no deps) → TASK-01
+2. JWT utils (needs types) → TASK-02, depends on TASK-01
+3. Middleware → TASK-03, depends on TASK-02
+
+### Gotchas & Warnings
+- ⚠️ Don't modify existing User queries until auth is wired
+- ⚠️ The existing `src/legacy/auth.js` is deprecated
+````
+
+**Token budget**: Scout targets ~100K total. The elaborate phase receives both directly in its prompt — no subsequent tool reads needed.
 
 ## TUI Display
 
@@ -434,22 +487,52 @@ Workers get memorable Docker-style names (e.g., `swift_fox`, `calm_owl`) for eas
 [coord] workers ● 2/4 | $1.23 | 3m45s | /jobs to open
 ```
 
-## Plan Format
+## Spec Format (TASK-XX)
 
-Plans should be markdown with clear steps:
+The `coordinate` tool requires specs in TASK-XX format:
 
 ```markdown
-# My Plan
+# Authentication Implementation
 
-## Step 1: Create Types
-Create `src/types.ts` with the Todo interface.
+## TASK-01: Create auth types
+Priority: P1
+Create `src/auth/types.ts` with User, Session, and Token interfaces.
 
-## Step 2: Create Store  
-Create `src/store.ts` with CRUD operations. Imports Todo from types.
+**Files:** src/auth/types.ts (create)
+**Depends on:** none
+**Acceptance:** Exports User, Session, Token interfaces
 
-## Step 3: Create Handlers
-Create `src/handlers.ts` with HTTP handlers. Imports from store.
+## TASK-02: Implement JWT utilities
+Priority: P1
+Create JWT signing and verification utilities.
+
+**Files:** src/auth/jwt.ts (create)
+**Depends on:** TASK-01
+**Acceptance:** signToken() and verifyToken() functions work
+
+## TASK-03: Create auth middleware
+Priority: P2
+Create Express middleware for route protection.
+
+**Files:** src/middleware/auth.ts (create)
+**Depends on:** TASK-02
+**Acceptance:** Middleware extracts and validates JWT from cookies
 ```
+
+**Required elements:**
+- Task ID: `TASK-XX` or `TASK-XX.Y` (for subtasks)
+- Priority: `P0` (critical) to `P3` (low)
+- Files: List of files to create/modify
+- Depends on: Task IDs or "none"
+- Acceptance: Testable criteria
+
+**Validation rules:**
+- At least one task with no dependencies (entry point)
+- No circular dependencies
+- All dependency references must exist
+- Valid task ID format
+
+Use `plan({ input: "..." })` to generate valid specs from prose.
 
 ## Coordination Log
 
@@ -470,32 +553,39 @@ After each session, a markdown log is saved containing:
 ## Architecture
 
 ```
-coordinate tool
-    │
-    ├── [Scout Phase] - Analyze codebase for context
-    │
-    ├── [Planner Phase] - Decompose plan into task graph
-    │   ├── Receives scout context + plan
-    │   ├── Self-review loop before finalizing
-    │   ├── Creates tasks.json with dependencies
-    │   └── Starts background review for discovered tasks
-    │
-    ├── [Coordinator Phase]
-    │   ├── Spawns workers from task queue
-    │   ├── Starts supervisor loop
-    │   └── Handles worker exits and restarts
-    │
-    ├── [Workers Phase] - Execute in parallel
-    │   ├── Claim tasks from queue
-    │   ├── Self-review before completion
-    │   ├── Can discover new tasks
-    │   └── Signal contracts when ready
-    │
-    ├── [Review Phase] - Code reviewer checks changes
-    │   └── Returns issues with file, line, severity
-    │
-    └── [Fix Phase] - Same workers fix their issues
-        └── Repeat review/fix until clean or stuck
+┌─────────────────────────────────────────────────────────────────────┐
+│                           plan tool                                  │
+│                                                                     │
+│  "Add auth"  ──►  Interview  ──►  Scout  ──►  Elaborate  ──►  Spec │
+│                    (60s/Q)       (targeted)   (no tools)    (TASK-XX)│
+└───────────────────────────────────┬─────────────────────────────────┘
+                                    │
+                               spec.md
+                                    │
+                                    ▼
+┌─────────────────────────────────────────────────────────────────────┐
+│                        coordinate tool                               │
+│                                                                     │
+│  ├── [Validate] - Strict TASK-XX format check                       │
+│  │                                                                  │
+│  ├── [Coordinator Phase]                                            │
+│  │   ├── Spawns workers from task queue (priority-aware)            │
+│  │   ├── Starts supervisor loop                                     │
+│  │   └── Handles worker exits with smart auto-continue              │
+│  │                                                                  │
+│  ├── [Workers Phase] - Execute in parallel                          │
+│  │   ├── Claim tasks from queue                                     │
+│  │   ├── Context persisted to workers/<task-id>/context.md          │
+│  │   ├── Self-review before completion                              │
+│  │   ├── Can request subtasks (TASK-XX.Y)                           │
+│  │   └── Signal contracts when ready                                │
+│  │                                                                  │
+│  ├── [Review Phase] - Code reviewer checks changes                  │
+│  │   └── Returns issues with file, line, severity                   │
+│  │                                                                  │
+│  └── [Fix Phase] - Workers fix their issues                         │
+│      └── Repeat review/fix until clean or stuck                     │
+└─────────────────────────────────────────────────────────────────────┘
 ```
 
 ## Task Queue
@@ -506,10 +596,12 @@ Tasks are managed in a priority queue with dependencies:
 interface Task {
   id: string;
   description: string;
-  priority: number;        // 0=critical, 1=high, 2=medium, 3=low
+  priority: number;        // 0=P0 (critical), 1=P1, 2=P2, 3=P3 (low)
   status: TaskStatus;      // pending_review, pending, blocked, claimed, complete, failed, rejected
   files?: string[];
   dependsOn?: string[];
+  parentTaskId?: string;   // For subtasks (TASK-XX.Y)
+  blockedBy?: string[];    // Task IDs blocking this (e.g., subtasks)
   claimedBy?: string;
   discoveredFrom?: string; // For discovered tasks
 }
@@ -519,6 +611,29 @@ Task status flow:
 - **Planner tasks**: pending -> claimed -> complete/failed
 - **Discovered tasks**: pending_review -> pending -> claimed -> complete/failed (or rejected)
 - **Reviewer tasks**: pending (FIX-XX) -> claimed -> complete/failed
+- **Subtasks**: pending -> claimed -> complete (parent unblocks when all complete)
+
+## Subtasks
+
+Workers can break down complex tasks into subtasks (TASK-XX.Y format):
+
+```typescript
+// Worker requests subtasks
+agent_work({
+  action: "subtasks",
+  subtasks: [
+    { title: "Create migration", description: "...", files: ["migrations/001.sql"] },
+    { title: "Update queries", description: "...", files: ["src/db/users.ts"] },
+  ]
+})
+```
+
+**Subtask behavior:**
+- Max 5 subtasks per parent
+- All subtasks run in parallel (no inter-subtask dependencies)
+- Parent task blocked until all subtasks complete
+- Parent resumes after subtasks to finish up
+- Nested subtasks not allowed by default
 
 ## Dynamic Task Pickup
 
@@ -541,12 +656,39 @@ Task ID prefixes:
 
 ## Worker Self-Review
 
-Workers run a self-review pass before `complete_task` succeeds. The worker is prompted to review their changes with "fresh eyes" and fix any issues found. Only proceeds when "No issues found." is in the response.
+Workers run a self-review pass before `agent_work({ action: "complete" })` succeeds. The worker is prompted to review their changes with "fresh eyes" and fix any issues found. Only proceeds when "No issues found." is in the response.
 
 Configuration:
 - `PI_SELF_REVIEW_ENABLED`: Set to "false" to disable (default: "true")
 - `PI_MAX_SELF_REVIEW_CYCLES`: Max review cycles (default: 5)
 - `PI_SELF_REVIEW_SPEC_PATH`: Optional spec path to include in review prompt
+
+## Worker Context & Recovery
+
+Each task maintains a persistent context file that survives worker restarts:
+
+```
+workers/TASK-03/
+├── context.md         # Persistent context (auto-updated)
+├── attempt-001.json   # First attempt state
+└── attempt-002.json   # Second attempt state
+```
+
+**Context tracking:**
+- Files modified (complete/partial/failed status)
+- Discoveries made during work
+- Attempt history (workers, exit codes, reasons)
+- Last actions before failure
+- Continuation notes for smart restarts
+
+**Smart auto-continue:**
+When a worker fails, the system automatically:
+1. Loads `context.md` from previous attempt
+2. Analyzes what was done and what failed
+3. Builds a continuation prompt with context
+4. Spawns new worker with: "Don't redo X, fix Y at line Z"
+
+This happens at the spawn level without coordinator involvement, making simple recovery fast and efficient.
 
 ## Supervisor
 
@@ -707,20 +849,29 @@ The coordination agents use these modes:
 
 ```
 coordDir/
-├── tasks.json                    # Task queue
+├── tasks.json                    # Task queue with priority and dependencies
 ├── state.json                    # CoordinationState
 ├── cost.json                     # CostState
-├── routing-info.json             # Smart routing decision (mode, skipped phases, clarifications)
+├── deps.json                     # Dependency graph (blocks, parent, waits-for)
 ├── events.jsonl                  # All coordination events
+├── decisions.jsonl               # Coordinator decision audit trail
 ├── progress.md                   # Human-readable progress
+├── coordinator-context.md        # Coordinator session context
+├── coordinator-context.json      # Coordinator context (JSON for parsing)
 ├── discoveries.json              # Shared discoveries
-├── a2a-read.json                 # Tracks read A2A messages per worker
+├── message-read.json             # Tracks read messages per worker
 ├── worker-{workerId}.json        # Per-worker state files
+├── workers/                      # Per-task worker context
+│   └── {task-id}/
+│       ├── context.md            # Persistent context (survives restarts)
+│       ├── attempt-001.json      # First attempt state
+│       └── attempt-002.json      # Second attempt state
 ├── nudges/                       # Supervisor -> Worker nudges
 │   └── {workerId}.json
-├── a2a-messages/                 # Agent-to-agent messages
+├── messages/                     # Coordination messages (unified)
 │   └── {timestamp}-{id}.json
-├── scout/                        # Scout outputs
+├── reservations/                 # File reservations
+├── escalation-responses/         # User escalation responses
 ├── artifacts/                    # Per-agent artifacts
 ├── checkpoints/                  # Phase checkpoints
 └── traces/                       # Observability traces
@@ -736,30 +887,41 @@ extensions/coordination/           # Symlinked to ~/.pi/agent/extensions/coordin
 ├── planner.ts                    # Planner hooks (read_context)
 ├── scout.ts                      # Scout hooks (bundle tools)
 │
+├── plan/                         # Plan tool (interview -> spec)
+│   ├── index.ts                  # plan() tool entry point
+│   ├── interview.ts              # Multi-round interview (60s timeout)
+│   ├── scout-targeted.ts         # Targeted codebase analysis
+│   ├── elaborate.ts              # Frontier model elaboration
+│   ├── structure.ts              # Convert to TASK-XX format
+│   └── handoff.ts                # Execute/refine/exit prompt
+│
 ├── coordinate/                   # Coordination runtime
 │   ├── index.ts                  # coordinate() tool
 │   ├── dashboard.ts              # /jobs command TUI + MiniDashboard widget
 │   ├── pipeline.ts               # Multi-phase orchestration
-│   ├── detection.ts              # Smart routing input type detection
-│   ├── input-type-tui.ts         # Input type confirmation TUI
+│   ├── spec-parser.ts            # Parse TASK-XX format
+│   ├── spec-validator.ts         # Validate spec rules
+│   ├── state.ts                  # FileBasedStorage + message tracking
+│   ├── task-queue.ts             # TaskQueueManager (priority-aware)
+│   ├── deps.ts                   # Dependency graph module
+│   ├── subtasks.ts               # Subtask creation/blocking
+│   ├── worker-context.ts         # Per-task context persistence
+│   ├── auto-continue.ts          # Smart restart logic
+│   ├── coordinator-context.ts    # Session-level context
+│   ├── supervisor.ts             # Stuck worker detection
+│   ├── nudge.ts                  # Supervisor nudge protocol
 │   ├── question-generator.ts     # LLM clarifying question generation
 │   ├── inline-questions-tui.ts   # Sequential questions TUI
-│   ├── augment-prd.ts            # PRD augmentation with answers
-│   ├── state.ts                  # FileBasedStorage
-│   ├── task-queue.ts             # TaskQueueManager
-│   ├── supervisor.ts             # Stuck worker detection
-│   ├── a2a.ts                    # Agent-to-agent messaging
-│   ├── nudge.ts                  # Supervisor nudge protocol
 │   ├── coordinator-tools/        # Coordinator tools
-│   ├── worker-tools/             # Worker tools
-│   ├── phases/                   # Phase runners (scout, planner, review, fix)
-│   ├── observability/            # Events, spans, causality
+│   ├── worker-tools/             # Worker tools (v2 unified API)
+│   ├── phases/                   # Phase runners (review, fix)
+│   ├── observability/            # Events, spans, decisions, causality
 │   └── validation/               # Invariant checking
 │
 ├── coord-output/                 # coord_output() tool
 ├── read-context/                 # read_context() tool
 ├── bundle-files/                 # scan_files(), bundle_files() tools
-├── subagent/                     # Shared agent utilities
+├── subagent/                     # Shared agent utilities + SDK runner
 └── validate-coord/               # Standalone validation CLI
 
 agents/                           # Symlinked to ~/.pi/agent/agents/coordination/

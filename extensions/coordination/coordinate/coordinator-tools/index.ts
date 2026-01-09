@@ -12,6 +12,24 @@ import { FileBasedStorage } from "../state.js";
 import type { WorkerStateFile, IdentityMapping, PreAssignment } from "../types.js";
 import { createWorkerObservability, type ObservabilityContext } from "../observability/index.js";
 import { createArtifactPaths } from "../../subagent/artifacts.js";
+import {
+	createContextUpdater,
+	loadContext,
+	type ContextUpdater,
+} from "../worker-context.js";
+import {
+	buildContinuationPrompt,
+	inferFailureReason,
+} from "../auto-continue.js";
+import {
+	createCoordinatorContext,
+	saveCoordinatorContext,
+	loadCoordinatorContext,
+	recordAssignment,
+	updateAssignmentOutcome,
+	recordEscalation,
+	type CoordinatorContext,
+} from "../coordinator-context.js";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
@@ -63,6 +81,7 @@ export interface WorkerHandle {
 	proc: ChildProcess;
 	promise: Promise<number>;
 	taskId?: string;
+	contextUpdater?: ContextUpdater;
 }
 
 export interface WorkerConfig {
@@ -82,6 +101,7 @@ export function spawnWorkerProcess(
 	modelOverride?: string,
 	obs?: ObservabilityContext,
 	agentName?: string,
+	taskId?: string,
 ): WorkerHandle {
 	const { agents } = discoverAgents(cwd, "user");
 	const targetAgent = agentName || "coordination/worker";
@@ -214,6 +234,12 @@ export function spawnWorkerProcess(
 		timestamp: Date.now(),
 	}).catch(() => {});
 
+	// Create context updater for task-based workers (spawn_from_queue)
+	let contextUpdater: ContextUpdater | undefined;
+	if (taskId) {
+		contextUpdater = createContextUpdater(coordDir, taskId, workerId, identity);
+	}
+
 	const startTime = Date.now();
 	let lastUpdateMs = 0;
 	let toolCount = 0;
@@ -301,6 +327,17 @@ export function spawnWorkerProcess(
 					workerId: config.logicalName || workerId,
 					timestamp: Date.now(),
 				}).catch(() => {});
+
+				// Track tool result in worker context for smart restarts
+				if (contextUpdater) {
+					const toolArgs = event.toolArgs || event.args || {};
+					contextUpdater.onToolResult({
+						toolName: currentTool,
+						input: toolArgs,
+						isError: event.isError || !event.success,
+						errorMessage: event.error || event.errorMessage,
+					});
+				}
 			}
 			currentTool = null;
 			currentToolArgs = null;
@@ -370,6 +407,12 @@ export function spawnWorkerProcess(
 				stdoutBuffer = "";
 			}
 			updateWorkerProgress(true);
+
+			// Update worker context with exit info for smart restarts
+			if (contextUpdater) {
+				contextUpdater.onWorkerEnd(code ?? 0);
+			}
+
 			try {
 				jsonlStream.end();
 			} catch {}
@@ -410,6 +453,12 @@ export function spawnWorkerProcess(
 				stdoutBuffer = "";
 			}
 			updateWorkerProgress(true);
+
+			// Update worker context with error exit
+			if (contextUpdater) {
+				contextUpdater.onWorkerEnd(1, "Process error");
+			}
+
 			try {
 				jsonlStream.end();
 			} catch {}
@@ -421,7 +470,7 @@ export function spawnWorkerProcess(
 		});
 	});
 
-	return { workerId, identity, pid: proc.pid, proc, promise };
+	return { workerId, identity, pid: proc.pid, proc, promise, contextUpdater };
 }
 
 const WorkerSpec = Type.Object({
@@ -1038,6 +1087,17 @@ ${planContent ? `## Full Plan\n\`\`\`markdown\n${planContent}\n\`\`\`` : ""}
 					planContent = await fs.readFile(state.planPath, "utf-8");
 				} catch {}
 
+				// Initialize or load coordinator context for tracking
+				let coordContext = await loadCoordinatorContext(coordDir);
+				if (!coordContext) {
+					coordContext = createCoordinatorContext(
+						state.sessionId,
+						state.planPath,
+						{ maxWorkers: params.maxWorkers },
+					);
+					await saveCoordinatorContext(coordDir, coordContext);
+				}
+
 				const handles: (WorkerHandle & { taskId: string })[] = [];
 				const maxWorkers = params.maxWorkers || Infinity;
 
@@ -1086,7 +1146,12 @@ ${planContent ? `### Full Plan\n\`\`\`markdown\n${planContent}\n\`\`\`` : ""}
 						undefined,
 						obs || undefined,
 						params.agentName,
+						task.id, // Pass taskId for worker context tracking
 					);
+
+					// Record assignment in coordinator context
+					recordAssignment(coordContext!, task.id, workerId, workerIdentity, 1);
+					await saveCoordinatorContext(coordDir, coordContext!);
 
 					handles.push({ ...handle, taskId: task.id });
 				}
@@ -1115,17 +1180,25 @@ ${planContent ? `### Full Plan\n\`\`\`markdown\n${planContent}\n\`\`\`` : ""}
 
 						if (exitCode === 0) {
 							await taskQueue.markTaskComplete(handle.taskId, handle.identity);
+							// Update coordinator context with success
+							updateAssignmentOutcome(coordContext!, handle.taskId, "success");
+							await saveCoordinatorContext(coordDir, coordContext!);
 							await obs?.events.emit({
 								type: "task_completed",
 								taskId: handle.taskId,
 								workerId: handle.workerId,
 								filesModified: [],
 							});
-						} else if (exitCode === 42) {
+						} else if (exitCode === 42 || exitCode !== 0) {
+							// Handle both explicit restart requests (42) and failures
 							const count = (restartCounts.get(handle.taskId) || 0) + 1;
 							restartCounts.set(handle.taskId, count);
 
 							if (count <= 2) {
+								// Update coordinator context with restart
+								updateAssignmentOutcome(coordContext!, handle.taskId, "restarted");
+								await saveCoordinatorContext(coordDir, coordContext!);
+
 								await taskQueue.releaseTask(handle.taskId);
 
 								const task = (await taskQueue.getQueue()).tasks.find(t => t.id === handle.taskId);
@@ -1136,24 +1209,29 @@ ${planContent ? `### Full Plan\n\`\`\`markdown\n${planContent}\n\`\`\`` : ""}
 										const shortId = newWorkerId.slice(0, 4);
 										const workerIdentity = `worker:${task.id}-${shortId}-r${count}`;
 
+										// Record new assignment for restart
+										recordAssignment(coordContext!, task.id, newWorkerId, workerIdentity, count + 1);
+										await saveCoordinatorContext(coordDir, coordContext!);
+
 										await obs?.events.emit({
 											type: "worker_restarting",
 											workerId: handle.workerId,
 											restartCount: count,
 										});
 
-										const newHandshakeSpec = `## Task: ${task.id} (Restart ${count})
+										// Load worker context for smart continuation
+										const context = await loadContext(coordDir, handle.taskId);
+										const workerState = await storage.readWorkerState(handle.workerId).catch(() => null);
 
-${task.description}
-
-### Files
-${task.files?.map(f => `- ${f}`).join("\n") || "No specific files assigned"}
-
-### Acceptance Criteria
-${task.acceptanceCriteria?.map(c => `- ${c}`).join("\n") || "- Complete the task as described"}
-
-${planContent ? `### Full Plan\n\`\`\`markdown\n${planContent}\n\`\`\`` : ""}
-`;
+										// Build continuation prompt with context from previous attempt
+										const newHandshakeSpec = buildContinuationPrompt({
+											task,
+											context,
+											workerState,
+											exitCode,
+											attemptNumber: count + 1,
+											planContent,
+										});
 
 										const newHandle = spawnWorkerProcess(
 											{
@@ -1170,6 +1248,7 @@ ${planContent ? `### Full Plan\n\`\`\`markdown\n${planContent}\n\`\`\`` : ""}
 											undefined,
 											obs || undefined,
 											params.agentName,
+											task.id, // Pass taskId for context tracking
 										);
 
 										const handleWithTask = { ...newHandle, taskId: task.id };
@@ -1181,14 +1260,23 @@ ${planContent ? `### Full Plan\n\`\`\`markdown\n${planContent}\n\`\`\`` : ""}
 									}
 								}
 							} else {
-								await taskQueue.markTaskFailed(handle.taskId, "Max restarts exceeded");
+								const failureReason = inferFailureReason(
+									exitCode,
+									await storage.readWorkerState(handle.workerId).catch(() => null),
+									await loadContext(coordDir, handle.taskId),
+								);
+								// Update coordinator context with failure
+								updateAssignmentOutcome(coordContext!, handle.taskId, "failed", `Max restarts exceeded: ${failureReason}`);
+								await saveCoordinatorContext(coordDir, coordContext!);
+								await taskQueue.markTaskFailed(handle.taskId, `Max restarts exceeded: ${failureReason}`);
 								await obs?.events.emit({
 									type: "worker_abandoned",
 									workerId: handle.workerId,
-									reason: "Max restarts exceeded",
+									reason: `Max restarts exceeded: ${failureReason}`,
 								});
 							}
 						} else {
+							// This branch is now unreachable but kept for safety
 							await taskQueue.markTaskFailed(handle.taskId, `exit code ${exitCode}`);
 							await obs?.events.emit({
 								type: "task_failed",
@@ -1199,6 +1287,13 @@ ${planContent ? `### Full Plan\n\`\`\`markdown\n${planContent}\n\`\`\`` : ""}
 						}
 					} catch (err) {
 						console.error(`Error processing worker exit for ${handle.workerId}:`, err);
+						// Update coordinator context with failure on error
+						try {
+							updateAssignmentOutcome(coordContext!, handle.taskId, "failed", `Error processing exit: ${err}`);
+							await saveCoordinatorContext(coordDir, coordContext!);
+						} catch (saveErr) {
+							console.error(`Failed to save coordinator context:`, saveErr);
+						}
 						await obs?.events.emit({
 							type: "task_failed",
 							taskId: handle.taskId,
@@ -1266,7 +1361,12 @@ ${planContent ? `### Full Plan\n\`\`\`markdown\n${planContent}\n\`\`\`` : ""}
 							undefined,
 							obs || undefined,
 							params.agentName,
+							task.id, // Pass taskId for worker context tracking
 						);
+
+						// Record assignment in coordinator context
+						recordAssignment(coordContext!, task.id, newWorkerId, workerIdentity, 1);
+						await saveCoordinatorContext(coordDir, coordContext!);
 
 						const handleWithTask = { ...newHandle, taskId: task.id };
 						allHandles.push(handleWithTask);

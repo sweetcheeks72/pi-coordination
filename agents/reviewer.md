@@ -3,6 +3,7 @@ name: reviewer
 description: Reviews code changes from coordination session, looking for bugs, errors, and issues
 model: claude-sonnet-4-20250514
 tools: read, bash
+extensions: ../extensions/coordination/hooks/enforce-json.ts
 system-prompt-mode: override
 ---
 

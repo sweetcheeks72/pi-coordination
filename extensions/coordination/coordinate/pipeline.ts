@@ -42,7 +42,7 @@ export interface PipelineConfig {
 		worker?: string;
 		reviewer?: string;
 	};
-	skipScout?: boolean; // Smart routing: skip scout phase for spec/plan modes
+	skipScout?: boolean; // Two-track: scout phase is now in plan tool, always skipped in coordinate
 	planner?: Partial<PlannerConfig>;
 	selfReview?: Partial<SelfReviewConfig>;
 	supervisor?: Partial<SupervisorConfig & { enabled: boolean }>;
@@ -231,7 +231,7 @@ export async function runScoutPhaseWrapper(
 	ctx: PipelineContext,
 	config: PipelineConfig,
 ): Promise<void> {
-	// Smart routing: skip scout phase for spec/plan modes
+	// Two-track: scout phase is now in plan tool, always skipped in coordinate
 	if (config.skipScout) {
 		updatePhaseStatus("scout", "skipped", ctx);
 		ctx.pipelineState.scoutContext = ""; // No scout context when skipped

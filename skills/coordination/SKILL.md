@@ -5,50 +5,58 @@ description: Multi-agent coordination for parallel plan execution with the coord
 
 # Coordination Skill
 
-Multi-agent coordination for parallel task execution.
+Multi-agent coordination for parallel task execution using the **two-track architecture**:
+- `plan` tool: Create specs from prose/PRDs (interview → scout → elaborate → structure)
+- `coordinate` tool: Execute TASK-XX format specs (validate → dispatch → execute → review)
 
-**YOU HAVE THE `coordinate` TOOL AVAILABLE.** When asked to execute a plan, spec, or PRD - USE THE `coordinate` TOOL.
+**YOU HAVE THE `coordinate` AND `plan` TOOLS AVAILABLE.**
 
-## IMPORTANT: Pass Files Directly
+## Two-Track Architecture
 
-**DO NOT rewrite or convert the user's plan/spec.** Pass it directly to coordinate:
-
-```typescript
-// User says "implement spec.md" → pass it directly
-coordinate({ plan: "./spec.md" })
-
-// User says "execute my-plan.md with 8 workers"
-coordinate({ plan: "./my-plan.md", agents: 8 })
+```
+┌─────────────────────────────────────────────────────────────────┐
+│  PLAN TOOL (create specs)          COORDINATE TOOL (execute)    │
+│  ─────────────────────────         ───────────────────────────  │
+│  prose/PRD → interview             TASK-XX spec → validate      │
+│           → scout                              → dispatch       │
+│           → elaborate                          → workers        │
+│           → structure                          → review         │
+│           → spec.md ─────────────────────────→                  │
+└─────────────────────────────────────────────────────────────────┘
 ```
 
-The planner phase will analyze and decompose ANY format - prose, specs, task lists. **You don't need to convert it first.**
+## When to Use Each Tool
 
-**Defaults:** 4 workers, planner enabled, 5 self-review cycles, supervisor enabled, $40 cost limit.
+### Use `plan` when:
+- User has prose, PRD, or requirements to convert into a spec
+- User says "plan", "create a spec", "help me design"
+- Input is NOT already in TASK-XX format
 
-## When to Use
+### Use `coordinate` when:
+- User has a **valid TASK-XX format spec**
+- User says "implement", "execute", "run", "coordinate"
+- The file already contains `## TASK-XX:` sections
 
-Use `coordinate` when:
-- User has a **plan**, **spec**, or **PRD** to implement
-- User says "implement", "execute", "run", "coordinate" a file
-- Work spans multiple files that could be parallelized
+## Coordinate Tool
 
-**Just pass the file directly** — don't rewrite it, don't create a new plan from it.
+**IMPORTANT:** The `coordinate` tool now requires a valid TASK-XX format spec. It will NOT auto-convert prose or PRDs.
 
-**Any format works:**
-- Prose PRD → Planner decomposes into tasks
-- Detailed spec → Planner extracts tasks
-- Task list → Planner validates and uses
+```typescript
+// Execute a valid spec
+coordinate({ plan: "./spec.md" })
 
-## Tool Parameters
+// If validation fails, the error will tell you to use the plan tool first
+```
+
+### Parameters
 
 ```typescript
 coordinate({
   // Required
-  plan: string,                    // Path to plan/spec markdown file
+  plan: string,                    // Path to TASK-XX format spec file
 
   // Common options (all optional)
   agents: number | string[],       // Worker count or array (default: 4)
-  planner: boolean | object,       // Enable planner or config (default: true)
   reviewCycles: number | false,    // Worker self-review cycles (default: 5, false to disable)
   supervisor: boolean | object,    // Monitor stuck workers (default: true)
   costLimit: number,               // End gracefully at limit (default: $40)
@@ -62,73 +70,137 @@ coordinate({
   checkTests: boolean,             // Reviewer checks tests (default: true)
   
   // Model overrides (string sets model, object for full config)
-  scout: string | { model: string },
   coordinator: string | { model: string },
   worker: string | { model: string },
   reviewer: string | { model: string },
 })
 ```
 
-**Note:** `planner` serves dual purpose - `planner: false` disables it, `planner: { model: "..." }` configures it.
-
-## Examples
+### Examples
 
 ```typescript
-// Basic - 4 workers, planner enabled
-coordinate({ plan: "./plan.md" })
+// Basic - 4 workers
+coordinate({ plan: "./spec.md" })
 
 // More workers
-coordinate({ plan: "./plan.md", agents: 8 })
-
-// Skip planner (plan is already a task graph)
-coordinate({ plan: "./tasks.md", planner: false })
+coordinate({ plan: "./spec.md", agents: 8 })
 
 // Async mode - returns immediately, use /jobs to monitor
-coordinate({ plan: "./plan.md", async: true })
+coordinate({ plan: "./spec.md", async: true })
 
 // Disable self-review for speed
-coordinate({ plan: "./plan.md", reviewCycles: false })
+coordinate({ plan: "./spec.md", reviewCycles: false })
 
 // Custom models
 coordinate({ 
-  plan: "./plan.md",
-  scout: "claude-sonnet-4-20250514",
+  plan: "./spec.md",
   worker: "claude-sonnet-4-20250514"
 })
 ```
 
-## Pipeline Phases
+### Pipeline Phases (coordinate)
 
-1. **Scout** — Analyzes codebase, outputs `<meta>`, `<file_map>`, `<file_contents>`
-2. **Planner** — Creates task graph from plan + scout context
+1. **Validate** — Checks spec is valid TASK-XX format
+2. **Dispatch** — Assigns tasks to workers respecting dependencies
 3. **Workers** — Execute tasks in parallel with self-review
 4. **Review** — Code reviewer checks all changes
 5. **Fixes** — Workers fix any issues found
 6. **Complete** — Final summary
 
-## Plan Format
+## Plan Tool
 
-Plans can be prose (PRD) or already a spec:
+Creates TASK-XX specs from prose, PRDs, or requirements through an interactive flow.
 
-**Prose (planner will decompose):**
-```markdown
-# Add Authentication
+```typescript
+// Create spec from a file
+plan({ input: "./requirements.md" })
 
-- Login endpoint with JWT tokens
-- Password hashing with bcrypt  
-- Protected route middleware
+// Create spec from inline text
+plan({ input: "Add user authentication with JWT tokens" })
+
+// Refine an existing spec
+plan({ continue: "./spec.md" })
+
+// Skip interview (use defaults)
+plan({ input: "./prd.md", skipInterview: true })
 ```
 
-**Spec (planner will validate):**
+### Parameters
+
+```typescript
+plan({
+  // For NEW plans
+  input: string,                   // File path or inline text
+  
+  // For REFINING existing specs
+  continue: string,                // Path to existing spec to refine
+  
+  // Options
+  skipInterview: boolean,          // Skip interactive interview (default: false)
+  skipScout: boolean,              // Skip codebase analysis (default: false)
+  maxInterviewRounds: number,      // Limit interview rounds (default: 5 new, 3 refine)
+  output: string,                  // Where to save spec (default: auto-named in specs/)
+  format: "markdown" | "json",     // Output format (default: markdown)
+  
+  // Model overrides
+  model: string,                   // Model for elaboration (default: frontier)
+  scoutModel: string,              // Model for scout (default: fast)
+})
+```
+
+### Pipeline Phases (plan)
+
+1. **Interview** — Gather requirements interactively (can skip with Ctrl+D or timeout)
+2. **Scout** — Analyze codebase structure and patterns
+3. **Elaborate** — Expand requirements with codebase context
+4. **Structure** — Convert to TASK-XX format spec
+5. **Output** — Save spec to file
+
+## Required Spec Format (TASK-XX)
+
+The `coordinate` tool requires this format:
+
 ```markdown
+# Project Title
+
+Description of what we're building.
+
 ## TASK-01: Create auth types
-Files: src/types.ts
+Priority: P1
+Files: src/types.ts (create)
+Depends on: none
 Acceptance: AuthCredentials and User interfaces exported
 
 ## TASK-02: Implement login endpoint
-Files: src/routes/auth.ts
+Priority: P1
+Files: src/routes/auth.ts (create)
 Depends on: TASK-01
-Acceptance: POST /login returns JWT
+Acceptance: POST /login returns JWT, tests pass
+```
+
+**Required fields per task:**
+- `## TASK-XX: Title` — Task ID and title
+- `Priority: P0|P1|P2|P3` — Execution priority
+- `Files:` — Files to create/modify
+- `Depends on:` — Dependencies (or "none")
+- `Acceptance:` — Testable completion criteria
+
+## Typical Workflow
+
+```typescript
+// 1. User has prose requirements
+plan({ input: "./requirements.md" })
+// → Creates specs/requirements-spec.md
+
+// 2. Execute the generated spec
+coordinate({ plan: "./specs/requirements-spec.md" })
+```
+
+Or if user already has a valid spec:
+
+```typescript
+// Execute directly
+coordinate({ plan: "./valid-spec.md" })
 ```
 
 ## Monitoring
@@ -151,17 +223,27 @@ coord_output({ ids: ["scout", "planner", "review"] })
 coord_output({ ids: ["worker-04ea"], format: "stripped" })  // No ANSI codes
 ```
 
-Parameters: `ids` (required), `coordDir` (optional), `format` ("raw" | "json" | "stripped")
-
 ## DO NOT
 
-- **Don't rewrite the user's spec** — Pass it directly to coordinate
-- **Don't create a new plan file** — The planner handles any format
-- **Don't manually decompose tasks** — That's the planner's job
+- **Don't pass prose to coordinate** — Use `plan` tool first to create a spec
+- **Don't manually write TASK-XX specs** — Let `plan` tool generate them
+- **Don't skip validation errors** — Fix the spec or use `plan` to create a valid one
 
-## Tips
+## Error Handling
 
-1. **Pass directly** — User gives you a file? `coordinate({ plan: "that-file.md" })`
-2. **Let planner work** — It handles prose, specs, task lists, anything
-3. **Check /jobs** — For async runs, the dashboard shows everything
-4. **Cost aware** — Default $40 limit, increase with `costLimit` if needed
+If `coordinate` returns a validation error like:
+
+```
+Invalid spec format. The coordinate tool requires a valid TASK-XX format spec.
+
+Errors:
+- No valid TASK-XX format tasks found
+```
+
+Use the `plan` tool first:
+
+```typescript
+plan({ input: "./your-file.md" })
+// Then coordinate the output
+coordinate({ plan: "./specs/your-file-spec.md" })
+```

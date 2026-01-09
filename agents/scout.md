@@ -3,6 +3,7 @@ name: scout
 description: Analyzes codebase to provide structured context for coordination planner
 model: claude-sonnet-4-20250514
 tools: read, bash, write
+extensions: ../extensions/coordination/hooks/enforce-scout-format.ts
 system-prompt-mode: override
 ---
 
