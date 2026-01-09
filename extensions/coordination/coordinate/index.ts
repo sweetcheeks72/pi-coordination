@@ -1315,7 +1315,7 @@ export function createCoordinateTool(events: EventBus): ToolDefinition<typeof Co
 			const planPath = args.plan || "...";
 			const agentCount = args.agents?.length || 0;
 			const asyncLabel = args.async ? theme.fg("warning", " [async]") : "";
-			const expandHint = theme.fg("dim", " [Opt+C: expand]");
+			const expandHint = theme.fg("dim", " [Ctrl+O: expand]");
 			let text = theme.fg("toolTitle", theme.bold("coordinate ")) +
 				theme.fg("accent", planPath) +
 				theme.fg("muted", ` (${agentCount} agents)`) +
