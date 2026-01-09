@@ -271,7 +271,7 @@ To create a valid spec, use the 'plan' tool:
 │  │  └──────────────┘  └──────────────┘  └──────────────┘                  │ │
 │  │                                                                        │ │
 │  │  Features:                                                             │ │
-│  │  • Self-review loop before completion                                  │ │
+│  │  • Fresh eyes self-review before completion (tool-gated)              │ │
 │  │  • Can create subtasks (TASK-XX.Y format, max 5 per parent)           │ │
 │  │  • Worker context persisted to context.md                              │ │
 │  │  • Smart auto-continue on failure                                      │ │
@@ -279,13 +279,30 @@ To create a valid spec, use the 'plan' tool:
 │                                      │                                      │
 │                                      ▼                                      │
 │  ┌────────────────────────────────────────────────────────────────────────┐ │
-│  │ PHASE 4: Review (code-reviewer)                                        │ │
+│  │ PHASE 4: Integration Review (cross-component)                          │ │
 │  │                                                                        │ │
-│  │  Checks all modified files against acceptance criteria:                │ │
+│  │  Checks changes from ALL workers together:                             │ │
+│  │  • API contracts between components                                    │ │
+│  │  • Shared types and interfaces                                         │ │
+│  │  • Data flow consistency                                               │ │
+│  │  • Cross-component dependencies                                        │ │
+│  │                                                                        │ │
+│  │  Skipped if: single worker OR no files modified                        │ │
+│  │  Issues found? → Fix before regular review                             │ │
+│  └────────────────────────────────────────────────────────────────────────┘ │
+│                                      │                                      │
+│                                      ▼                                      │
+│  ┌────────────────────────────────────────────────────────────────────────┐ │
+│  │ PHASE 5: Review (code-reviewer with fresh eyes)                        │ │
+│  │                                                                        │ │
+│  │  Reviewer READS FULL FILES (not just diff):                            │ │
 │  │  • Tests pass?                                                         │ │
 │  │  • Acceptance criteria met?                                            │ │
 │  │  • No regressions?                                                     │ │
 │  │  • Code quality issues?                                                │ │
+│  │                                                                        │ │
+│  │  Fresh eyes: After initial review, re-reviews with "fresh eyes"        │ │
+│  │  prompt to catch anything missed (up to 2 cycles)                      │ │
 │  └────────────────────────────────────────────────────────────────────────┘ │
 │                                      │                                      │
 │                         ┌────────────┴────────────┐                         │
@@ -296,7 +313,10 @@ To create a valid spec, use the 'plan' tool:
 │                         ▼                         ▼                         │
 │                    ┌─────────┐           ┌───────────────┐                  │
 │                    │ COMPLETE │           │  FIX PHASE    │                  │
-│                    └─────────┘           │  (up to 3x)   │                  │
+│                    └─────────┘           │  (up to 5x)   │                  │
+│                                          │               │                  │
+│                                          │ Fix workers   │                  │
+│                                          │ get checklist │                  │
 │                                          └───────────────┘                  │
 │                                                                             │
 └─────────────────────────────────────────────────────────────────────────────┘
@@ -314,7 +334,7 @@ coordinate({
 
   // Review
   reviewCycles: number | false,     // Worker self-review cycles (default: 5)
-  maxFixCycles: number,             // Review/fix iterations (default: 3)
+  maxFixCycles: number,             // Review/fix iterations (default: 5)
   checkTests: boolean,              // Reviewer checks tests (default: true)
   sameIssueLimit: number,           // Times same issue can recur before giving up (default: 2)
 
@@ -539,59 +559,131 @@ The supervisor monitors workers and intervenes when stuck.
 
 ---
 
-## Worker Self-Review Loop
+## Worker Fresh Eyes Self-Review
 
-Workers review their own code before calling `agent_work({ action: 'complete' })`.
+Workers do a "fresh eyes" self-review before completing. This is a **tool-gated** approach: the first call to `agent_work({ action: 'complete' })` returns a fresh eyes prompt instead of completing.
 
 ```
 ┌─────────────────────────────────────────────────────────────────────────────┐
-│                         WORKER SELF-REVIEW LOOP                             │
+│                       WORKER FRESH EYES REVIEW                              │
 ├─────────────────────────────────────────────────────────────────────────────┤
 │                                                                             │
 │  Worker implements task                                                     │
 │         │                                                                   │
 │         ▼                                                                   │
-│  Worker calls agent_work({ action: 'complete' })                            │
+│  Worker calls agent_work({ action: 'complete' })  ← First attempt           │
 │         │                                                                   │
 │         ▼                                                                   │
 │  ┌────────────────────────────────────────┐                                 │
-│  │ Intercepted - check for self-review    │                                 │
+│  │ Tool intercepts - fresh eyes enabled?  │                                 │
+│  │ cycleCount < MAX_CYCLES?               │                                 │
 │  └────────────────────────────────────────┘                                 │
 │         │                                                                   │
-│         ▼                                                                   │
-│  "No issues found." in response?                                            │
-│         │                                                                   │
 │     ┌───┴───┐                                                               │
-│    YES     NO                                                               │
+│    NO      YES                                                              │
 │     │       │                                                               │
-│     ▼       ▼                                                               │
-│   PASS   count >= maxCycles?                                                │
+│     │       ▼                                                               │
+│     │  cycleCount++ (now 1)                                                 │
+│     │       │                                                               │
+│     │       ▼                                                               │
+│     │  Is this cycle 1?                                                     │
 │     │       │                                                               │
 │     │   ┌───┴───┐                                                           │
 │     │  YES     NO                                                           │
 │     │   │       │                                                           │
 │     │   ▼       ▼                                                           │
-│     │  PASS   Inject self-review prompt                                     │
-│     │  (limit) "Review your code with fresh eyes..."                        │
-│     │               │                                                       │
-│     │               ▼                                                       │
-│     │          Agent reviews, fixes issues                                  │
-│     │               │                                                       │
-│     │               └───────────▶ [back to check]                           │
+│     │  Return FRESH EYES   Allow completion                                 │
+│     │  PROMPT (don't       (they've done                                    │
+│     │  complete yet)       at least one review)                             │
+│     │   │                       │                                           │
+│     │   ▼                       │                                           │
+│     │  "Before completing,      │                                           │
+│     │   do a fresh eyes         │                                           │
+│     │   review..."              │                                           │
+│     │   │                       │                                           │
+│     │   ▼                       │                                           │
+│     │  Worker reads files,      │                                           │
+│     │  reviews changes,         │                                           │
+│     │  fixes any issues         │                                           │
+│     │   │                       │                                           │
+│     │   ▼                       │                                           │
+│     │  Worker calls complete ───┘                                           │
+│     │  again (2nd attempt)                                                  │
 │     │                                                                       │
 │     ▼                                                                       │
 │  agent_work({ action: 'complete' }) succeeds                                │
+│  Worker marked as complete                                                  │
 │                                                                             │
 └─────────────────────────────────────────────────────────────────────────────┘
 ```
 
-### Self-Review Configuration
+### Fresh Eyes Configuration
 
 | Variable | Default | Description |
 |----------|---------|-------------|
-| `PI_SELF_REVIEW_ENABLED` | `"true"` | Set to `"false"` to disable |
-| `PI_MAX_SELF_REVIEW_CYCLES` | `5` | Max cycles before proceeding |
-| `PI_SELF_REVIEW_SPEC_PATH` | (none) | Spec path to include in prompt |
+| `PI_FRESH_EYES_ENABLED` | `"true"` | Set to `"false"` to disable |
+| `PI_FRESH_EYES_MAX_CYCLES` | `2` | Max cycles before allowing completion |
+
+---
+
+## Integration Review
+
+After workers complete, an **Integration Review** phase runs to catch cross-component issues that individual workers might miss.
+
+```
+┌─────────────────────────────────────────────────────────────────────────────┐
+│                         INTEGRATION REVIEW PHASE                            │
+├─────────────────────────────────────────────────────────────────────────────┤
+│                                                                             │
+│  All workers completed                                                      │
+│         │                                                                   │
+│         ▼                                                                   │
+│  ┌────────────────────────────────────────┐                                 │
+│  │ Short-circuit checks:                  │                                 │
+│  │ • Single worker? → Skip                │                                 │
+│  │ • No files modified? → Skip            │                                 │
+│  └────────────────────────────────────────┘                                 │
+│         │                                                                   │
+│         ▼                                                                   │
+│  ┌────────────────────────────────────────┐                                 │
+│  │ Reviewer analyzes ALL modified files   │                                 │
+│  │ across ALL workers looking for:        │                                 │
+│  │                                        │                                 │
+│  │ • API contract mismatches              │                                 │
+│  │   (function signatures, return types)  │                                 │
+│  │                                        │                                 │
+│  │ • Shared type inconsistencies          │                                 │
+│  │   (different workers modified same     │                                 │
+│  │    interface differently)              │                                 │
+│  │                                        │                                 │
+│  │ • Data flow issues                     │                                 │
+│  │   (producer/consumer misalignments)    │                                 │
+│  │                                        │                                 │
+│  │ • Cross-component dependencies         │                                 │
+│  │   (missing imports, broken references) │                                 │
+│  └────────────────────────────────────────┘                                 │
+│         │                                                                   │
+│     ┌───┴───┐                                                               │
+│    NO      YES (issues found)                                               │
+│  ISSUES      │                                                              │
+│     │        ▼                                                              │
+│     │   Fix workers run BEFORE                                              │
+│     │   regular review-fix loop                                             │
+│     │        │                                                              │
+│     └────────┴───▶ Regular Review-Fix Loop                                  │
+│                                                                             │
+└─────────────────────────────────────────────────────────────────────────────┘
+```
+
+### Integration Review Categories
+
+| Category | Description |
+|----------|-------------|
+| `integration` | Cross-component issues found by integration review |
+| `bug` | Logic errors in code |
+| `type` | Type mismatches |
+| `missing` | Missing implementations |
+| `regression` | Broken existing functionality |
 
 ---
 
@@ -855,9 +947,8 @@ coordDir/
 | `PI_WORKER_ID` | Coordinator | Worker | Worker UUID |
 | `PI_AGENT_IDENTITY` | Coordinator | Worker | Worker identity string |
 | `PI_TRACE_ID` | Coordinate tool | All | Observability trace ID |
-| `PI_SELF_REVIEW_ENABLED` | Coordinate tool | Worker | Enable self-review |
-| `PI_MAX_SELF_REVIEW_CYCLES` | Coordinate tool | Worker | Max self-review cycles |
-| `PI_SELF_REVIEW_SPEC_PATH` | User | Worker | Spec path for review prompt |
+| `PI_FRESH_EYES_ENABLED` | Coordinate tool | Worker, Reviewer | Enable fresh eyes self-review (default: true) |
+| `PI_FRESH_EYES_MAX_CYCLES` | User | Worker, Reviewer | Max fresh eyes cycles (default: 2) |
 
 ---
 
@@ -867,8 +958,9 @@ coordDir/
 |---------|-------|------------|
 | "Invalid spec format" | Spec has TASK-XX? | Use `plan` tool to create valid spec |
 | Workers not spawning | tasks.json status | Verify tasks are "pending" not "blocked" |
-| Self-review stuck | PI_MAX_SELF_REVIEW_CYCLES | Increase or set reviewCycles: false |
+| Fresh eyes slowing things | PI_FRESH_EYES_ENABLED | Set to "false" to disable |
 | Worker stuck, not nudged | supervisor enabled | Verify supervisor: true |
 | Context not persisting | workers/ directory | Check coordDir permissions |
 | Messages not received | message-read.json | Check if already marked read |
 | Agent not found | install.sh run | Verify symlinks in ~/.pi/agent/agents/coordination/ |
+| Integration review slow | Single worker? | Skipped automatically for single worker |
