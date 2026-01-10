@@ -4,6 +4,35 @@ All notable changes to pi-coordination.
 
 ---
 
+## 2026-01-10
+
+### Added
+- **SDK Worker Mode** - In-process worker execution using Pi SDK's `createAgentSession()`:
+  - Enable via `useSDKWorkers: true` in `runtime-config.json` or `PI_USE_SDK_WORKERS=1` env var
+  - Workers run in coordinator's process (no subprocess spawning)
+  - Inline extension factories avoid env var race conditions with concurrent workers
+  - `registerWorkerTools()` now accepts optional context parameter for SDK workers
+- **Worker Steering Controls** - Dashboard controls for SDK workers:
+  - `[i] steer` - Send message to worker via `session.steer()`
+  - `[x] abort` - Terminate worker via `session.abort()`
+  - Controls shown in worker details overlay for SDK workers
+  - Subprocess workers still use `[R]estart` and `[A]bort` via nudge system
+- **Worker Control Registry** - `coordinate/worker-control-registry.ts` tracks steer/abort functions per worker
+- **SDK Runner Callbacks** - New callbacks in `runAgentSDK()`:
+  - `onSessionReady(steer)` - Called when session is ready with steer function
+  - `onProgress(progress)` - Called on tool/message events with progress data
+  - `inlineExtensions` - Pass extension factories directly (no file loading)
+
+### Fixed
+- **Worker extension path** - Fixed incorrect path in subprocess mode (`extensions/coordination/worker.ts` → `worker.ts`)
+- **Env var race condition** - SDK workers use closure-captured context instead of `process.env`
+
+### Changed
+- `[R]estart` and `[A]bort` blocked for SDK workers (would crash coordinator process)
+- SDK workers handle `wrap_up` nudges but not `restart`/`abort` (use `[x]` instead)
+
+---
+
 ## 2026-01-09
 
 ### Fixed

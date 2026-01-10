@@ -30,16 +30,18 @@ import {
 	recordEscalation,
 	type CoordinatorContext,
 } from "../coordinator-context.js";
+import { spawnWorkerSDK, type SDKWorkerHandle } from "./sdk-worker.js";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
 interface RuntimeConfig {
 	selfReview?: { enabled?: boolean; maxCycles?: number };
-	supervisor?: { enabled?: boolean; nudgeThresholdMs?: number; restartThresholdMs?: number; maxRestarts?: number; checkIntervalMs?: number };
+	supervisor?: { enabled?: boolean; nudgeThresholdMs?: number; restartThresholdMs?: number; maxRestarts?: number; checkIntervalMs?: number; dynamicSpawnTimeoutMs?: number; staleTaskTimeoutMs?: number };
 	models?: { scout?: string; planner?: string; coordinator?: string; worker?: string; reviewer?: string };
+	useSDKWorkers?: boolean;
 }
 
-function loadRuntimeConfig(coordDir: string): RuntimeConfig {
+export function loadRuntimeConfig(coordDir: string): RuntimeConfig {
 	try {
 		const content = fsSync.readFileSync(path.join(coordDir, "runtime-config.json"), "utf-8");
 		return JSON.parse(content);
@@ -102,12 +104,20 @@ export function spawnWorkerProcess(
 	obs?: ObservabilityContext,
 	agentName?: string,
 	taskId?: string,
-): WorkerHandle {
+): WorkerHandle | SDKWorkerHandle {
+	const runtimeConfig = loadRuntimeConfig(coordDir);
+
+	// Use SDK workers if enabled (required for steering)
+	if (runtimeConfig.useSDKWorkers || process.env.PI_USE_SDK_WORKERS === "1") {
+		return spawnWorkerSDK(config, coordDir, cwd, storage, modelOverride, taskId);
+	}
+
+	// Existing subprocess implementation
 	const { agents } = discoverAgents(cwd, "user");
 	const targetAgent = agentName || "coordination/worker";
 	const workerAgent = agents.find(a => a.name === targetAgent) || agents.find(a => a.name === "worker");
 
-	const workerExtensionPath = path.join(__dirname, "..", "..", "..", "extensions", "coordination", "worker.ts");
+	const workerExtensionPath = path.join(__dirname, "..", "..", "worker.ts");
 
 	const { workerId, identity } = config;
 	const shortId = workerId.slice(0, 4);

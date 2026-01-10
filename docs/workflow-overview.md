@@ -939,6 +939,36 @@ coordDir/
 
 ---
 
+## SDK Worker Mode
+
+By default, workers run as subprocesses. SDK worker mode runs workers in-process using Pi's SDK.
+
+### Enable
+
+```json
+// runtime-config.json
+{ "useSDKWorkers": true }
+```
+
+Or: `PI_USE_SDK_WORKERS=1`
+
+### Benefits
+
+- **Steering** — Send messages to running workers via `[i]` in dashboard
+- **Direct abort** — Terminate workers immediately via `[x]` in dashboard
+- **No subprocess overhead** — Workers share coordinator process
+
+### Dashboard Controls
+
+| Mode | Controls |
+|------|----------|
+| Subprocess (default) | `[w]` wrap up, `[R]` restart, `[A]` abort |
+| SDK workers | `[i]` steer, `[x]` abort, `[w]` wrap up |
+
+**Note:** `[R]` and `[A]` disabled for SDK workers (would crash coordinator).
+
+---
+
 ## Environment Variables
 
 | Variable | Set By | Used By | Description |
@@ -949,6 +979,7 @@ coordDir/
 | `PI_TRACE_ID` | Coordinate tool | All | Observability trace ID |
 | `PI_FRESH_EYES_ENABLED` | Coordinate tool | Worker, Reviewer | Enable fresh eyes self-review (default: true) |
 | `PI_FRESH_EYES_MAX_CYCLES` | User | Worker, Reviewer | Max fresh eyes cycles (default: 2) |
+| `PI_USE_SDK_WORKERS` | User | Coordinator | Enable SDK worker mode (default: false) |
 
 ---
 

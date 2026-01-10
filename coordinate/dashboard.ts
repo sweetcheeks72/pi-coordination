@@ -1,9 +1,10 @@
 import * as fs from "node:fs";
 import * as path from "node:path";
 import type { Component } from "@mariozechner/pi-tui";
-import { matchesKey, truncateToWidth, visibleWidth } from "@mariozechner/pi-tui";
+import { Input, matchesKey, truncateToWidth, visibleWidth } from "@mariozechner/pi-tui";
 import type { Theme } from "@mariozechner/pi-coding-agent";
 import { sendNudge } from "./nudge.js";
+import { getControls, hasControls, hasSteer, getSteer, getAbort } from "./worker-control-registry.js";
 import type {
 	WorkerStateFile,
 	CoordinationEvent,
@@ -139,6 +140,11 @@ export class CoordinationDashboard implements Component {
 	private state: DashboardState | null = null;
 	private lastPollError: string | null = null;
 
+	private inputMode = false;
+	private steerInput: Input;
+	private steerStatus: string | null = null; // "[sent ✓]" or "[error: ...]"
+	private steerStatusTimeout: NodeJS.Timeout | null = null;
+
 	constructor(
 		tui: { requestRender: () => void },
 		coordDir: string,
@@ -149,6 +155,12 @@ export class CoordinationDashboard implements Component {
 		this.coordDir = coordDir;
 		this.theme = theme;
 		this.onDone = onDone;
+		this.steerInput = new Input();
+		this.steerInput.onSubmit = (value) => this.handleSteerSubmit(value);
+		this.steerInput.onEscape = () => {
+			this.inputMode = false;
+			this.tui.requestRender();
+		};
 		this.poll();
 		this.startPolling();
 	}
@@ -160,16 +172,57 @@ export class CoordinationDashboard implements Component {
 	}
 
 	handleInput(data: string): void {
+		// Clear input mode if worker is no longer steering-capable
+		if (this.inputMode) {
+			const w = this.state?.workers[this.selectedWorkerIndex];
+			if (!w || w.status !== "working" || !hasSteer(w.id)) {
+				this.inputMode = false;
+				this.showSteerStatus("[worker no longer available]");
+				return; // Don't process keystroke as command
+			}
+		}
+
+		if (this.overlay === "worker" && this.inputMode) {
+			// Delegate to Input component (handles escape internally)
+			this.steerInput.handleInput(data);
+			this.tui.requestRender();
+			return;
+		}
+
 		if (this.overlay) {
 			if (matchesKey(data, "escape")) {
 				this.overlay = null;
+				this.inputMode = false;
+				this.steerStatus = null;
 				this.tui.requestRender();
 				return;
 			}
 			if (this.overlay === "worker") {
+				const w = this.state?.workers[this.selectedWorkerIndex];
+
+				// [i] - Enter input mode for steering
+				if (data === "i" && w && w.status === "working" && hasSteer(w.id)) {
+					this.inputMode = true;
+					this.steerInput.setValue("");
+					this.tui.requestRender();
+					return;
+				}
+
+				// [x] - Abort session (via SDK session.abort)
+				if (data === "x" && w && w.status === "working") {
+					const abort = getAbort(w.id);
+					if (abort) {
+						abort();
+						this.showSteerStatus("[abort signal sent]");
+					}
+					return;
+				}
+
 				if (data === "w") this.wrapUpWorker();
-				if (data === "R") this.restartWorker();
-				if (data === "A") this.abortWorker();
+				// [R]estart and [A]bort use nudges which call process.exit() - unsafe for SDK workers
+				const isSDKWorker = w && hasControls(w.id);
+				if (data === "R" && !isSDKWorker) this.restartWorker();
+				if (data === "A" && !isSDKWorker) this.abortWorker();
 			}
 			return;
 		}
@@ -192,10 +245,15 @@ export class CoordinationDashboard implements Component {
 			}
 		} else if (data === "w") {
 			this.wrapUpWorker();
-		} else if (data === "R") {
-			this.restartWorker();
-		} else if (data === "A") {
-			this.abortWorker();
+		} else if (data === "R" || data === "A") {
+			// [R]estart and [A]bort use nudges which call process.exit()
+			// Only safe for subprocess workers, not SDK workers
+			const w = this.state?.workers[this.selectedWorkerIndex];
+			const isSDKWorker = w && hasControls(w.id);
+			if (!isSDKWorker) {
+				if (data === "R") this.restartWorker();
+				if (data === "A") this.abortWorker();
+			}
 		} else if (data === "r") {
 			this.poll();
 			this.tui.requestRender();
@@ -213,6 +271,10 @@ export class CoordinationDashboard implements Component {
 	dispose(): void {
 		this.disposed = true;
 		this.stopPolling();
+		if (this.steerStatusTimeout) {
+			clearTimeout(this.steerStatusTimeout);
+			this.steerStatusTimeout = null;
+		}
 	}
 
 	private renderMainDashboard(width: number): string[] {
@@ -714,9 +776,44 @@ export class CoordinationDashboard implements Component {
 			addLine(`  ${w.errorMessage}`);
 		}
 
+		// Control section
+		if (w.status === "working") {
+			addLine("");
+			const controls = getControls(w.id);
+			if (this.inputMode) {
+				addLine(th.fg("accent", "Send message:"));
+				const inputLines = this.steerInput.render(innerWidth - 6);
+				for (const line of inputLines) {
+					addLine(`  ${line}`);
+				}
+			} else if (this.steerStatus) {
+				addLine(th.fg("dim", `Status: ${this.steerStatus}`));
+			} else if (controls) {
+				// SDK mode - show available controls
+				const available: string[] = [];
+				if (controls.steer) available.push("[i] steer");
+				if (controls.abort) available.push("[x] abort");
+				addLine(th.fg("dim", `Controls: ${available.join("  ")}`));
+			} else {
+				addLine(th.fg("dim", "Controls: not available (subprocess mode)"));
+			}
+		}
+
 		lines.push(this.renderBorder("bottom", innerWidth, ""));
 
-		const help = `${th.fg("accent", "[Esc]")} close  ${th.fg("accent", "[w]")}rap up  ${th.fg("accent", "[R]")}estart  ${th.fg("accent", "[A]")}bort`;
+		// Update help line to include SDK controls when available
+		// For SDK workers, hide [R]estart and [A]bort since those use process.exit()
+		// which would crash the entire process (coordinator + all workers)
+		const controls = w.status === "working" ? getControls(w.id) : null;
+		const isSDKWorker = !!controls;
+		let helpParts = [`${th.fg("accent", "[Esc]")} close`];
+		if (controls?.steer) helpParts.push(`${th.fg("accent", "[i]")} steer`);
+		if (controls?.abort) helpParts.push(`${th.fg("accent", "[x]")} abort`);
+		helpParts.push(`${th.fg("accent", "[w]")}rap up`);
+		if (!isSDKWorker) {
+			helpParts.push(`${th.fg("accent", "[R]")}estart`, `${th.fg("accent", "[A]")}bort`);
+		}
+		const help = helpParts.join("  ");
 		const centered = " ".repeat(Math.max(0, Math.floor((width - visibleWidth(help)) / 2))) + help;
 		lines.push(centered);
 
@@ -951,6 +1048,49 @@ export class CoordinationDashboard implements Component {
 			this.lastPollError = `Failed to send abort: ${err instanceof Error ? err.message : String(err)}`;
 		}
 		if (!this.disposed) this.tui.requestRender();
+	}
+
+	private async handleSteerSubmit(value: string): Promise<void> {
+		if (!value.trim()) {
+			this.inputMode = false;
+			this.tui.requestRender();
+			return;
+		}
+
+		const w = this.state?.workers[this.selectedWorkerIndex];
+		if (!w) {
+			this.inputMode = false;
+			this.tui.requestRender();
+			return;
+		}
+
+		const steer = getSteer(w.id);
+		if (!steer) {
+			this.showSteerStatus("[steering not available]");
+			this.inputMode = false;
+			this.tui.requestRender();
+			return;
+		}
+
+		try {
+			await steer(value);
+			this.showSteerStatus("[sent ✓]");
+		} catch (err) {
+			this.showSteerStatus(`[error: ${err instanceof Error ? err.message : "unknown"}]`);
+		}
+
+		this.inputMode = false;
+		this.tui.requestRender();
+	}
+
+	private showSteerStatus(status: string): void {
+		this.steerStatus = status;
+		if (this.steerStatusTimeout) clearTimeout(this.steerStatusTimeout);
+		this.steerStatusTimeout = setTimeout(() => {
+			this.steerStatus = null;
+			this.tui.requestRender();
+		}, 3000);
+		this.tui.requestRender();
 	}
 }
 

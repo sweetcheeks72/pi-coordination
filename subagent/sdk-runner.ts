@@ -57,6 +57,21 @@ function extractToolArgsPreview(args: Record<string, unknown>): string | null {
 	return null;
 }
 
+/** Progress data emitted during execution */
+export interface SDKProgress {
+	toolCount: number;
+	tokens: number;
+	durationMs: number;
+	currentTool?: string;
+	currentToolArgs?: string;
+	recentTools: Array<{ tool: string; args: string; endMs: number }>;
+	lastOutput?: string;
+	usage: { input: number; output: number; cacheRead: number; cacheWrite: number; cost: number; turns: number };
+}
+
+/** Extension factory type for inline extensions */
+type ExtensionFactoryType = (pi: import("@mariozechner/pi-coding-agent").ExtensionAPI) => void | Promise<void>;
+
 export interface SDKRunnerConfig {
 	/** Working directory for the agent */
 	cwd: string;
@@ -80,8 +95,17 @@ export interface SDKRunnerConfig {
 	step?: number;
 	/** Additional extension paths to load */
 	extensions?: string[];
+	/** Inline extension factories (passed directly, no file loading) */
+	inlineExtensions?: ExtensionFactoryType[];
 	/** Custom tools to register (for coordinator) */
 	customTools?: ToolDefinitionType[];
+	/** Called when session is ready, providing the steer function. */
+	onSessionReady?: (steer: (message: string) => Promise<void>) => void;
+	/** Called when session is ready, providing the session abort function.
+	 *  Note: This aborts the entire session, not just the current tool. */
+	onInterruptReady?: (abort: () => Promise<void>) => void;
+	/** Called on progress updates (tool events, messages). */
+	onProgress?: (progress: SDKProgress) => void;
 }
 
 /**
@@ -107,7 +131,11 @@ export async function runAgentSDK(config: SDKRunnerConfig): Promise<SingleResult
 		artifactLabel,
 		step,
 		extensions,
+		inlineExtensions,
 		customTools,
+		onSessionReady,
+		onInterruptReady,
+		onProgress,
 	} = config;
 
 	// Ensure SDK is available
@@ -234,6 +262,8 @@ export async function runAgentSDK(config: SDKRunnerConfig): Promise<SingleResult
 			...(builtinTools.length > 0 ? { tools: await resolveBuiltinTools(builtinTools, cwd) } : {}),
 			// Extension paths (skip discovery if explicitly configured)
 			...(extensionPaths.length > 0 ? { additionalExtensionPaths: extensionPaths } : {}),
+			// Inline extension factories (passed directly, no file loading)
+			...(inlineExtensions && inlineExtensions.length > 0 ? { extensions: inlineExtensions } : {}),
 			// Skills configuration (undefined = discover, [] = skip)
 			...(skills !== undefined ? { skills: skills } : {}),
 			// Context files configuration (undefined = discover, [] = skip)
@@ -243,6 +273,16 @@ export async function runAgentSDK(config: SDKRunnerConfig): Promise<SingleResult
 		};
 
 		const { session } = await createAgentSession(sessionOptions);
+
+		// Expose steer function for external steering
+		if (onSessionReady) {
+			onSessionReady(session.steer.bind(session));
+		}
+
+		// Expose abort function for terminating the session
+		if (onInterruptReady) {
+			onInterruptReady(session.abort.bind(session));
+		}
 
 		// Subscribe to events for progress tracking
 		const unsubscribe = session.subscribe((event) => {
@@ -257,6 +297,23 @@ export async function runAgentSDK(config: SDKRunnerConfig): Promise<SingleResult
 					currentResult.currentTool = event.toolName;
 					currentResult.currentToolArgs = extractToolArgsPreview(event.args || {}) || undefined;
 					emitUpdate();
+					onProgress?.({
+						toolCount: currentResult.toolCount ?? 0,
+						tokens: currentResult.tokens ?? 0,
+						durationMs: Date.now() - startTime,
+						currentTool: currentResult.currentTool,
+						currentToolArgs: currentResult.currentToolArgs,
+						recentTools: currentResult.recentTools ?? [],
+						lastOutput: currentResult.output,
+						usage: {
+							input: currentResult.usage.input,
+							output: currentResult.usage.output,
+							cacheRead: currentResult.usage.cacheRead,
+							cacheWrite: currentResult.usage.cacheWrite,
+							cost: currentResult.usage.cost,
+							turns: currentResult.usage.turns,
+						},
+					});
 					break;
 
 				case "tool_execution_end":
@@ -273,6 +330,23 @@ export async function runAgentSDK(config: SDKRunnerConfig): Promise<SingleResult
 					currentResult.currentTool = undefined;
 					currentResult.currentToolArgs = undefined;
 					emitUpdate();
+					onProgress?.({
+						toolCount: currentResult.toolCount ?? 0,
+						tokens: currentResult.tokens ?? 0,
+						durationMs: Date.now() - startTime,
+						currentTool: currentResult.currentTool,
+						currentToolArgs: currentResult.currentToolArgs,
+						recentTools: currentResult.recentTools ?? [],
+						lastOutput: currentResult.output,
+						usage: {
+							input: currentResult.usage.input,
+							output: currentResult.usage.output,
+							cacheRead: currentResult.usage.cacheRead,
+							cacheWrite: currentResult.usage.cacheWrite,
+							cost: currentResult.usage.cost,
+							turns: currentResult.usage.turns,
+						},
+					});
 					break;
 
 				case "message_update":
@@ -289,6 +363,23 @@ export async function runAgentSDK(config: SDKRunnerConfig): Promise<SingleResult
 							const tail = lines.slice(-8);
 							currentResult.output = tail.join("\n");
 							emitUpdate();
+							onProgress?.({
+								toolCount: currentResult.toolCount ?? 0,
+								tokens: currentResult.tokens ?? 0,
+								durationMs: Date.now() - startTime,
+								currentTool: currentResult.currentTool,
+								currentToolArgs: currentResult.currentToolArgs,
+								recentTools: currentResult.recentTools ?? [],
+								lastOutput: currentResult.output,
+								usage: {
+									input: currentResult.usage.input,
+									output: currentResult.usage.output,
+									cacheRead: currentResult.usage.cacheRead,
+									cacheWrite: currentResult.usage.cacheWrite,
+									cost: currentResult.usage.cost,
+									turns: currentResult.usage.turns,
+								},
+							});
 						}
 					}
 					break;
@@ -325,6 +416,23 @@ export async function runAgentSDK(config: SDKRunnerConfig): Promise<SingleResult
 						}
 					}
 					emitUpdate(true);
+					onProgress?.({
+						toolCount: currentResult.toolCount ?? 0,
+						tokens: currentResult.tokens ?? 0,
+						durationMs: Date.now() - startTime,
+						currentTool: currentResult.currentTool,
+						currentToolArgs: currentResult.currentToolArgs,
+						recentTools: currentResult.recentTools ?? [],
+						lastOutput: currentResult.output,
+						usage: {
+							input: currentResult.usage.input,
+							output: currentResult.usage.output,
+							cacheRead: currentResult.usage.cacheRead,
+							cacheWrite: currentResult.usage.cacheWrite,
+							cost: currentResult.usage.cost,
+							turns: currentResult.usage.turns,
+						},
+					});
 					break;
 			}
 		});

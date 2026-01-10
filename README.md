@@ -132,6 +132,19 @@ Use `false` to disable features:
 }
 ```
 
+**Runtime configuration** (per-coordination session) can be set in `runtime-config.json` in the coordination directory:
+
+```json
+{
+  "useSDKWorkers": true,
+  "models": {
+    "worker": "claude-sonnet-4-20250514"
+  }
+}
+```
+
+Or via environment variable: `PI_USE_SDK_WORKERS=1`
+
 Options passed to `coordinate()` override settings, which override built-in defaults.
 
 ## Usage
@@ -713,6 +726,35 @@ Configure via `supervisor: { nudgeThresholdMs, restartThresholdMs, maxRestarts, 
 | `checkIntervalMs` | 30000 | How often to check workers |
 | `dynamicSpawnTimeoutMs` | 30000 | Exit spawning loop after this with no progress |
 | `staleTaskTimeoutMs` | 1800000 | Release claimed tasks with no worker after this |
+
+## SDK Worker Mode
+
+By default, workers run as subprocesses (separate `pi` processes). SDK worker mode runs workers in-process using the Pi SDK's `createAgentSession()` API.
+
+**Enable SDK workers:**
+```json
+// runtime-config.json in coordination directory
+{ "useSDKWorkers": true }
+```
+
+Or via environment: `PI_USE_SDK_WORKERS=1`
+
+**Benefits:**
+- **Worker steering** — Send messages to running workers via dashboard `[i]` control
+- **Direct abort** — Terminate workers immediately via dashboard `[x]` control
+- **No subprocess overhead** — Workers share the coordinator's process
+
+**Dashboard controls for SDK workers:**
+
+| Key | Action | Description |
+|-----|--------|-------------|
+| `[i]` | Steer | Send a message to the worker (opens input) |
+| `[x]` | Abort | Terminate the worker session immediately |
+| `[w]` | Wrap up | Send wrap_up nudge (same as subprocess) |
+
+**Note:** `[R]estart` and `[A]bort` are disabled for SDK workers because they use `process.exit()` which would crash the entire coordinator process. Use `[x]` abort instead.
+
+**Subprocess workers** (default) still support `[w]rap up`, `[R]estart`, and `[A]bort` via the nudge system.
 
 ## Observability
 

@@ -140,14 +140,22 @@ Take your time - this self-review catches many bugs before the formal review pha
 // Max fresh eyes cycles to prevent infinite loops (default: 2)
 const MAX_FRESH_EYES_CYCLES = parseInt(process.env.PI_FRESH_EYES_MAX_CYCLES || "2", 10);
 
-export function registerWorkerTools(pi: ExtensionAPI): void {
-	const coordDir = process.env.PI_COORDINATION_DIR;
-	const identity = process.env.PI_AGENT_IDENTITY;
-	const workerId = process.env.PI_WORKER_ID;
+/** Optional context for SDK workers (avoids env var race conditions) */
+export interface WorkerToolsContext {
+	coordDir: string;
+	workerId: string;
+	identity: string;
+}
+
+export function registerWorkerTools(pi: ExtensionAPI, ctx?: WorkerToolsContext): void {
+	// Use provided context or fall back to env vars (for subprocess workers)
+	const coordDir = ctx?.coordDir ?? process.env.PI_COORDINATION_DIR;
+	const identity = ctx?.identity ?? process.env.PI_AGENT_IDENTITY;
+	const workerId = ctx?.workerId ?? process.env.PI_WORKER_ID;
 	const freshEyesEnabled = process.env.PI_FRESH_EYES_ENABLED !== "false"; // Enabled by default
 
 	if (!coordDir || !identity || !workerId) {
-		throw new Error("Worker tools require PI_COORDINATION_DIR, PI_AGENT_IDENTITY, and PI_WORKER_ID environment variables");
+		throw new Error("Worker tools require context or PI_COORDINATION_DIR, PI_AGENT_IDENTITY, and PI_WORKER_ID environment variables");
 	}
 
 	const storage = new FileBasedStorage(coordDir);
