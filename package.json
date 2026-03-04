@@ -1,0 +1,16 @@
+{
+  "name": "pi-coordination",
+  "version": "1.0.0",
+  "description": "Multi-agent coordination for parallel plan execution with coordinate and plan tools",
+  "keywords": [
+    "pi-package"
+  ],
+  "pi": {
+    "extensions": [
+      "./index.ts"
+    ],
+    "skills": [
+      "./skills/coordination/SKILL.md"
+    ]
+  }
+}
