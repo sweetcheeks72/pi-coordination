@@ -147,7 +147,7 @@ export function createCoordOutputTool(): ToolDefinition<typeof OutputParams, Out
 		label: "CoordOutput",
 		description: "Read full worker output by ID from a coordination session.",
 		parameters: OutputParams,
-		async execute(_toolCallId, params, _onUpdate, _ctx: ExtensionContext) {
+		async execute(_toolCallId, params, _signal, _onUpdate, _ctx: ExtensionContext) {
 			const typed = params as OutputParamsType;
 			const coordDir = resolveCoordDir(typed.coordDir);
 			if (!coordDir) {

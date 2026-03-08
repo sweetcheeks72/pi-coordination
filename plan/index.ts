@@ -345,7 +345,7 @@ export function createPlanTool(events: EventBus): ToolDefinition<typeof PlanPara
 			"Create a structured spec from prose, idea, or PRD. Conducts an interview, analyzes the codebase, and produces a TASK-XX format spec ready for coordinate tool.",
 		parameters: PlanParams,
 
-		async execute(_toolCallId, params, onUpdate, ctx, signal) {
+		async execute(_toolCallId, params, signal, onUpdate, ctx) {
 			const result = await runPlan(
 				{ cwd: ctx.cwd, events },
 				{

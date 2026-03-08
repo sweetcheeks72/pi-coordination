@@ -1248,7 +1248,7 @@ export function createCoordinateTool(events: EventBus): ToolDefinition<typeof Co
 			"Start multi-agent coordination session. Pass any markdown file (spec, PRD, plan) directly - the planner decomposes it into parallel tasks. Don't rewrite or convert the file first. Saves a markdown log to the project directory (configurable via logPath parameter or PI_COORDINATION_LOG_DIR env var).",
 		parameters: CoordinateParams,
 
-		async execute(_toolCallId, params, onUpdate, ctx, signal) {
+		async execute(_toolCallId, params, signal, onUpdate, ctx) {
 			const typedParams = params as CoordinateParamsType;
 			const resultsDir = resolveAsyncResultsDir(ctx.cwd, typedParams.asyncResultsDir);
 
