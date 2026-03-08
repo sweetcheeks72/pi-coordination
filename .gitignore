@@ -2,3 +2,5 @@ node_modules/
 .DS_Store
 *.bak
 tests/output/
+context.md
+tests/.test-notes.md
