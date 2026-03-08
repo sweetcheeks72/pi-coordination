@@ -189,7 +189,7 @@ export function registerWorkerTools(pi: ExtensionAPI, ctx?: WorkerToolsContext):
 				defaultOption: Type.Optional(Type.Number({ description: "Default option index if timeout" })),
 				since: Type.Optional(Type.Number({ description: "Only messages since timestamp (action: 'inbox')" })),
 			}),
-			async execute(_toolCallId, params, _onUpdate, ctx) {
+			async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
 				const obs = getObs(ctx);
 
 				// Inbox action
@@ -382,7 +382,7 @@ export function registerWorkerTools(pi: ExtensionAPI, ctx?: WorkerToolsContext):
 				file: Type.Optional(Type.String({ description: "File where defined (for provide)" })),
 				timeout: Type.Optional(Type.Number({ description: "Timeout seconds (default: 300, for need)" })),
 			}),
-			async execute(_toolCallId, params, _onUpdate, ctx) {
+			async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
 				const obs = getObs(ctx);
 
 				if (params.action === "provide") {
@@ -575,7 +575,7 @@ export function registerWorkerTools(pi: ExtensionAPI, ctx?: WorkerToolsContext):
 				reason: Type.Optional(Type.String({ description: "Why this task is needed (for add/deviation)" })),
 				affectsOthers: Type.Optional(Type.Boolean({ description: "Could this affect other workers? (for deviation)" })),
 			}),
-			async execute(_toolCallId, params, _onUpdate, ctx) {
+			async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
 				const obs = getObs(ctx);
 
 				// Complete task
@@ -787,7 +787,7 @@ export function registerWorkerTools(pi: ExtensionAPI, ctx?: WorkerToolsContext):
 				reason: Type.Optional(Type.String({ description: "Why you need these files" })),
 				path: Type.Optional(Type.String({ description: "Specific file path to check" })),
 			}),
-			async execute(_toolCallId, params, _onUpdate, ctx) {
+			async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
 				const obs = getObs(ctx);
 
 				// Acquire reservation

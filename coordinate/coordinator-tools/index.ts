@@ -520,7 +520,7 @@ export function createCoordinatorTools(): ToolDefinition[] {
 				workers: Type.Array(WorkerSpec, { description: "Worker specifications" }),
 				includePlan: Type.Optional(Type.Boolean({ description: "Include full plan in worker context (default: true)" })),
 			}),
-			async execute(_toolCallId, params, _onUpdate, ctx) {
+			async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
 				const obs = getObs(ctx);
 				const state = await storage.getState();
 				let planContent = "";
@@ -703,7 +703,7 @@ ${planContent ? `## Full Plan\n\`\`\`markdown\n${planContent}\n\`\`\`` : ""}
 				workerLogicalName: Type.String({ description: "Logical worker name (e.g., 'worker-A')" }),
 				files: Type.Array(Type.String(), { description: "Files this worker will own" }),
 			}),
-			async execute(_toolCallId, params, _onUpdate, ctx) {
+			async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
 				const obs = getObs(ctx);
 				const reservationId = randomUUID();
 				const preAssignIdentity = `pre:${params.workerLogicalName}`;
@@ -776,7 +776,7 @@ ${planContent ? `## Full Plan\n\`\`\`markdown\n${planContent}\n\`\`\`` : ""}
 				affectedWorkers: Type.Array(Type.String(), { description: "Worker identities to notify" }),
 				adaptationHint: Type.Optional(Type.String({ description: "How workers should adapt" })),
 			}),
-			async execute(_toolCallId, params, _onUpdate, ctx) {
+			async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
 				const obs = getObs(ctx);
 				for (const worker of params.affectedWorkers) {
 					await storage.sendMessage({
@@ -812,7 +812,7 @@ ${planContent ? `## Full Plan\n\`\`\`markdown\n${planContent}\n\`\`\`` : ""}
 			label: "Check Status",
 			description: "Get current status of all workers, contracts, and reservations",
 			parameters: Type.Object({}),
-			async execute(_toolCallId, _params, _onUpdate, _ctx) {
+			async execute(_toolCallId, _params, _signal, _onUpdate, _ctx) {
 				const state = await storage.getState();
 				const workerStates = await storage.listWorkerStates();
 				const messages = await storage.getMessages({ since: Date.now() - 60000 });
@@ -856,7 +856,7 @@ ${planContent ? `## Full Plan\n\`\`\`markdown\n${planContent}\n\`\`\`` : ""}
 			parameters: Type.Object({
 				message: Type.String({ description: "Message content" }),
 			}),
-			async execute(_toolCallId, params, _onUpdate, _ctx) {
+			async execute(_toolCallId, params, _signal, _onUpdate, _ctx) {
 				await storage.sendMessage({
 					id: randomUUID(),
 					from: identity,
@@ -889,7 +889,7 @@ ${planContent ? `## Full Plan\n\`\`\`markdown\n${planContent}\n\`\`\`` : ""}
 				timeout: Type.Optional(Type.Number({ description: "Timeout in seconds (default: 60)" })),
 				defaultOption: Type.Optional(Type.Number({ description: "Index of default option (0-based)" })),
 			}),
-			async execute(_toolCallId, params, _onUpdate, ctx) {
+			async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
 				const obs = getObs(ctx);
 				const id = randomUUID();
 				const timeout = params.timeout || 60;
@@ -964,7 +964,7 @@ ${planContent ? `## Full Plan\n\`\`\`markdown\n${planContent}\n\`\`\`` : ""}
 				waiters: Type.Array(Type.String(), { description: "Worker identities waiting for this" }),
 				signature: Type.Optional(Type.String({ description: "Expected signature" })),
 			}),
-			async execute(_toolCallId, params, _onUpdate, ctx) {
+			async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
 				const obs = getObs(ctx);
 				const contractId = randomUUID();
 				const contract = {
@@ -1004,7 +1004,7 @@ ${planContent ? `## Full Plan\n\`\`\`markdown\n${planContent}\n\`\`\`` : ""}
 			parameters: Type.Object({
 				content: Type.String({ description: "Markdown content for PROGRESS.md" }),
 			}),
-			async execute(_toolCallId, params, _onUpdate, _ctx) {
+			async execute(_toolCallId, params, _signal, _onUpdate, _ctx) {
 				await storage.updateProgress(params.content);
 				return {
 					content: [{ type: "text", text: "PROGRESS.md updated" }],
@@ -1021,7 +1021,7 @@ ${planContent ? `## Full Plan\n\`\`\`markdown\n${planContent}\n\`\`\`` : ""}
 				filesModified: Type.Optional(Type.Array(Type.String(), { description: "List of modified files" })),
 				deviations: Type.Optional(Type.Array(Type.String(), { description: "Any deviations from original plan" })),
 			}),
-			async execute(_toolCallId, params, _onUpdate, _ctx) {
+			async execute(_toolCallId, params, _signal, _onUpdate, _ctx) {
 				const state = await storage.getState();
 				const workerStates = await storage.listWorkerStates();
 
@@ -1087,7 +1087,7 @@ ${planContent ? `## Full Plan\n\`\`\`markdown\n${planContent}\n\`\`\`` : ""}
 				agentName: Type.Optional(Type.String({ description: "Agent to use (default: coordination/worker)" })),
 				enableSupervisor: Type.Optional(Type.Boolean({ description: "Enable supervisor loop (default: true)" })),
 			}),
-			async execute(_toolCallId, params, _onUpdate, ctx) {
+			async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
 				const obs = getObs(ctx);
 				const { TaskQueueManager } = await import("../task-queue.js");
 				const { SupervisorLoop } = await import("../supervisor.js");
@@ -1463,7 +1463,7 @@ ${planContent ? `### Full Plan\n\`\`\`markdown\n${planContent}\n\`\`\`` : ""}
 			label: "Get Task Queue Status",
 			description: "Get the current status of all tasks in the queue",
 			parameters: Type.Object({}),
-			async execute(_toolCallId, _params, _onUpdate, _ctx) {
+			async execute(_toolCallId, _params, _signal, _onUpdate, _ctx) {
 				const { TaskQueueManager } = await import("../task-queue.js");
 				const taskQueue = new TaskQueueManager(coordDir);
 
