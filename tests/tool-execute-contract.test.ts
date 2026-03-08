@@ -44,7 +44,8 @@ const _typeCheck: CanonicalExecute extends (
  * 1. SOURCE INSPECTION (authoritative ORDER check):
  *    `getParamNames(fn)` extracts parameter names from `fn.toString()`. If you swap
  *    `_signal` and `_onUpdate`, the regex finds `onUpdate` at index 2 and `signal` at
- *    index 3 — both assertions fail immediately. This is mutation-proven non-vacuous.
+ *    index 3 — both assertions fail immediately. Mutation-proven non-vacuous: swapping
+ *    params in read-context/index.ts produces RED immediately (verified empirically).
  *
  * 2. RUNTIME BEHAVIORAL (slot confusion check):
  *    Passes an AbortSignal as arg[2] and a vi.fn() spy as arg[3]. If the tool tries to
@@ -72,11 +73,18 @@ const _typeCheck: CanonicalExecute extends (
  */
 function getParamNames(fn: Function): string[] {
 	const src = fn.toString();
-	// Match: async execute(_toolCallId, params, signal, onUpdate, ctx)
-	// or:    execute(_toolCallId, params, _signal, _onUpdate, _ctx)
-	const match = src.match(/(?:async\s+)?execute\s*\(\s*([^)]*)\)/);
+	// Case 1: method shorthand: async execute(a, b) { ... }
+	let match = src.match(/(?:async\s+)?execute\s*\(\s*([^)]*)\)/);
+	// Case 2: arrow function: async (a, b) => { ... }
+	if (!match) match = src.match(/^async\s*\(\s*([^)]*)\)/);
+	// Case 3: first paren group (last resort)
+	if (!match) match = src.match(/\(\s*([^)]*)\)/);
 	if (!match) return [];
-	return match[1].split(",").map((p) => p.trim().split(/\s+/).pop()!.replace(/^_+/, ""));
+	return match[1]
+		.split(",")
+		.map((p) => p.trim())
+		.filter(Boolean)
+		.map((p) => p.split(/\s+/).pop()!.replace(/^_+/, ""));
 }
 
 // Helper: create a minimal mock ExtensionContext
@@ -562,5 +570,6 @@ describe("Tool execute signature contract", () => {
 				).toMatch(/^onUpdate$/i);
 			}
 		});
+
 	});
 });
