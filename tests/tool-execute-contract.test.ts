@@ -20,6 +20,7 @@ import { createCoordinatorTools } from "../coordinate/coordinator-tools/index.js
 import { registerWorkerTools } from "../coordinate/worker-tools/index.js";
 import { createPlanTool } from "../plan/index.js";
 import { createCoordinateTool } from "../coordinate/index.js";
+import { createBundleTools } from "../bundle-files/index.js";
 import { createEventBus } from "@mariozechner/pi-coding-agent";
 import type { ToolDefinition } from "@mariozechner/pi-coding-agent";
 
@@ -73,18 +74,16 @@ const _typeCheck: CanonicalExecute extends (
  */
 function getParamNames(fn: Function): string[] {
 	const src = fn.toString();
-	// Case 1: method shorthand: async execute(a, b) { ... }
-	let match = src.match(/(?:async\s+)?execute\s*\(\s*([^)]*)\)/);
-	// Case 2: arrow function: async (a, b) => { ... }
-	if (!match) match = src.match(/^async\s*\(\s*([^)]*)\)/);
-	// Case 3: first paren group (last resort)
-	if (!match) match = src.match(/\(\s*([^)]*)\)/);
+	// Phase 1: method shorthand — async execute(a, b, c) { ... }
+	// Uses [\s\S]*? to handle multi-line signatures with TypeScript type annotations
+	let match = src.match(/(?:async\s+)?execute\s*\(\s*([\s\S]*?)\s*\)/);
+	// Phase 2: arrow function — fn.toString() of an arrow gives "async (a, b) => {}" — no method name
+	if (!match) match = src.match(/^async\s*\(\s*([\s\S]*?)\s*\)/);
 	if (!match) return [];
 	return match[1]
 		.split(",")
-		.map((p) => p.trim())
-		.filter(Boolean)
-		.map((p) => p.split(/\s+/).pop()!.replace(/^_+/, ""));
+		.map((p) => p.trim().split(/\s+/).pop()!.replace(/^_+/, ""))
+		.filter(Boolean);
 }
 
 // Helper: create a minimal mock ExtensionContext
@@ -567,6 +566,25 @@ describe("Tool execute signature contract", () => {
 				expect(
 					names[3],
 					`worker tool '${tool.name}' has wrong param at [3]: expected 'onUpdate', got '${names[3]}'`
+				).toMatch(/^onUpdate$/i);
+			}
+		});
+
+		it("bundle-files tools: every tool has signal at [2] and onUpdate at [3]", () => {
+			// bundle-files uses arrow function syntax: execute: async (_toolCallId, params, _signal, _onUpdate, _ctx) => {
+			// fn.toString() returns "async (_toolCallId, params, _signal, _onUpdate, _ctx) => { ... }"
+			// The Phase 2 regex (^async\s*\() must match this correctly.
+			const tools = createBundleTools("/tmp");
+			expect(tools.length).toBeGreaterThan(0);
+			for (const tool of tools) {
+				const names = getParamNames(tool.execute);
+				expect(
+					names[2],
+					`bundle-files tool '${tool.name}' has wrong param at [2]: expected 'signal', got '${names[2]}'`
+				).toMatch(/^signal$/i);
+				expect(
+					names[3],
+					`bundle-files tool '${tool.name}' has wrong param at [3]: expected 'onUpdate', got '${names[3]}'`
 				).toMatch(/^onUpdate$/i);
 			}
 		});
