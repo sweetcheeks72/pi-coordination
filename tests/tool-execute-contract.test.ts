@@ -39,15 +39,45 @@ const _typeCheck: CanonicalExecute extends (
  * Contract tests: verify pi-coordination tools match Pi Core's ToolDefinition
  * execute signature: (toolCallId, params, signal, onUpdate, ctx)
  *
- * These tests MUST FAIL if parameter order is wrong.
- * Non-vacuity proof: if you swap signal/onUpdate in any tool, the spy assertions
- * fail because the tool receives an AbortSignal where it expects a callback.
+ * TWO LEVELS OF NON-VACUOUS VERIFICATION:
+ *
+ * 1. SOURCE INSPECTION (authoritative ORDER check):
+ *    `getParamNames(fn)` extracts parameter names from `fn.toString()`. If you swap
+ *    `_signal` and `_onUpdate`, the regex finds `onUpdate` at index 2 and `signal` at
+ *    index 3 — both assertions fail immediately. This is mutation-proven non-vacuous.
+ *
+ * 2. RUNTIME BEHAVIORAL (slot confusion check):
+ *    Passes an AbortSignal as arg[2] and a vi.fn() spy as arg[3]. If the tool tries to
+ *    call `onUpdate()` but receives an AbortSignal in that slot, it throws
+ *    "is not a function". These tests confirm no "is not a function" errors.
+ *    NOTE: tools with `_signal, _onUpdate` (unused) may not trigger slot confusion at
+ *    runtime — source inspection is the authoritative check for those tools.
  *
  * NOTE: coordinate/coordinator-tools/sdk-tools.ts (8 tools) is intentionally not tested here.
  * SDK tools require a different integration test environment (real coordination state, network).
  * The parameter order fix was applied there (commit 04d0407) but behavioral coverage
  * requires dedicated SDK integration tests.
  */
+
+/**
+ * Extract parameter names from an execute function's source.
+ * Strips leading underscores (TypeScript convention for unused params).
+ *
+ * Examples:
+ *   execute(_toolCallId, params, _signal, _onUpdate, ctx) → ['toolCallId', 'params', 'signal', 'onUpdate', 'ctx']
+ *   execute(_toolCallId, params, signal, onUpdate, ctx)   → ['toolCallId', 'params', 'signal', 'onUpdate', 'ctx']
+ *
+ * If someone swaps `_signal, _onUpdate` to `_onUpdate, _signal`:
+ *   names[2] === 'onUpdate' → fails /^signal$/i  ← mutation caught!
+ */
+function getParamNames(fn: Function): string[] {
+	const src = fn.toString();
+	// Match: async execute(_toolCallId, params, signal, onUpdate, ctx)
+	// or:    execute(_toolCallId, params, _signal, _onUpdate, _ctx)
+	const match = src.match(/(?:async\s+)?execute\s*\(\s*([^)]*)\)/);
+	if (!match) return [];
+	return match[1].split(",").map((p) => p.trim().split(/\s+/).pop()!.replace(/^_+/, ""));
+}
 
 // Helper: create a minimal mock ExtensionContext
 function mockCtx(cwd = "/tmp") {
@@ -76,9 +106,7 @@ describe("Tool execute signature contract", () => {
 				// File-not-found is expected — but we must NOT get "is not a function" errors
 				// which would indicate the AbortSignal landed in the onUpdate slot.
 				const msg = String(err);
-				expect(msg).not.toContain("is not a function");
-				expect(msg).not.toContain("onUpdate is not a function");
-				expect(msg).not.toContain("signal.abort is not a function");
+				expect(msg).not.toMatch(/is not a function/i);
 			}
 
 			// onUpdate must NOT have been called with an AbortSignal (that would mean
@@ -123,7 +151,7 @@ describe("Tool execute signature contract", () => {
 				threw = true;
 				const msg = String(err);
 				// Must NOT be a slot confusion error
-				expect(msg).not.toContain("is not a function");
+				expect(msg).not.toMatch(/is not a function/i);
 				expect(msg).not.toMatch(/cannot read prop.*abort/i);
 			}
 			// Either returned cleanly or threw for the right reasons (file not found, etc.)
@@ -142,8 +170,7 @@ describe("Tool execute signature contract", () => {
 				await (tool.execute as any)("id", { ids: ["nonexistent-worker-id"] }, signal, onUpdate, ctx);
 			} catch (err) {
 				const msg = String(err);
-				expect(msg).not.toContain("is not a function");
-				expect(msg).not.toContain("onUpdate is not a function");
+				expect(msg).not.toMatch(/is not a function/i);
 			}
 
 			// onUpdate should not have been invoked with an AbortSignal
@@ -167,7 +194,7 @@ describe("Tool execute signature contract", () => {
 				await (tool.execute as any)("id", { ids: ["nonexistent-worker-id"] }, ac.signal, onUpdate, ctx);
 			} catch (err) {
 				const msg = String(err);
-				expect(msg).not.toContain("is not a function");
+				expect(msg).not.toMatch(/is not a function/i);
 				expect(msg).not.toMatch(/cannot read prop.*abort/i);
 			}
 		});
@@ -204,6 +231,8 @@ describe("Tool execute signature contract", () => {
 		});
 
 		it("all coordinator tools have correct arity (≥ 5 params)", () => {
+			// NOTE: arity (execute.length) proves param COUNT, not ORDER.
+			// For ORDER verification, see the "execute parameter ORDER — source inspection" suite below.
 			// Coordinator tools must have all 5 slots: (toolCallId, params, signal, onUpdate, ctx).
 			// >= 2 would pass even badly regressed implementations.
 			const tools = createCoordinatorTools();
@@ -242,8 +271,7 @@ describe("Tool execute signature contract", () => {
 				} catch (err) {
 					const msg = String(err);
 					// "is not a function" indicates wrong slot — signal ended up as onUpdate
-					expect(msg).not.toContain("onUpdate is not a function");
-					expect(msg).not.toContain("signal.abort is not a function");
+					expect(msg).not.toMatch(/is not a function/i);
 				} finally {
 					clearTimeout(timeoutId);
 				}
@@ -272,7 +300,7 @@ describe("Tool execute signature contract", () => {
 				await (tool.execute as any)("id", {}, ac.signal, onUpdate, ctx);
 			} catch (err) {
 				const msg = String(err);
-				expect(msg).not.toContain("is not a function");
+				expect(msg).not.toMatch(/is not a function/i);
 				expect(msg).not.toMatch(/cannot read prop.*abort/i);
 			}
 		});
@@ -291,8 +319,7 @@ describe("Tool execute signature contract", () => {
 				await (tool.execute as any)("id", {}, signal, onUpdate, ctx);
 			} catch (err) {
 				const msg = String(err);
-				expect(msg).not.toContain("onUpdate is not a function");
-				expect(msg).not.toContain("signal.abort is not a function");
+				expect(msg).not.toMatch(/is not a function/i);
 			}
 
 			// onUpdate must NOT have been called with an AbortSignal
@@ -302,6 +329,8 @@ describe("Tool execute signature contract", () => {
 		});
 
 		it("plan: execute.length reflects correct arity (exactly 5 params)", () => {
+			// NOTE: arity proves param COUNT, not ORDER.
+			// For ORDER verification, see the "execute parameter ORDER — source inspection" suite below.
 			const events = createEventBus();
 			const tool = createPlanTool(events);
 			// Exact assertion: plan tool has (toolCallId, params, signal, onUpdate, ctx)
@@ -323,8 +352,7 @@ describe("Tool execute signature contract", () => {
 				await (tool.execute as any)("id", {}, signal, onUpdate, ctx);
 			} catch (err) {
 				const msg = String(err);
-				expect(msg).not.toContain("onUpdate is not a function");
-				expect(msg).not.toContain("signal.abort is not a function");
+				expect(msg).not.toMatch(/is not a function/i);
 			}
 
 			// onUpdate must NOT have been called with an AbortSignal
@@ -334,6 +362,8 @@ describe("Tool execute signature contract", () => {
 		});
 
 		it("coordinate: execute.length reflects correct arity (exactly 5 params)", () => {
+			// NOTE: arity proves param COUNT, not ORDER.
+			// For ORDER verification, see the "execute parameter ORDER — source inspection" suite below.
 			const events = createEventBus();
 			const tool = createCoordinateTool(events);
 			// Exact assertion: coordinate tool has (toolCallId, params, signal, onUpdate, ctx)
@@ -381,6 +411,8 @@ describe("Tool execute signature contract", () => {
 		});
 
 		it("all worker tools have correct arity (execute.length === 5)", () => {
+			// NOTE: arity proves param COUNT, not ORDER.
+			// For ORDER verification, see the "execute parameter ORDER — source inspection" suite below.
 			const tools = captureWorkerTools();
 			expect(tools.length).toBeGreaterThan(0);
 
@@ -409,7 +441,7 @@ describe("Tool execute signature contract", () => {
 				await (tool.execute as any)("id", {}, ac.signal, onUpdate, ctx);
 			} catch (err) {
 				const msg = String(err);
-				expect(msg).not.toContain("is not a function");
+				expect(msg).not.toMatch(/is not a function/i);
 				expect(msg).not.toMatch(/cannot read prop.*abort/i);
 			}
 		});
@@ -438,9 +470,7 @@ describe("Tool execute signature contract", () => {
 				} catch (err) {
 					const msg = String(err);
 					// "is not a function" = slot confusion: signal ended up as onUpdate
-					expect(msg).not.toContain("onUpdate is not a function");
-					expect(msg).not.toContain("signal.abort is not a function");
-					expect(msg).not.toContain("is not a function");
+					expect(msg).not.toMatch(/is not a function/i);
 				} finally {
 					clearTimeout(timeoutId);
 				}
@@ -450,5 +480,87 @@ describe("Tool execute signature contract", () => {
 				}
 			}
 		}, 30000); // extended timeout for multiple worker tools
+	});
+
+	describe("execute parameter ORDER — source inspection (mutation-proven non-vacuous)", () => {
+		/**
+		 * These tests use fn.toString() to inspect parameter names directly from source.
+		 * Mutation proof: swap `_signal, _onUpdate` to `_onUpdate, _signal` in any tool →
+		 * names[2] becomes 'onUpdate' → fails /^signal$/i immediately.
+		 *
+		 * Unlike arity tests (which only count params) or behavioral tests (which may pass
+		 * vacuously when params are unused), source inspection directly asserts ORDER.
+		 */
+
+		it("read_context: param[2]=signal, param[3]=onUpdate", () => {
+			const names = getParamNames(createReadContextTool().execute);
+			// If someone swaps _signal/_onUpdate in read-context/index.ts, this fails
+			expect(names[2]).toMatch(/^signal$/i);
+			expect(names[3]).toMatch(/^onUpdate$/i);
+		});
+
+		it("coord_output: param[2]=signal, param[3]=onUpdate", () => {
+			const names = getParamNames(createCoordOutputTool().execute);
+			expect(names[2]).toMatch(/^signal$/i);
+			expect(names[3]).toMatch(/^onUpdate$/i);
+		});
+
+		it("plan tool: param[2]=signal, param[3]=onUpdate", () => {
+			const events = createEventBus();
+			const names = getParamNames(createPlanTool(events).execute);
+			expect(names[2]).toMatch(/^signal$/i);
+			expect(names[3]).toMatch(/^onUpdate$/i);
+		});
+
+		it("coordinate tool: param[2]=signal, param[3]=onUpdate", () => {
+			const events = createEventBus();
+			const names = getParamNames(createCoordinateTool(events).execute);
+			expect(names[2]).toMatch(/^signal$/i);
+			expect(names[3]).toMatch(/^onUpdate$/i);
+		});
+
+		it("coordinator tools: every tool has signal at [2] and onUpdate at [3]", () => {
+			process.env.PI_COORDINATION_DIR = "/tmp/pi-test-coord";
+			process.env.PI_AGENT_IDENTITY = "test-worker";
+			const tools = createCoordinatorTools();
+			expect(tools.length).toBeGreaterThan(0);
+			for (const tool of tools) {
+				const names = getParamNames(tool.execute);
+				// Fail fast with tool name in message for easier debugging
+				expect(
+					names[2],
+					`coordinator tool '${tool.name}' has wrong param at [2]: expected 'signal', got '${names[2]}'`
+				).toMatch(/^signal$/i);
+				expect(
+					names[3],
+					`coordinator tool '${tool.name}' has wrong param at [3]: expected 'onUpdate', got '${names[3]}'`
+				).toMatch(/^onUpdate$/i);
+			}
+		});
+
+		it("worker tools: every tool has signal at [2] and onUpdate at [3]", () => {
+			const captured: ToolDefinition[] = [];
+			const mockPi = {
+				registerTool: (tool: ToolDefinition) => { captured.push(tool); },
+				on: (_event: string, _handler: unknown) => {},
+			} as any;
+			registerWorkerTools(mockPi, {
+				coordDir: "/tmp/pi-test-worker-tools",
+				identity: "test-worker",
+				workerId: "test-worker-id",
+			});
+			expect(captured.length).toBeGreaterThan(0);
+			for (const tool of captured) {
+				const names = getParamNames(tool.execute);
+				expect(
+					names[2],
+					`worker tool '${tool.name}' has wrong param at [2]: expected 'signal', got '${names[2]}'`
+				).toMatch(/^signal$/i);
+				expect(
+					names[3],
+					`worker tool '${tool.name}' has wrong param at [3]: expected 'onUpdate', got '${names[3]}'`
+				).toMatch(/^onUpdate$/i);
+			}
+		});
 	});
 });
