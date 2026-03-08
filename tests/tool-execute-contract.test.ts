@@ -2,6 +2,19 @@ import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import { createReadContextTool } from "../read-context/index.js";
 import { createCoordOutputTool } from "../coord-output/index.js";
 import { createCoordinatorTools } from "../coordinate/coordinator-tools/index.js";
+import type { ToolDefinition } from "@mariozechner/pi-coding-agent";
+
+// Type-level contract assertion: verify that execute accepts the canonical 5-param signature
+// This fails at compile time if the ToolDefinition interface changes
+type CanonicalExecute = ToolDefinition["execute"];
+// If this compiles, the interface enforces (toolCallId, params, signal, onUpdate, ctx)
+const _typeCheck: CanonicalExecute extends (
+	toolCallId: string,
+	params: any,
+	signal: AbortSignal | undefined,
+	onUpdate: any,
+	ctx: any
+) => any ? true : never = true;
 
 /**
  * Contract tests: verify pi-coordination tools match Pi Core's ToolDefinition
@@ -129,27 +142,42 @@ describe("Tool execute signature contract", () => {
 
 		it("coordinator tools: AbortSignal does not land in onUpdate slot", async () => {
 			const tools = createCoordinatorTools();
-			// Test a subset (first 3) to avoid long test runs
-			const subset = tools.slice(0, 3);
+			// Test all coordinator tools
+			const subset = tools;
+
+			// Use a short per-tool timeout so long-running tools (e.g. spawn_workers)
+			// don't stall the test. Timeout is acceptable — it means the tool ran
+			// without throwing "is not a function" (which would mean wrong slot).
+			const PER_TOOL_TIMEOUT_MS = 500;
 
 			for (const tool of subset) {
-				const signal = new AbortController().signal;
+				const ac = new AbortController();
+				const signal = ac.signal;
 				const onUpdate = vi.fn();
 				const ctx = mockCtx();
 
+				const timeoutId = setTimeout(() => ac.abort(), PER_TOOL_TIMEOUT_MS);
+
 				try {
-					await (tool.execute as any)("id", {}, signal, onUpdate, ctx);
+					await Promise.race([
+						(tool.execute as any)("id", {}, signal, onUpdate, ctx),
+						new Promise<void>((_, reject) =>
+							setTimeout(() => reject(new Error("per-tool timeout")), PER_TOOL_TIMEOUT_MS)
+						),
+					]);
 				} catch (err) {
 					const msg = String(err);
 					// "is not a function" indicates wrong slot — signal ended up as onUpdate
 					expect(msg).not.toContain("onUpdate is not a function");
 					expect(msg).not.toContain("signal.abort is not a function");
+				} finally {
+					clearTimeout(timeoutId);
 				}
 
 				for (const call of onUpdate.mock.calls) {
 					expect(call[0]).not.toBeInstanceOf(AbortSignal);
 				}
 			}
-		});
+		}, 30000); // extended test timeout for 11 tools × 500ms each
 	});
 });

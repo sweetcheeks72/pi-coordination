@@ -246,7 +246,7 @@ export function createBundleTools(cwd: string): ToolDefinition[] {
 			name: "scan_files",
 			description: "Scan codebase and return file tree with token estimates. Use this first to understand the codebase structure before bundling.",
 			parameters: ScanFilesParams,
-			execute: async (_id, params) => {
+			execute: async (_toolCallId, params, _signal, _onUpdate, _ctx) => {
 				const patterns = (params as { patterns?: string[] }).patterns || [];
 				const ignore = (params as { ignore?: string[] }).ignore || [];
 				const maxDepth = (params as { maxDepth?: number }).maxDepth || 20;
@@ -280,7 +280,7 @@ export function createBundleTools(cwd: string): ToolDefinition[] {
 			name: "bundle_files",
 			description: "Bundle specified files into a single output with their contents. Returns file contents in <file_contents> format.",
 			parameters: BundleFilesParams,
-			execute: async (_id, params) => {
+			execute: async (_toolCallId, params, _signal, _onUpdate, _ctx) => {
 				const files = (params as { files: string[] }).files;
 				const maxTokens = (params as { maxTokens?: number }).maxTokens || 100000;
 
