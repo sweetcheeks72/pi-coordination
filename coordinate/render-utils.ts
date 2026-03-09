@@ -448,6 +448,159 @@ export function renderWorkersCompact(
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
+// Task-centric rendering
+// ─────────────────────────────────────────────────────────────────────────────
+
+export interface TaskCentricEntry {
+	id: string;
+	title: string;
+	status: "pending" | "working" | "complete" | "failed";
+	workerId?: string;
+	workerName?: string;
+	durationMs?: number;
+	cost?: number;
+	currentFile?: string;
+}
+
+/**
+ * Task-centric coordination display: tasks are primary rows, assigned worker is annotation.
+ * Falls back to renderWorkersCompact() when tasks array is empty.
+ *
+ * Example output:
+ *   Tasks: ███████░░░░ 3/5 done · 2 active · ~12m remaining · $0.23
+ *
+ *     ✓ TASK-01  Scout codebase            calm_hawk   4m  $0.06
+ *     ⠸ TASK-02  Fix auth middleware        swift_fox   8m  $0.09  ← edit middleware.ts
+ *     ○ TASK-05  Integration test          (queued)
+ */
+export function renderTasksCentric(
+	workers: WorkerDisplayState[],
+	tasks: TaskCentricEntry[],
+	theme: Theme,
+	width: number,
+): string[] {
+	// Fall back to worker-centric view when no task data is available
+	if (tasks.length === 0) {
+		return renderWorkersCompact(workers, theme, width);
+	}
+
+	const lines: string[] = [];
+
+	const complete = tasks.filter(t => t.status === "complete");
+	const active   = tasks.filter(t => t.status === "working");
+	const failed   = tasks.filter(t => t.status === "failed");
+	const total    = tasks.length;
+	const totalCost = tasks.reduce((sum, t) => sum + (t.cost ?? 0), 0);
+
+	// ── ETA estimate ──────────────────────────────────────────────────────────
+	// Average duration of completed tasks → rough remaining time
+	let etaStr = "";
+	if (complete.length > 0 && active.length > 0) {
+		const completedWithDuration = complete.filter(t => (t.durationMs ?? 0) > 0);
+		if (completedWithDuration.length > 0) {
+			const avgMs = completedWithDuration.reduce((s, t) => s + (t.durationMs ?? 0), 0) / completedWithDuration.length;
+			const remaining = tasks.filter(t => t.status !== "complete" && t.status !== "failed");
+			const etaMs = avgMs * Math.max(0, remaining.length - active.length) + avgMs * 0.5 * active.length;
+			if (etaMs > 0) {
+				etaStr = theme.fg("dim", ` · ~${formatDuration(etaMs)} remaining`);
+			}
+		}
+	}
+
+	// ── Summary / header line ─────────────────────────────────────────────────
+	const barWidth = Math.min(16, Math.max(8, Math.floor(width / 8)));
+	const bar = renderProgressBar(complete.length, total, theme, barWidth);
+	const doneLabel  = `${theme.fg("success", String(complete.length))}${theme.fg("dim", "/")}${theme.fg("muted", String(total))} done`;
+	const activePart = active.length > 0 ? ` ${theme.fg("dim", "·")} ${theme.fg("warning", `${active.length} active`)}` : "";
+	const failedPart = failed.length > 0 ? ` ${theme.fg("dim", "·")} ${theme.fg("error", `${failed.length} failed`)}` : "";
+	const costPart   = totalCost > 0 ? ` ${theme.fg("dim", "·")} ${theme.fg("muted", formatCost(totalCost))}` : "";
+
+	lines.push(`${theme.fg("muted", "Tasks:")} ${bar}  ${doneLabel}${activePart}${failedPart}${etaStr}${costPart}`);
+
+	// ── Per-task rows ─────────────────────────────────────────────────────────
+	// Layout constants (visible chars, no ANSI):
+	//   "  " + icon(1) + " " + id(~7) + "  " + title + " " + workerCol + " " + time + " " + cost + " " + file
+	const INDENT         = 2;
+	const ICON_W         = 1;
+	const ID_W           = 7; // "TASK-01"
+	const WORKER_W       = 12; // memorable name padded
+	const TIME_W         = 6;
+	const COST_W         = 6;
+	const FILE_ARROW_W   = 5; // " ← " + small file name
+	const BASE_W         = INDENT + ICON_W + 1 + ID_W + 2 + 1 + WORKER_W + 1 + TIME_W + 1 + COST_W;
+	const titleSpace     = Math.max(10, width - BASE_W - FILE_ARROW_W - 4);
+
+	for (const task of tasks) {
+		const isActive   = task.status === "working";
+		const isComplete = task.status === "complete";
+		const isFailed   = task.status === "failed";
+		const isPending  = task.status === "pending";
+
+		// Icon
+		let icon: string;
+		if (isActive) {
+			icon = theme.fg("warning", getSpinnerFrame());
+		} else if (isComplete) {
+			icon = theme.fg("success", "✓");
+		} else if (isFailed) {
+			icon = theme.fg("error", "✗");
+		} else {
+			icon = theme.fg("dim", "○");
+		}
+
+		// Task ID
+		const idColor   = isComplete ? "dim" : isFailed ? "error" : isActive ? "accent" : "dim";
+		const idRaw     = task.id.padEnd(ID_W);
+		const taskId    = theme.fg(idColor as Parameters<Theme["fg"]>[0], idRaw);
+
+		// Title
+		const titleRaw  = truncateText(task.title, titleSpace);
+		const titleStr  = isComplete
+			? theme.fg("dim", titleRaw.padEnd(titleSpace))
+			: isFailed
+				? theme.fg("error", titleRaw.padEnd(titleSpace))
+				: isPending
+					? theme.fg("dim", titleRaw.padEnd(titleSpace))
+					: theme.fg("muted", titleRaw.padEnd(titleSpace));
+
+		if (isPending) {
+			// Queued row: no worker/cost/time
+			const queuedLabel = theme.fg("dim", "(queued)");
+			lines.push(`  ${icon} ${taskId}  ${titleStr} ${queuedLabel}`);
+			continue;
+		}
+
+		// Worker name (right-aligned in fixed column)
+		const workerRaw = (task.workerName ?? "").slice(0, WORKER_W).padEnd(WORKER_W);
+		const workerStr = isComplete
+			? theme.fg("dim", workerRaw)
+			: theme.fg("accent", workerRaw);
+
+		// Duration
+		const timeStr = task.durationMs
+			? theme.fg("dim", formatDuration(task.durationMs).padEnd(TIME_W))
+			: theme.fg("dim", "--".padEnd(TIME_W));
+
+		// Cost
+		const costStr = task.cost !== undefined && task.cost > 0
+			? theme.fg("muted", formatCost(task.cost).padEnd(COST_W))
+			: theme.fg("dim", "".padEnd(COST_W));
+
+		// Current file annotation (active tasks only)
+		let fileAnnotation = "";
+		if (isActive && task.currentFile) {
+			const fileName = task.currentFile.split("/").pop() || task.currentFile;
+			const truncated = truncateText(fileName, 20);
+			fileAnnotation = `  ${theme.fg("dim", "←")} ${theme.fg("dim", truncated)}`;
+		}
+
+		lines.push(`  ${icon} ${taskId}  ${titleStr} ${workerStr} ${timeStr} ${costStr}${fileAnnotation}`);
+	}
+
+	return lines;
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
 // File reservations rendering
 // ─────────────────────────────────────────────────────────────────────────────
 
