@@ -5,6 +5,12 @@
   "keywords": [
     "pi-package"
   ],
+  "scripts": {
+    "test": "npx jiti tests/unit/sdk-runner-env-restore.test.ts && npx jiti tests/unit/spec-validator.test.ts && npx jiti tests/unit/spec-parser.test.ts"
+  },
+  "devDependencies": {
+    "jiti": "^2.6.1"
+  },
   "pi": {
     "extensions": [
       "./index.ts"
