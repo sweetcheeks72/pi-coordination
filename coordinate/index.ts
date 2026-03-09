@@ -23,6 +23,7 @@ import {
 	renderPipelineRow,
 	renderCostBreakdown,
 	renderWorkersCompact,
+	renderTasksCentric,
 	renderFileReservations,
 	renderTasksCompact,
 	renderTaskProgress,
@@ -36,6 +37,7 @@ import {
 	type WorkerDisplayState,
 	type TaskDisplayState,
 	type TaskProgress,
+	type TaskCentricEntry,
 } from "./render-utils.js";
 
 interface CoordinationSettings {
@@ -494,9 +496,19 @@ export async function runCoordinationSession(options: CoordinationRunOptions): P
 	try {
 		planContent = await fs.readFile(planPath, "utf-8");
 	} catch (err) {
+		const filename = path.basename(planPath);
+		const suggestions = [
+			path.join(path.dirname(planDir), filename),
+			path.join(planDir, "specs", filename),
+			path.join(planDir, filename.replace(/\.md$/, "") + ".md"),
+		];
+		const found = suggestions.find(s => fsSync.existsSync(s));
+		const hint = found
+			? `\n  Did you mean: ${found}`
+			: `\n  Run: ls ${planDir}/ to see available files`;
 		return {
 			result: {
-				content: [{ type: "text", text: `Failed to read plan file: ${planPath}\n${err}` }],
+				content: [{ type: "text", text: `Plan file not found: ${planPath}${hint}\n\nOriginal error: ${err}` }],
 				isError: true,
 			},
 			coordDir,
@@ -517,13 +529,19 @@ export async function runCoordinationSession(options: CoordinationRunOptions): P
 	if (!specValidation.valid) {
 		// Spec validation failed - return helpful error
 		const errorReport = formatValidationResult(specValidation);
+		const hasNoTasks = specValidation.errors.some(e => e.code === "NO_TASKS");
+		// Detect prose PRD: has markdown headers but no TASK-XX format
+		const looksLikeProsePrd = hasNoTasks && /^#{1,3} /m.test(planContent) && !/^## TASK-\d+/m.test(planContent);
+		const noTasksHint = looksLikeProsePrd
+			? `\n\nThis file looks like a prose PRD (has headers but no TASK-XX sections).\nConvert it to a spec first:\n  plan({ input: "${planPath}" })`
+			: "";
 		return {
 			result: {
 				content: [{
 					type: "text",
 					text: `Invalid spec format. The coordinate tool requires a valid TASK-XX format spec.
 
-${errorReport}
+${errorReport}${noTasksHint}
 
 To create a valid spec, use the 'plan' tool:
   plan({ input: "${planPath}" })
@@ -1421,6 +1439,9 @@ export function createCoordinateTool(events: EventBus): ToolDefinition<typeof Co
 				const tableHeader = `  ${theme.fg("dim", "Worker".padEnd(13))} ${theme.fg("dim", "Time".padEnd(8))} ${theme.fg("dim", "Cost".padEnd(8))} ${theme.fg("dim", "Turns".padEnd(6))} ${theme.fg("dim", "Files")}`;
 				container.addChild(new Text(drawBoxLine(tableHeader, width, theme), 0, 0));
 
+				const workersTotalCost = workers.reduce((sum, w) => sum + w.usage.cost, 0);
+				const costRolledUpToCoordinator = workersTotalCost === 0 && totalCost > 0 && workers.some(w => w.filesModified.length > 0);
+
 				for (const w of workers) {
 					const statusIcon = w.status === "complete"
 						? theme.fg("success", ICONS.complete)
@@ -1429,13 +1450,20 @@ export function createCoordinateTool(events: EventBus): ToolDefinition<typeof Co
 					const time = w.completedAt && w.startedAt
 						? formatDuration(w.completedAt - w.startedAt)
 						: "--";
-					const cost = formatCost(w.usage.cost);
+					const cost = costRolledUpToCoordinator ? theme.fg("dim", "(coord)") : formatCost(w.usage.cost);
 					const turns = w.usage.turns.toString();
 					const files = w.filesModified.slice(0, 2).map(f => path.basename(f)).join(", ") +
 						(w.filesModified.length > 2 ? "..." : "");
 
 					const row = `${statusIcon} ${theme.fg("accent", name.padEnd(13))} ${time.padEnd(8)} ${cost.padEnd(8)} ${turns.padEnd(6)} ${theme.fg("dim", files)}`;
 					container.addChild(new Text(drawBoxLine(row, width, theme), 0, 0));
+				}
+
+				// Note: when coordinator dispatches workers via spawn_workers tool, all API costs
+				// are attributed to the coordinator phase. The total cost above is accurate.
+				if (costRolledUpToCoordinator) {
+					const note = `  ${theme.fg("dim", "ℹ")} Worker costs rolled up to coordinator (via coordinator) — total: ${formatCost(totalCost)}`;
+					container.addChild(new Text(drawBoxLine(note, width, theme), 0, 0));
 				}
 
 				container.addChild(new Text(drawBoxBottom(width, theme), 0, 0));
@@ -1475,7 +1503,25 @@ export function createCoordinateTool(events: EventBus): ToolDefinition<typeof Co
 
 			// Workers section
 			if (workers.length > 0) {
-				const workerLines = renderWorkersCompact(workerDisplays, theme, width - 4);
+				// Build task-centric entries from worker display states when taskId data is available.
+				// Workers that have a taskId are shown as task rows; remaining workers fall back to compact view.
+				const taskEntries: TaskCentricEntry[] = workerDisplays
+					.filter(w => !!w.taskId)
+					.map(w => ({
+						id: w.taskId!,
+						title: w.taskTitle || w.taskId!,
+						status: (w.status === "complete" || w.status === "failed" || w.status === "working" || w.status === "pending"
+							? w.status
+							: "working") as TaskCentricEntry["status"],
+						workerName: w.name,
+						durationMs: w.durationMs,
+						cost: w.cost,
+						currentFile: w.currentFile ?? undefined,
+					}));
+
+				const workerLines = taskEntries.length > 0
+					? renderTasksCentric(workerDisplays, taskEntries, theme, width - 4)
+					: renderWorkersCompact(workerDisplays, theme, width - 4);
 				for (const line of workerLines) {
 					container.addChild(new Text(drawBoxLine(line, width, theme), 0, 0));
 				}

@@ -210,10 +210,12 @@ export async function runAgentSDK(config: SDKRunnerConfig): Promise<SingleResult
 
 	let rawOutput = "";
 
+	// Hoist outside try so finally block can access them for env restore
+	const previousIdentity = process.env.PI_AGENT_IDENTITY;
+	const previousModel = process.env.PI_MODEL;
+
 	try {
 		// Set agent identity for extensions to check
-		const previousIdentity = process.env.PI_AGENT_IDENTITY;
-		const previousModel = process.env.PI_MODEL;
 		process.env.PI_AGENT_IDENTITY = agent.name;
 		if (resolvedParentModel) process.env.PI_MODEL = resolvedParentModel;
 
@@ -582,7 +584,8 @@ async function getModelRegistry(): Promise<any> {
 			const { discoverModels, discoverAuthStorage } = await import("@mariozechner/pi-coding-agent");
 
 			// Both functions use getDefaultAgentDir() internally as default parameter
-			const authStorage = discoverAuthStorage();
+			// Guard: discoverAuthStorage may not exist in all Pi versions — non-fatal if missing
+			const authStorage = typeof discoverAuthStorage === 'function' ? discoverAuthStorage() : undefined;
 			cachedModelRegistry = discoverModels(authStorage);
 			return cachedModelRegistry;
 		} catch (err) {
