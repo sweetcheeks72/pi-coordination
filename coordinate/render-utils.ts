@@ -842,6 +842,68 @@ export function renderEventLine(
 // Box drawing
 // ─────────────────────────────────────────────────────────────────────────────
 
+// ─────────────────────────────────────────────────────────────────────────────
+// Question buffer rendering (HANDRaiser pattern)
+// ─────────────────────────────────────────────────────────────────────────────
+
+export function renderQuestionBuffer(
+	questions: Array<{ workerName: string; question: string; options?: string[] }>,
+	theme: Theme,
+	width: number,
+): string[] {
+	if (questions.length === 0) return [];
+
+	const capped = questions.slice(0, 4); // max 4 per research
+	const lines: string[] = [];
+
+	// Border characters
+	const TL = "╔";
+	const TR = "╗";
+	const BL = "╚";
+	const BR = "╝";
+	const H  = "═";
+	const V  = "║";
+
+	const innerWidth = Math.max(40, width - 2);
+	const count = capped.length;
+	const headerText = `  ✋ ${count} agent${count > 1 ? "s have" : " has"} question${count > 1 ? "s" : ""} — answer before review begins    `;
+	const headerPadded = headerText.padEnd(innerWidth);
+
+	// Top border with header
+	lines.push(
+		theme.fg("warning", TL + H.repeat(innerWidth) + TR),
+	);
+	lines.push(
+		theme.fg("warning", V) +
+		theme.fg("warning", headerPadded.slice(0, innerWidth)) +
+		theme.fg("warning", V),
+	);
+	lines.push(
+		theme.fg("warning", BL + H.repeat(innerWidth) + BR),
+	);
+
+	// Questions
+	for (const q of capped) {
+		const nameStr = theme.fg("accent", q.workerName.padEnd(12));
+		const questionStr = theme.fg("muted", truncateText(q.question, innerWidth - 16));
+		lines.push(`  ${nameStr}  ${questionStr}`);
+
+		// Options as chips [A] opt1  [B] opt2
+		if (q.options && q.options.length > 0) {
+			const chips = q.options
+				.slice(0, 4)
+				.map((opt, i) => {
+					const letter = String.fromCharCode(65 + i); // A, B, C, D
+					return theme.fg("dim", `[${letter}]`) + " " + theme.fg("muted", opt);
+				})
+				.join("  ");
+			lines.push(`              ${chips}`);
+		}
+	}
+
+	return lines;
+}
+
 export function drawBoxTop(width: number, title: string, theme: Theme): string {
 	const dim = (s: string) => theme.fg("borderMuted", s);
 	const titlePart = title ? ` ${title} ` : "";
@@ -858,4 +920,191 @@ export function drawBoxLine(content: string, width: number, theme: Theme): strin
 	const contentWidth = visibleWidth(content);
 	const padding = Math.max(0, width - contentWidth - 2);
 	return theme.fg("borderMuted", "│") + content + " ".repeat(padding) + theme.fg("borderMuted", "│");
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// 2026 Four-Level Coordination Dashboard
+// Research-backed: Session → Phase → Tasks → Workers hierarchy
+// ─────────────────────────────────────────────────────────────────────────────
+
+/**
+ * Map a raw tool name to a short action verb for display.
+ * Never show raw output in primary view — show file path + action only.
+ */
+function toolToAction(toolName: string | null | undefined): string {
+	if (!toolName) return "";
+	const lower = toolName.toLowerCase();
+	if (lower.includes("edit") || lower.includes("write") || lower.includes("create")) return "edit";
+	if (lower.includes("read") || lower.includes("cat") || lower.includes("view")) return "read";
+	if (lower.includes("bash") || lower.includes("exec") || lower.includes("run") || lower.includes("shell")) return "bash";
+	if (lower.includes("search") || lower.includes("grep") || lower.includes("find") || lower.includes("codebase")) return "search";
+	if (lower.includes("web") || lower.includes("fetch") || lower.includes("url") || lower.includes("http")) return "fetch";
+	// Fallback: first word up to 6 chars
+	return lower.split(/[_\s]/)[0]?.slice(0, 6) ?? "";
+}
+
+/**
+ * Compute ETA string from completed-task average and remaining task count.
+ */
+function computeEta(tasks: TaskCentricEntry[]): string {
+	const completed = tasks.filter(t => t.status === "complete" && (t.durationMs ?? 0) > 0);
+	const remaining = tasks.filter(t => t.status === "pending" || t.status === "working");
+	if (completed.length === 0 || remaining.length === 0) return "";
+	const avgMs = completed.reduce((s, t) => s + (t.durationMs ?? 0), 0) / completed.length;
+	const active = tasks.filter(t => t.status === "working");
+	// active tasks are ~50% of an avg task remaining; pending tasks are 100%
+	const etaMs = avgMs * (remaining.length - active.length) + avgMs * 0.5 * active.length;
+	if (etaMs <= 0) return "";
+	return `ETA ~${formatDuration(etaMs)}`;
+}
+
+/**
+ * renderCoordinationDashboard — 2026 four-level coordination display.
+ *
+ * Returns an array of lines (no box borders — caller adds them if desired):
+ *
+ *   Layer 1 — Session header (1 line)
+ *   Layer 2 — Phase row  (1 line, reuses renderPipelineRow)
+ *   [blank line]
+ *   Layer 3 — Task progress (0 or 2 lines)
+ *   Layer 4 — Active workers (max 4 rows + "+N more")
+ */
+export function renderCoordinationDashboard(
+	planName: string,
+	pipeline: PipelineDisplayState,
+	workers: WorkerDisplayState[],
+	tasks: TaskCentricEntry[],
+	theme: Theme,
+	width: number,
+): string[] {
+	const lines: string[] = [];
+
+	// ── Layer 1 — Session header ───────────────────────────────────────────────
+	// coordinate <plan>    ⠸ 8m12s · $0.23 · ctx 62%
+	{
+		const spinner = theme.fg("warning", getSpinnerFrame());
+		const elapsed = theme.fg("dim", formatDuration(pipeline.elapsed));
+		const cost = theme.fg("muted", formatCost(pipeline.cost));
+
+		// Context health: aggregate across workers, pick highest pressure
+		const allCtx = workers.map(w => w.contextPct ?? 0);
+		const maxCtx = allCtx.length > 0 ? Math.max(...allCtx) : 0;
+		let ctxStr = "";
+		if (maxCtx > 0) {
+			const ctxColor: "success" | "warning" | "error" =
+				maxCtx > 80 ? "error" : maxCtx > 50 ? "warning" : "success";
+			ctxStr = " · " + theme.fg(ctxColor, `ctx ${maxCtx}%`);
+		}
+
+		const leftLabel = theme.fg("dim", "coordinate ") + theme.fg("accent", planName);
+		const rightLabel = `${spinner} ${elapsed} · ${cost}${ctxStr}`;
+
+		const leftVis = visibleWidth(leftLabel);
+		const rightVis = visibleWidth(rightLabel);
+		const gap = Math.max(1, width - leftVis - rightVis);
+		lines.push(leftLabel + " ".repeat(gap) + rightLabel);
+	}
+
+	// ── Layer 2 — Phase row ────────────────────────────────────────────────────
+	lines.push(renderPipelineRow(pipeline, theme, width));
+
+	// ── blank separator ────────────────────────────────────────────────────────
+	lines.push("");
+
+	// ── Layer 3 — Task progress (only when task data available) ───────────────
+	if (tasks.length > 0) {
+		const completed = tasks.filter(t => t.status === "complete").length;
+		const total = tasks.length;
+		const active = tasks.filter(t => t.status === "working");
+		const etaStr = computeEta(tasks);
+
+		// Progress bar: 10 chars (█ filled, ░ empty)
+		const BAR_W = 10;
+		const filledN = total > 0 ? Math.round((completed / total) * BAR_W) : 0;
+		const emptyN = BAR_W - filledN;
+		const barColor: "success" | "accent" | "warning" =
+			completed / total >= 0.75 ? "success" : completed / total >= 0.4 ? "accent" : "warning";
+		const bar = theme.fg(barColor, "█".repeat(filledN)) + theme.fg("dim", "░".repeat(emptyN));
+
+		const countPart = `${theme.fg("success", String(completed))} / ${theme.fg("muted", String(total))}`;
+		const activePart = active.length > 0 ? ` · ${theme.fg("warning", `${active.length} working`)}` : "";
+		const etaPart = etaStr ? ` · ${theme.fg("dim", etaStr)}` : "";
+
+		const label = theme.fg("muted", "Tasks");
+		lines.push(`${label}  ${bar}  ${countPart}${activePart}${etaPart}`);
+
+		// Second line: titles of ACTIVE tasks only, truncated to fit width
+		if (active.length > 0) {
+			const indent = " ".repeat(7); // "Tasks  " length
+			const titleWidth = Math.max(0, width - 7);
+			const titleParts = active.map(t =>
+				theme.fg("dim", truncateText(`${t.id} ${t.title}`, Math.max(10, Math.floor(titleWidth / active.length) - 2))
+			));
+			lines.push(indent + titleParts.join("  "));
+		}
+	}
+
+	// ── Layer 4 — Active workers (max 4, then "+N more") ──────────────────────
+	// Show working first, then recently completed — so user sees progress.
+	const working = workers.filter(w => w.status === "working" || w.status === "waiting");
+	const recentDone = workers.filter(w => w.status === "complete" || w.status === "failed")
+		.sort((a, b) => b.durationMs - a.durationMs); // most-recently-finished first
+	const displayWorkers = [...working, ...recentDone].slice(0, 4);
+	const overflowCount = workers.length - displayWorkers.length;
+
+	for (const w of displayWorkers) {
+		const isActive = w.status === "working" || w.status === "waiting";
+		const icon = isActive
+			? theme.fg("warning", getSpinnerFrame())
+			: w.status === "complete"
+				? theme.fg("success", "✓")
+				: theme.fg("error", "✗");
+
+		// Name: 12 chars padded (e.g. "swift_fox   ")
+		const namePadded = theme.fg(isActive ? "accent" : "dim", w.name.slice(0, 12).padEnd(12));
+
+		// Task ID: 7 chars
+		const taskIdStr = w.taskId
+			? theme.fg(isActive ? "accent" : "dim", w.taskId.padEnd(7))
+			: " ".repeat(7);
+
+		// Action + file (file path only, no raw output)
+		let actionStr = "";
+		if (!isActive && w.status === "complete") {
+			actionStr = theme.fg("dim", "done");
+		} else if (w.currentTool || w.currentFile) {
+			const verb = toolToAction(w.currentTool);
+			if (w.currentFile) {
+				const filePath = w.currentFile.replace(/^\/[^/]+\/[^/]+\//, ""); // strip leading /Users/xxx/
+				const maxFileLen = Math.max(10, width - 2 - 1 - 12 - 1 - 7 - 1 - 6 - 1 - 8 - 1 - 6 - 2);
+				const truncated = truncateText(filePath, maxFileLen);
+				actionStr = verb
+					? theme.fg("dim", verb) + " " + theme.fg("muted", truncated)
+					: theme.fg("muted", truncated);
+			} else {
+				actionStr = theme.fg("dim", verb);
+			}
+		} else if (w.taskTitle) {
+			actionStr = theme.fg("dim", truncateText(w.taskTitle, 30));
+		}
+
+		// Duration + cost + ctx%
+		const timeStr = theme.fg("dim", formatDuration(w.durationMs).padEnd(4));
+		const costStr = theme.fg("muted", formatCost(w.cost));
+		const ctxStr = w.contextPct != null
+			? "  " + (w.contextPct > 80
+				? theme.fg("error", `${w.contextPct}%`)
+				: w.contextPct > 50
+					? theme.fg("warning", `${w.contextPct}%`)
+					: theme.fg("dim", `${w.contextPct}%`))
+			: "";
+
+		lines.push(`  ${icon} ${namePadded} ${taskIdStr} ${actionStr}  ${timeStr} ${costStr}${ctxStr}`);
+	}
+
+	if (overflowCount > 0) {
+		lines.push(theme.fg("dim", `  +${overflowCount} more`));
+	}
+
+	return lines;
 }

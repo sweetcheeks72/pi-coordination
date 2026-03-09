@@ -140,7 +140,8 @@ export type CoordinationEvent =
 	| { type: "fix_completed"; timestamp: number }
 	| { type: "fixes_started"; timestamp: number }
 	| { type: "fixes_complete"; timestamp: number }
-	| { type: "activity"; phase?: string; contextTokens?: number; timestamp: number };
+	| { type: "activity"; phase?: string; contextTokens?: number; timestamp: number }
+	| { type: "agent_question"; workerId: string; workerName: string; question: string; options?: string[]; severity: "block" | "clarify"; answered?: boolean; timestamp: number };
 
 export type CoordinationStatus = "analyzing" | "executing" | "reviewing" | "complete" | "failed";
 

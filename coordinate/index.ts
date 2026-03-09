@@ -28,6 +28,8 @@ import {
 	renderTasksCompact,
 	renderTaskProgress,
 	renderEventLine,
+	renderQuestionBuffer,
+	renderCoordinationDashboard,
 	drawBoxTop,
 	drawBoxBottom,
 	drawBoxLine,
@@ -198,6 +200,7 @@ interface CoordinationDetails {
 	pendingAgents: string[];
 	deviations: string[];
 	startedAt: number;
+	planPath?: string;
 	pipeline?: {
 		currentPhase: PipelinePhase;
 		phases: Record<PipelinePhase, PhaseResult>;
@@ -853,6 +856,7 @@ See: pi-coordination README for spec format documentation.`,
 			pendingAgents: pendingAgents || [],
 			deviations: state?.deviations?.map(d => d.description) || [],
 			startedAt: state?.startedAt || Date.now(),
+			planPath,
 			pipeline: {
 				currentPhase: pipelineState.currentPhase,
 				phases: pipelineState.phases,
@@ -1082,6 +1086,41 @@ See: pi-coordination README for spec format documentation.`,
 		}
 
 		if (!coordExitError && shouldRunPhase("review")) {
+			// HANDRaiser: check for buffered agent questions before review
+			try {
+				const currentEvents = await storage.getEvents();
+				const questionEvents = currentEvents.filter(
+					(e): e is Extract<typeof e, { type: "agent_question" }> =>
+						e.type === "agent_question" && !(e as any).answered
+				);
+				if (questionEvents.length > 0) {
+					const questionsPath = path.join(coordDir, "pending-questions.json");
+					await fs.writeFile(questionsPath, JSON.stringify({
+						questions: questionEvents.slice(0, 4),
+						checkpoint: "pre-review",
+						autoResumeInMs: 120000,
+					}), "utf-8");
+					// Surface visibly in the terminal
+					const count = Math.min(questionEvents.length, 4);
+					const bar = "═".repeat(62);
+					console.log(`\n╔${bar}╗`);
+					console.log(`║  ✋ ${count} agent${count > 1 ? "s have" : " has"} question${count > 1 ? "s" : ""} — answer before review begins    ║`);
+					console.log(`╚${bar}╝`);
+					for (const q of questionEvents.slice(0, 4)) {
+						const name = (q.workerName || q.workerId).padEnd(12);
+						console.log(`  ${name}  ${q.question}`);
+						if (q.options && q.options.length > 0) {
+							const chips = q.options.slice(0, 4)
+								.map((opt, i) => `[${String.fromCharCode(65 + i)}] ${opt}`)
+								.join("  ");
+							console.log(`              ${chips}`);
+						}
+					}
+					console.log(`\n  Questions saved to: ${questionsPath}\n`);
+				}
+			} catch {
+				// Non-fatal: proceed to review regardless
+			}
 			await runReviewFixLoop(pipelineContext, pipelineConfig);
 		}
 
@@ -1194,9 +1233,49 @@ See: pi-coordination README for spec format documentation.`,
 			? `${summary}\n\nLog saved to: ${logFilePath}`
 			: summary;
 
+		// Generate HTML recap
+		let recapPath: string | undefined;
+		try {
+			const { generateCoordinationRecap } = await import("./recap-generator.js");
+			const tasksForRecap = await (async () => {
+				try {
+					const tasksPath = path.join(coordDir, "tasks.json");
+					const content = await fs.readFile(tasksPath, "utf-8");
+					return JSON.parse(content).tasks || [];
+				} catch { return []; }
+			})();
+			recapPath = await generateCoordinationRecap(
+				{ coordDir, planPath, costLimit: params.costLimit },
+				{
+					status: isError ? "failed" : "complete",
+					startedAt: initialState.startedAt,
+					completedAt,
+					exitReason: pipelineState.exitReason,
+				},
+				workerStates,
+				tasksForRecap,
+				events,
+			);
+			process.stdout.write(`\n📄 Session recap: ${recapPath}\n`);
+			// Open the recap
+			const { exec: execChild } = await import("child_process");
+			const openScript = `${os.homedir()}/.pi/agent/scripts/open-html-artifact.sh`;
+			if (fsSync.existsSync(openScript)) {
+				execChild(`bash "${openScript}" "${recapPath}"`, (err) => {
+					if (err) execChild(`open "${recapPath}"`);
+				});
+			} else {
+				execChild(`open "${recapPath}"`);
+			}
+		} catch (recapErr) {
+			console.error(`Failed to generate recap: ${recapErr}`);
+		}
+
+		const recapSuffix = recapPath ? `\n\nRecap: ${recapPath}` : "";
+
 		return {
 			result: {
-				content: [{ type: "text", text: finalSummary }],
+				content: [{ type: "text", text: finalSummary + recapSuffix }],
 				details: detailsWithPipeline,
 				isError: isError || (validationResult ? !validationResult.passed : false),
 			},
@@ -1487,24 +1566,9 @@ export function createCoordinateTool(events: EventBus): ToolDefinition<typeof Co
 			// ─────────────────────────────────────────────────────────────────
 			container.addChild(new Text(drawBoxTop(width, "Coordination", theme), 0, 0));
 
-			// Pipeline row
+			// 2026 four-level coordination dashboard
 			if (pipelineState) {
-				const pipelineRow = renderPipelineRow(pipelineState, theme, width - 4);
-				container.addChild(new Text(drawBoxLine(pipelineRow, width, theme), 0, 0));
-			}
-
-			// Task progress bar
-			if (details.taskProgress && details.taskProgress.total > 0) {
-				const progressLines = renderTaskProgress(details.taskProgress, theme, width - 4);
-				for (const line of progressLines) {
-					container.addChild(new Text(drawBoxLine(line, width, theme), 0, 0));
-				}
-			}
-
-			// Workers section
-			if (workers.length > 0) {
-				// Build task-centric entries from worker display states when taskId data is available.
-				// Workers that have a taskId are shown as task rows; remaining workers fall back to compact view.
+				// Build task-centric entries from worker display states
 				const taskEntries: TaskCentricEntry[] = workerDisplays
 					.filter(w => !!w.taskId)
 					.map(w => ({
@@ -1519,9 +1583,20 @@ export function createCoordinateTool(events: EventBus): ToolDefinition<typeof Co
 						currentFile: w.currentFile ?? undefined,
 					}));
 
-				const workerLines = taskEntries.length > 0
-					? renderTasksCentric(workerDisplays, taskEntries, theme, width - 4)
-					: renderWorkersCompact(workerDisplays, theme, width - 4);
+				const dashboardLines = renderCoordinationDashboard(
+					path.basename(details.planPath || "coordination"),
+					pipelineState,
+					workerDisplays,
+					taskEntries,
+					theme,
+					width - 4,
+				);
+				for (const line of dashboardLines) {
+					container.addChild(new Text(drawBoxLine(line, width, theme), 0, 0));
+				}
+			} else if (workers.length > 0) {
+				// No pipeline state yet — fall back to compact worker view
+				const workerLines = renderWorkersCompact(workerDisplays, theme, width - 4);
 				for (const line of workerLines) {
 					container.addChild(new Text(drawBoxLine(line, width, theme), 0, 0));
 				}
