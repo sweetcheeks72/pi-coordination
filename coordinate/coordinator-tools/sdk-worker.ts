@@ -327,6 +327,9 @@ export function spawnWorkerSDK(
 	// Create worker context for the inline extension
 	const workerContext: WorkerContext = { coordDir, workerId, identity };
 
+	// Track lastOutput for change detection (worker_output event emission)
+	let prevLastOutput = "";
+
 	// Start async execution (non-blocking)
 	const promise = (async () => {
 		// Register abort function immediately (before session starts)
@@ -361,6 +364,26 @@ export function spawnWorkerSDK(
 							usage: progress.usage,
 						}))
 						.catch(() => {});
+
+					// Emit worker_output event when lastOutput changes
+					if (progress.lastOutput && progress.lastOutput !== prevLastOutput) {
+						try {
+							const preview = progress.lastOutput
+								.split('\n')
+								.filter((l: string) => l.trim())
+								.slice(-1)[0]
+								?.slice(0, 120) || "";
+							const eventLine = JSON.stringify({
+								type: "worker_output",
+								workerId,
+								workerName: identity,
+								preview,
+								timestamp: Date.now(),
+							});
+							fsSync.appendFileSync(path.join(coordDir, "events.jsonl"), eventLine + "\n");
+						} catch {}
+						prevLastOutput = progress.lastOutput;
+					}
 				},
 			});
 

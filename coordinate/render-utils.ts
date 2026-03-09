@@ -246,6 +246,7 @@ export interface WorkerDisplayState {
 	durationMs: number;
 	currentFile?: string | null;
 	currentTool?: string | null;
+	lastOutput?: string; // Last captured output for live feedback
 }
 
 /**
@@ -293,6 +294,7 @@ export function workerStateToDisplay(w: WorkerStateFile): WorkerDisplayState {
 		durationMs: w.startedAt ? Date.now() - w.startedAt : 0,
 		currentFile: w.currentFile,
 		currentTool: w.currentTool,
+		lastOutput: w.lastOutput,
 	};
 }
 
@@ -424,6 +426,18 @@ export function renderWorkersCompact(
 		}
 		
 		lines.push(`  ${icon} ${namePadded} ${time} ${cost} ${ctx} ${taskInfo}`);
+
+		if (w.lastOutput) {
+			const preview = w.lastOutput
+				.split('\n')
+				.filter(l => l.trim())
+				.slice(-2) // last 2 non-empty lines
+				.join(' │ ');
+			if (preview.length > 0) {
+				const truncated = preview.length > 120 ? preview.slice(0, 117) + '…' : preview;
+				lines.push(`      ${theme.fg("dim", truncated)}`);
+			}
+		}
 	}
 
 	if (active.length > 4) {

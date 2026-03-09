@@ -122,7 +122,25 @@ export type CoordinationEvent =
 	| { type: "cost_milestone"; threshold: number; totals: Record<string, number>; aggregate: number; timestamp: number }
 	| { type: "coordinator"; message: string; timestamp: number }
 	| { type: "phase_complete"; phase: PipelinePhase; duration: number; cost: number; timestamp: number }
-	| { type: "cost_limit_reached"; total: number; limit: number; timestamp: number };
+	| { type: "cost_limit_reached"; total: number; limit: number; timestamp: number }
+	| { type: "worker_output"; workerId: string; workerName: string; preview: string; timestamp: number }
+	| { type: "worker_spawning"; workerId: string; config?: { logicalName?: string; handshakeSpec?: string }; timestamp: number }
+	| { type: "phase_started"; phase: PipelinePhase; timestamp: number }
+	| { type: "phase_completed"; phase: PipelinePhase; timestamp: number }
+	| { type: "cost_updated"; total: number; timestamp: number }
+	| { type: "checkpoint_saved"; timestamp: number }
+	| { type: "planner_review_started"; timestamp: number }
+	| { type: "planner_review_complete"; timestamp: number }
+	| { type: "session_started"; timestamp: number }
+	| { type: "session_completed"; timestamp: number }
+	| { type: "review_started"; timestamp: number }
+	| { type: "review_complete"; timestamp: number }
+	| { type: "review_completed"; timestamp: number }
+	| { type: "fix_started"; timestamp: number }
+	| { type: "fix_completed"; timestamp: number }
+	| { type: "fixes_started"; timestamp: number }
+	| { type: "fixes_complete"; timestamp: number }
+	| { type: "activity"; phase?: string; contextTokens?: number; timestamp: number };
 
 export type CoordinationStatus = "analyzing" | "executing" | "reviewing" | "complete" | "failed";
 

@@ -204,7 +204,26 @@ export class TaskQueueManager {
 
 	async addDiscoveredTask(task: Omit<Task, "status" | "id"> & { id?: string }, status: "pending" | "pending_review" = "pending_review"): Promise<Task> {
 		return this.withLock(async () => {
-			const queue = await this.getQueue();
+			let queue: TaskQueue;
+			try {
+				queue = await this.getQueue();
+			} catch (e: any) {
+				if (e.code === 'ENOENT') {
+					// tasks.json not yet created (e.g., planner-disabled path)
+					// Initialize empty queue so reviewer can add discovered tasks
+					queue = {
+						version: "2.0",
+						planPath: this.coordDir,
+						planHash: "",
+						createdAt: Date.now(),
+						tasks: []
+					};
+					// Persist the empty queue immediately so subsequent calls don't re-throw ENOENT
+					await fs.writeFile(this.queuePath, JSON.stringify(queue, null, 2));
+				} else {
+					throw e;
+				}
+			}
 
 			// Auto-generate ID if not provided (atomic within lock)
 			let taskId = task.id;
