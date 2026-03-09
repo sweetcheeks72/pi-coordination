@@ -107,6 +107,7 @@ Follow your system prompt for the full decision tree and output format.`;
 			artifactLabel: "planner",
 			extensions: [PLANNER_EXTENSION_PATH],
 			attachments,
+			parentModel: config.model,
 		},
 	);
 
@@ -205,6 +206,7 @@ Respond with JSON:
 						outputLimits: config.outputLimits,
 						artifactsDir: path.join(coordDir, "artifacts"),
 						artifactLabel: `planner-review-${task.id}`,
+						parentModel: config.model,
 					},
 				);
 

@@ -1,6 +1,6 @@
 #!/usr/bin/env npx jiti
 import { TestRunner, assertEqual, assert } from "./test-utils.js";
-import { classifyProviderFailure, estimateProviderCooldownMs, parseModelCandidates, resolveParentModelHint, selectModelCandidate, type ProviderAttemptRecord } from "../subagent/provider-health.js";
+import { buildParentModelEnv, classifyProviderFailure, estimateProviderCooldownMs, parseModelCandidates, resolveParentModelHint, selectModelCandidate, type ProviderAttemptRecord } from "../subagent/provider-health.js";
 
 async function main() {
 	const runner = new TestRunner();
@@ -32,6 +32,18 @@ async function main() {
 		assertEqual(resolveParentModelHint(undefined, "google/gemini-2.5-flash"), "google/gemini-2.5-flash");
 	});
 
+
+	await runner.test("builds child env with PI_MODEL when parent provided", () => {
+		const env = buildParentModelEnv({ PATH: "x" } as NodeJS.ProcessEnv, "openai-codex/gpt-5.4");
+		assertEqual(env.PI_MODEL, "openai-codex/gpt-5.4");
+		assertEqual(env.PATH, "x");
+	});
+
+	await runner.test("leaves child env untouched when parent missing", () => {
+		const env = buildParentModelEnv({ PATH: "x" } as NodeJS.ProcessEnv, undefined);
+		assertEqual(env.PI_MODEL, undefined);
+		assertEqual(env.PATH, "x");
+	});
 	await runner.test("prefers parent provider lane when available", () => {
 		const sel = selectModelCandidate("anthropic/claude-sonnet-4-6, openai-codex/gpt-5.4, google/gemini-2.5-flash", "openai-codex/gpt-5.4", Date.now(), "/tmp/nonexistent-provider-health-history.jsonl");
 		assertEqual(sel.selectedModel, "openai-codex/gpt-5.4");

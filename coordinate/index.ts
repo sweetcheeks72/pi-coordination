@@ -1024,6 +1024,7 @@ See: pi-coordination README for spec format documentation.`,
 					outputLimits: pipelineConfig.maxOutput,
 					artifactsDir: path.join(coordDir, "artifacts"),
 					artifactLabel: "coordinator",
+					parentModel: options.defaultModel,
 				},
 			);
 			lastCoordResult = coordinatorResult;

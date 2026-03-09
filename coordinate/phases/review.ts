@@ -139,7 +139,7 @@ Use "newTasks" for larger work that needs a dedicated worker (e.g., new features
 		signal,
 		config.onProgress,
 		(results) => ({ mode: "single", results, agentScope: "user", projectAgentsDir: null }),
-		{ outputLimits: config.outputLimits, artifactsDir: path.join(coordDir, "artifacts"), artifactLabel: "review" },
+		{ outputLimits: config.outputLimits, artifactsDir: path.join(coordDir, "artifacts"), artifactLabel: "review", parentModel: config.model },
 	);
 
 	let output = getResultOutput(result);

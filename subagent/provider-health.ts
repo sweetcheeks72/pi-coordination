@@ -116,6 +116,10 @@ export function resolveParentModelHint(explicitParentModel: string | undefined, 
 	return explicitParentModel || envModel || undefined;
 }
 
+export function buildParentModelEnv(baseEnv: NodeJS.ProcessEnv, parentModel: string | undefined): NodeJS.ProcessEnv {
+	return parentModel ? { ...baseEnv, PI_MODEL: parentModel } : { ...baseEnv };
+}
+
 export function selectModelCandidate(modelSpec: string | undefined, parentModel: string | undefined, now: number = Date.now(), historyPath: string = DEFAULT_PROVIDER_HISTORY_PATH): ProviderSelectionMeta {
 	const history = loadProviderHistory(historyPath);
 	const configuredCandidates = parseModelCandidates(modelSpec);

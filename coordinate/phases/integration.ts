@@ -177,7 +177,7 @@ If all components integrate correctly, set allPassing: true.`;
 		signal,
 		config.onProgress,
 		(results) => ({ mode: "single", results, agentScope: "user", projectAgentsDir: null }),
-		{ outputLimits: config.outputLimits, artifactsDir: path.join(coordDir, "artifacts"), artifactLabel: "integration-review" },
+		{ outputLimits: config.outputLimits, artifactsDir: path.join(coordDir, "artifacts"), artifactLabel: "integration-review", parentModel: config.model },
 	);
 
 	let output = getResultOutput(result);

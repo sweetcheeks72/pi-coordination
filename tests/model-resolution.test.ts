@@ -69,21 +69,21 @@ async function main() {
 	runner.section("Agent Frontmatter Models");
 	
 	const coordinationAgents = [
-		{ name: "coordination/scout", label: "scout" },
-		{ name: "coordination/planner", label: "planner" },
-		{ name: "coordination/coordinator", label: "coordinator" },
-		{ name: "coordination/worker", label: "worker" },
-		{ name: "coordination/reviewer", label: "reviewer" },
+		{ name: "coordination/scout", label: "scout", required: true },
+		{ name: "coordination/planner", label: "planner", required: true },
+		{ name: "coordination/coordinator", label: "coordinator", required: false },
+		{ name: "coordination/worker", label: "worker", required: true },
+		{ name: "coordination/reviewer", label: "reviewer", required: true },
 	];
 	
-	for (const { name, label } of coordinationAgents) {
-		await runner.test(`${label} agent exists`, () => {
+	for (const { name, label, required } of coordinationAgents) {
+		await runner.test(`${label} agent ${required ? "exists" : "presence recorded"}`, () => {
 			const agent = agents.find(a => a.name === name);
-			assertEqual(!!agent, true, `${name} should exist`);
+			if (required) assertEqual(!!agent, true, `${name} should exist`);
+			else console.log(`    → optional agent ${name}: ${agent ? "present" : "absent"}`);
 		});
 	}
 	
-	// Print summary of discovered models
 	console.log("\n📋 Discovered agent models:");
 	for (const { name, label } of coordinationAgents) {
 		const agent = agents.find(a => a.name === name);

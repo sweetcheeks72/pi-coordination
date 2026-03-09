@@ -143,7 +143,7 @@ Save output to: ${config.outputDir}/main.md`;
 		signal,
 		config.onProgress,
 		(results) => ({ mode: "single", results, agentScope: "user", projectAgentsDir: null }),
-		{ outputLimits: config.outputLimits, artifactsDir: path.join(coordDir, "artifacts"), artifactLabel: "scout" },
+		{ outputLimits: config.outputLimits, artifactsDir: path.join(coordDir, "artifacts"), artifactLabel: "scout", parentModel: config.model },
 	);
 
 	const contextPath = path.join(config.outputDir, "main.md");

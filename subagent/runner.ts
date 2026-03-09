@@ -10,7 +10,7 @@ import { createArtifactPaths } from "./artifacts.js";
 import { truncateOutputHead } from "./truncate.js";
 import type { OnUpdateCallback, OutputLimits, SingleResult, SubagentDetails } from "./types.js";
 import { runAgentSDK, isSDKAvailable } from "./sdk-runner.js";
-import { classifyProviderFailure, recordProviderOutcome, resolveParentModelHint, selectModelCandidate } from "./provider-health.js";
+import { buildParentModelEnv, classifyProviderFailure, recordProviderOutcome, resolveParentModelHint, selectModelCandidate } from "./provider-health.js";
 
 const UPDATE_THROTTLE_MS = 250;
 const MAX_RECENT_TOOLS = 5;
@@ -199,7 +199,7 @@ export async function runSingleAgent(
 		let rawOutput = "";
 
 		const exitCode = await new Promise<number>((resolve) => {
-			const childEnv = { ...process.env, ...(parentModel ? { PI_MODEL: parentModel } : {}) };
+			const childEnv = buildParentModelEnv(process.env, parentModel);
 			const proc = spawn("pi", args, { cwd: cwd ?? runtime.cwd, shell: false, stdio: ["ignore", "pipe", "pipe"], env: childEnv });
 			let buffer = "";
 
