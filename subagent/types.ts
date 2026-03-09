@@ -1,6 +1,7 @@
 import type { AgentToolResult } from "@mariozechner/pi-agent-core";
 import type { Message } from "@mariozechner/pi-ai";
 import type { AgentScope } from "./agents.js";
+import type { ProviderSelectionMeta } from "./provider-health.js";
 
 export interface UsageStats {
 	input: number;
@@ -54,6 +55,8 @@ export interface SingleResult {
 	currentTool?: string | null;
 	currentToolArgs?: string | null;
 	recentTools?: Array<{ tool: string; args: string; endMs: number }>;
+	providerSelection?: ProviderSelectionMeta;
+	failureCategory?: string;
 }
 
 export interface SubagentDetails {

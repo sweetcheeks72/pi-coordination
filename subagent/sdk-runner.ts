@@ -14,6 +14,7 @@ import { randomUUID } from "node:crypto";
 import * as fs from "node:fs";
 import * as path from "node:path";
 import type { AgentConfig } from "./agents.js";
+import { classifyProviderFailure, inferProviderFromModel, recordProviderOutcome, resolveParentModelHint, selectModelCandidate } from "./provider-health.js";
 import { createArtifactPaths } from "./artifacts.js";
 import { truncateOutputHead } from "./truncate.js";
 import type { OnUpdateCallback, OutputLimits, SingleResult, SubagentDetails } from "./types.js";
@@ -95,6 +96,8 @@ export interface SDKRunnerConfig {
 	step?: number;
 	/** Additional extension paths to load */
 	extensions?: string[];
+	/** Parent runtime model hint propagated to subagents */
+	parentModel?: string;
 	/** Inline extension factories (passed directly, no file loading) */
 	inlineExtensions?: ExtensionFactoryType[];
 	/** Custom tools to register (for coordinator) */
@@ -131,6 +134,7 @@ export async function runAgentSDK(config: SDKRunnerConfig): Promise<SingleResult
 		artifactLabel,
 		step,
 		extensions,
+		parentModel,
 		inlineExtensions,
 		customTools,
 		onSessionReady,
@@ -154,6 +158,8 @@ export async function runAgentSDK(config: SDKRunnerConfig): Promise<SingleResult
 
 	const startTime = Date.now();
 	const runId = randomUUID();
+	const resolvedParentModel = resolveParentModelHint(parentModel, process.env.PI_MODEL);
+	const providerSelection = selectModelCandidate(agent.model, resolvedParentModel);
 	const artifactPaths = createArtifactPaths(artifactLabel ?? agent.name, runId, artifactsDir);
 
 	// Initialize result tracking
@@ -165,7 +171,8 @@ export async function runAgentSDK(config: SDKRunnerConfig): Promise<SingleResult
 		messages: [],
 		stderr: "",
 		usage: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, cost: 0, contextTokens: 0, turns: 0 },
-		model: agent.model,
+		model: providerSelection.selectedModel || agent.model || resolvedParentModel,
+		providerSelection,
 		step,
 		artifactPaths,
 		toolCount: 0,
@@ -206,7 +213,9 @@ export async function runAgentSDK(config: SDKRunnerConfig): Promise<SingleResult
 	try {
 		// Set agent identity for extensions to check
 		const previousIdentity = process.env.PI_AGENT_IDENTITY;
+		const previousModel = process.env.PI_MODEL;
 		process.env.PI_AGENT_IDENTITY = agent.name;
+		if (resolvedParentModel) process.env.PI_MODEL = resolvedParentModel;
 
 		// Log agent configuration
 		const hasTools = agent.tools && agent.tools.length > 0;
@@ -216,7 +225,7 @@ export async function runAgentSDK(config: SDKRunnerConfig): Promise<SingleResult
 				? "NONE"
 				: "default";
 		const modeLabel = agent.systemPromptMode === "override" ? "override" : "append";
-		console.log(`[sdk-runner] ${agent.name}: model=${agent.model || "default"}, tools=[${toolsList}], prompt=${modeLabel}`);
+		console.log(`[sdk-runner] ${agent.name}: model=${providerSelection.selectedModel || agent.model || resolvedParentModel || "default"}, tools=[${toolsList}], prompt=${modeLabel}`);
 
 		// Resolve tools - separate built-in from extension paths
 		let builtinTools: string[] = [];
@@ -251,7 +260,7 @@ export async function runAgentSDK(config: SDKRunnerConfig): Promise<SingleResult
 			cwd,
 			sessionManager: SessionManager.inMemory(cwd),
 			// Let SDK discover model if not specified
-			...(agent.model ? { model: await resolveModel(agent.model) } : {}),
+			...(providerSelection.selectedModel ? { model: await resolveModel(providerSelection.selectedModel) } : {}),
 			// System prompt handling
 			systemPrompt: systemPrompt
 				? agent.systemPromptMode === "override"
@@ -482,6 +491,11 @@ export async function runAgentSDK(config: SDKRunnerConfig): Promise<SingleResult
 		} else {
 			delete process.env.PI_AGENT_IDENTITY;
 		}
+		if (previousModel !== undefined) {
+			process.env.PI_MODEL = previousModel;
+		} else {
+			delete process.env.PI_MODEL;
+		}
 
 		// Close JSONL stream
 		try {
@@ -513,6 +527,8 @@ export async function runAgentSDK(config: SDKRunnerConfig): Promise<SingleResult
 						agent: agent.name,
 						task,
 						model: currentResult.model,
+					providerSelection: currentResult.providerSelection,
+					failureCategory: currentResult.failureCategory,
 						exitCode: currentResult.exitCode,
 						startedAt: startTime,
 						completedAt: Date.now(),
@@ -530,22 +546,22 @@ export async function runAgentSDK(config: SDKRunnerConfig): Promise<SingleResult
 				{ encoding: "utf-8", mode: 0o600 }
 			);
 		} catch {}
+		const failureCategory = currentResult.exitCode === 0 ? "success" : classifyProviderFailure(`${currentResult.stderr}
+${rawOutput}
+${currentResult.errorMessage || ""}`);
+		currentResult.failureCategory = failureCategory;
+		recordProviderOutcome({
+			provider: providerSelection.selectedProvider || inferProviderFromModel(currentResult.model) || "unknown",
+			model: currentResult.model,
+			agent: agent.name,
+			status: failureCategory === "success" ? "success" : failureCategory,
+			exitCode: currentResult.exitCode,
+			errorMessage: currentResult.errorMessage || currentResult.stderr,
+			stopReason: currentResult.stopReason,
+		});
 	}
 
 	return currentResult;
-}
-
-/**
- * Infer provider from model ID.
- * Common patterns: claude-* = anthropic, gpt-* = openai, gemini-* = google
- */
-function inferProvider(modelId: string): string | null {
-	const id = modelId.toLowerCase();
-	if (id.startsWith("claude")) return "anthropic";
-	if (id.startsWith("gpt") || id.startsWith("o1") || id.startsWith("o3")) return "openai";
-	if (id.startsWith("gemini")) return "google";
-	if (id.startsWith("deepseek")) return "deepseek";
-	return null;
 }
 
 // Cached model registry to avoid recreation on every resolveModel call

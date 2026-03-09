@@ -994,3 +994,17 @@ Inspired by and built on ideas from:
 ## License
 
 MIT
+
+## Provider Health Memory
+
+Subagent execution now tracks recent provider/model outcomes in a local history file at `~/.pi/agent/provider-health-history.jsonl`.
+
+Behavior:
+- parses multi-model frontmatter like `model: anthropic/..., openai-codex/..., google/...`
+- prefers the current parent model/provider lane from `PI_MODEL` when that candidate is available
+- records successful runs and classified failures (including `rate_limit` and MCP connection failures)
+- estimates provider cooldown windows from recent local history
+- skips or deprioritizes providers that appear to still be cooling down
+- includes provider-selection metadata in subagent run artifacts
+
+This helps keep worker launches aligned with the currently healthy Helios/provider lane instead of repeatedly retrying a provider that is likely still rate-limited.

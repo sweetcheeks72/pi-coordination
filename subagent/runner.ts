@@ -10,6 +10,7 @@ import { createArtifactPaths } from "./artifacts.js";
 import { truncateOutputHead } from "./truncate.js";
 import type { OnUpdateCallback, OutputLimits, SingleResult, SubagentDetails } from "./types.js";
 import { runAgentSDK, isSDKAvailable } from "./sdk-runner.js";
+import { classifyProviderFailure, recordProviderOutcome, resolveParentModelHint, selectModelCandidate } from "./provider-health.js";
 
 const UPDATE_THROTTLE_MS = 250;
 const MAX_RECENT_TOOLS = 5;
@@ -47,9 +48,11 @@ export async function runSingleAgent(
 	signal: AbortSignal | undefined,
 	onUpdate: OnUpdateCallback | undefined,
 	makeDetails: (results: SingleResult[]) => SubagentDetails,
-	options?: { outputLimits?: OutputLimits; artifactsDir?: string; artifactLabel?: string; extensions?: string[]; attachments?: string[]; useSubprocess?: boolean },
+	options?: { outputLimits?: OutputLimits; artifactsDir?: string; artifactLabel?: string; extensions?: string[]; attachments?: string[]; useSubprocess?: boolean; parentModel?: string },
 ): Promise<SingleResult> {
 	const agent = agents.find((a) => a.name === agentName);
+	const parentModel = resolveParentModelHint(options?.parentModel, process.env.PI_MODEL);
+	const providerSelection = selectModelCandidate(agent?.model, parentModel);
 
 	if (!agent) {
 		return {
@@ -68,7 +71,7 @@ export async function runSingleAgent(
 	if (!options?.useSubprocess && await isSDKAvailable()) {
 		return runAgentSDK({
 			cwd: cwd ?? runtime.cwd,
-			agent,
+			agent: { ...agent, model: providerSelection.selectedModel },
 			task,
 			signal,
 			onUpdate,
@@ -78,6 +81,7 @@ export async function runSingleAgent(
 			artifactLabel: options?.artifactLabel,
 			step,
 			extensions: options?.extensions,
+			parentModel,
 		});
 	}
 
@@ -88,10 +92,11 @@ export async function runSingleAgent(
 		? agent.tools!.join(", ") 
 		: (agent.systemPromptMode === "override" ? "NONE" : "default");
 	const modeLabel = agent.systemPromptMode === "override" ? "override" : "append";
-	console.log(`[subagent] ${agentName}: model=${agent.model || "default"}, tools=[${toolsList}], prompt=${modeLabel}`);
+	console.log(`[subagent] ${agentName}: model=${providerSelection.selectedModel || agent.model || parentModel || "default"}, tools=[${toolsList}], prompt=${modeLabel}`);
 
 	const args: string[] = ["--mode", "json", "-p", "--no-session"];
-	if (agent.model) args.push("--model", agent.model);
+	const selectedModel = providerSelection.selectedModel;
+	if (selectedModel) args.push("--model", selectedModel);
 	
 	if (agent.tools && agent.tools.length > 0) {
 		const builtinTools: string[] = [];
@@ -134,7 +139,8 @@ export async function runSingleAgent(
 		messages: [],
 		stderr: "",
 		usage: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, cost: 0, contextTokens: 0, turns: 0 },
-		model: agent.model,
+		model: providerSelection.selectedModel || agent.model || parentModel,
+		providerSelection,
 		step,
 		artifactPaths,
 		toolCount: 0,
@@ -193,7 +199,8 @@ export async function runSingleAgent(
 		let rawOutput = "";
 
 		const exitCode = await new Promise<number>((resolve) => {
-			const proc = spawn("pi", args, { cwd: cwd ?? runtime.cwd, shell: false, stdio: ["ignore", "pipe", "pipe"], env: process.env });
+			const childEnv = { ...process.env, ...(parentModel ? { PI_MODEL: parentModel } : {}) };
+			const proc = spawn("pi", args, { cwd: cwd ?? runtime.cwd, shell: false, stdio: ["ignore", "pipe", "pipe"], env: childEnv });
 			let buffer = "";
 
 			const processLine = (line: string) => {
@@ -332,6 +339,19 @@ export async function runSingleAgent(
 		currentResult.exitCode = exitCode;
 		if (wasAborted) currentResult.stopReason = "aborted";
 		currentResult.durationMs = Date.now() - startTime;
+		const failureCategory = exitCode === 0 ? "success" : classifyProviderFailure(`${currentResult.stderr}
+${rawOutput}
+${currentResult.errorMessage || ""}`);
+		currentResult.failureCategory = failureCategory;
+		recordProviderOutcome({
+			provider: providerSelection.selectedProvider || "unknown",
+			model: currentResult.model,
+			agent: agentName,
+			status: failureCategory === "success" ? "success" : failureCategory,
+			exitCode,
+			errorMessage: currentResult.errorMessage || currentResult.stderr,
+			stopReason: currentResult.stopReason,
+		});
 
 		const finalOutput = getFinalOutput(currentResult.messages);
 		const raw = finalOutput || rawOutput || currentResult.output || "";
@@ -357,6 +377,8 @@ export async function runSingleAgent(
 						agent: agentName,
 						task,
 						model: currentResult.model,
+					providerSelection: currentResult.providerSelection,
+					failureCategory: currentResult.failureCategory,
 						exitCode,
 						startedAt: startTime,
 						completedAt: Date.now(),
@@ -389,7 +411,7 @@ export async function runParallelAgents(
 	onUpdate: OnUpdateCallback | undefined,
 	makeDetails: (results: SingleResult[]) => SubagentDetails,
 	maxConcurrency: number = 4,
-	options?: { outputLimits?: OutputLimits; artifactsDir?: string; extensions?: string[] },
+	options?: { outputLimits?: OutputLimits; artifactsDir?: string; extensions?: string[]; parentModel?: string },
 ): Promise<SingleResult[]> {
 	const allResults: SingleResult[] = new Array(tasks.length);
 
@@ -445,6 +467,7 @@ export async function runParallelAgents(
 					artifactsDir: options?.artifactsDir,
 					artifactLabel: `${t.agent}-${current + 1}`,
 					extensions: options?.extensions,
+					parentModel: options?.parentModel,
 				},
 			);
 			allResults[current] = result;

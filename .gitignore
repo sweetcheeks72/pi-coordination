@@ -5,3 +5,4 @@ tests/output/
 context.md
 tests/.test-notes.md
 coordination-log-*.md
+specs/
