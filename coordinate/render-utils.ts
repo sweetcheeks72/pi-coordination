@@ -126,6 +126,12 @@ export function truncateText(text: string, maxLen: number): string {
 	return text.slice(0, maxLen - 3) + "...";
 }
 
+// Pi TUI crashes on strings > 210 chars — hard cap as safety guard (Pi bug #1842)
+function piSafe(str: string, max = 205): string {
+	if (!str || str.length <= max) return str;
+	return str.slice(0, max - 1) + '…';
+}
+
 // ─────────────────────────────────────────────────────────────────────────────
 // Phase helpers
 // ─────────────────────────────────────────────────────────────────────────────
@@ -148,6 +154,7 @@ export interface PipelineDisplayState {
 	cost: number;
 	costByPhase?: Record<string, number>;
 	elapsed: number; // ms
+	costLimit?: number; // USD cap — if set, shown in header
 }
 
 export function renderPipelineRow(
@@ -1008,6 +1015,7 @@ export function renderCoordinationDashboard(
 	width: number,
 	/** Whether model routing is active (shows routing:on in header) */
 	modelRoutingEnabled: boolean = true,
+	costLimit?: number,
 ): string[] {
 	const lines: string[] = [];
 

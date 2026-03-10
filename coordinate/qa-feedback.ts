@@ -42,11 +42,14 @@ interface QAStore {
 // Storage helpers
 // ─────────────────────────────────────────────────────────────────────────────
 
-const QA_STORE_PATH = path.join(os.homedir(), ".pi", "qa-failures.json");
+function getQAStorePath(): string {
+	return process.env.QA_STORE_PATH || path.join(os.homedir(), ".pi", "qa-failures.json");
+}
 
 async function readStore(): Promise<QAStore> {
+	const storePath = getQAStorePath();
 	try {
-		const raw = await fs.readFile(QA_STORE_PATH, "utf-8");
+		const raw = await fs.readFile(storePath, "utf-8");
 		const parsed = JSON.parse(raw) as QAStore;
 		if (!Array.isArray(parsed.failures)) {
 			return { failures: [] };
@@ -58,8 +61,9 @@ async function readStore(): Promise<QAStore> {
 }
 
 async function writeStore(store: QAStore): Promise<void> {
-	await fs.mkdir(path.dirname(QA_STORE_PATH), { recursive: true });
-	await fs.writeFile(QA_STORE_PATH, JSON.stringify(store, null, 2), "utf-8");
+	const storePath = getQAStorePath();
+	await fs.mkdir(path.dirname(storePath), { recursive: true });
+	await fs.writeFile(storePath, JSON.stringify(store, null, 2), "utf-8");
 }
 
 // ─────────────────────────────────────────────────────────────────────────────

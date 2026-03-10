@@ -47,6 +47,86 @@ async function ensureSDK(): Promise<boolean> {
 const UPDATE_THROTTLE_MS = 250;
 const MAX_RECENT_TOOLS = 5;
 
+// ─────────────────────────────────────────────────────────────────────────────
+// In-Process Retry / Provider Failover
+// ─────────────────────────────────────────────────────────────────────────────
+
+/**
+ * Ordered list of providers to try on 429/5xx errors.
+ * The initialModel passed to runWithFailover is always tried first;
+ * this list supplies the cascade fallbacks (excluding any duplicate of initialModel).
+ */
+export const PROVIDER_CASCADE: string[] = [
+	// Primary: Bedrock Global CRI
+	'amazon-bedrock/us.anthropic.claude-sonnet-4-6',
+	// Fallback 1: Anthropic direct (if configured)
+	'anthropic/claude-sonnet-4-6',
+	// Fallback 2: OpenAI (if configured)
+	'openai/gpt-4o',
+	// Fallback 3: Google (if configured)
+	'google/gemini-2.5-pro',
+];
+
+/** Simple sleep helper for retry back-off. */
+function sleep(ms: number): Promise<void> {
+	return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+/**
+ * Wrap a provider call in a retry loop with provider cascade.
+ *
+ * Behaviour:
+ * - Tries `initialModel` first, then each model in PROVIDER_CASCADE (deduped).
+ * - Per model, attempts up to 2 times on retryable errors (429 / 5xx / overloaded).
+ * - Applies exponential back-off between attempts within the same model.
+ * - Rethrows immediately on non-retryable errors.
+ * - Throws after all providers are exhausted.
+ *
+ * @param runFn     Function that performs the API call for a given model string.
+ * @param initialModel  The preferred model to try first.
+ */
+export async function runWithFailover<T>(
+	runFn: (model: string) => Promise<T>,
+	initialModel: string,
+): Promise<T> {
+	const candidates = [
+		initialModel,
+		...PROVIDER_CASCADE.filter((m) => m !== initialModel),
+	];
+	let lastError: Error | undefined;
+
+	for (const model of candidates) {
+		for (let attempt = 1; attempt <= 2; attempt++) {
+			try {
+				return await runFn(model);
+			} catch (err: any) {
+				const is429 =
+					err?.status === 429 ||
+					(typeof err?.message === 'string' &&
+						(err.message.toLowerCase().includes('rate limit') ||
+							err.message.toLowerCase().includes('throttl')));
+				const isProviderError =
+					(typeof err?.status === 'number' && err.status >= 500) ||
+					(typeof err?.message === 'string' &&
+						err.message.toLowerCase().includes('overloaded'));
+
+				if (is429 || isProviderError) {
+					console.warn(
+						`[failover] ${model} attempt ${attempt}/2: ${err.message} — retrying`,
+					);
+					if (attempt < 2) await sleep(Math.pow(2, attempt) * 1000);
+					lastError = err;
+					continue;
+				}
+				// Non-retryable error — rethrow immediately
+				throw err;
+			}
+		}
+		console.warn(`[failover] ${model} exhausted — trying next provider`);
+	}
+	throw lastError ?? new Error('All providers exhausted');
+}
+
 /**
  * Model routing by agent role / task complexity.
  * Cheap models for recon, mid-tier for planning/review, premium for implementation.
@@ -106,7 +186,7 @@ export interface SDKProgress {
 	currentToolArgs?: string;
 	recentTools: Array<{ tool: string; args: string; endMs: number }>;
 	lastOutput?: string;
-	usage: { input: number; output: number; cacheRead: number; cacheWrite: number; cost: number; turns: number };
+	usage: { input: number; output: number; cacheRead: number; cacheWrite: number; cost: number; turns: number; cacheHitRate: number };
 }
 
 /** Extension factory type for inline extensions */
@@ -282,7 +362,7 @@ export async function runAgentSDK(config: SDKRunnerConfig): Promise<SingleResult
 		const modeLabel = agent.systemPromptMode === "override" ? "override" : "append";
 		console.log(`[sdk-runner] ${agent.name}: model=${providerSelection.selectedModel || agent.model || resolvedParentModel || "default"}, tools=[${toolsList}], prompt=${modeLabel}`);
 
-		// Resolve tools - separate built-in from extension paths
+		// Resolve tools - separate built-in from extension paths (done once, shared across retry attempts)
 		let builtinTools: string[] = [];
 		const extensionPaths: string[] = [...(extensions ?? [])];
 
@@ -310,218 +390,322 @@ export async function runAgentSDK(config: SDKRunnerConfig): Promise<SingleResult
 		const skills = agent.skills ?? undefined; // undefined = discover, [] = skip
 		const contextFiles = agent.contextFiles ?? undefined; // undefined = discover, [] = skip
 
-		// Create session options
-		const sessionOptions: Parameters<typeof createAgentSession>[0] = {
-			cwd,
-			sessionManager: SessionManager.inMemory(cwd),
-			// Let SDK discover model if not specified
-			...(providerSelection.selectedModel ? { model: await resolveModel(providerSelection.selectedModel) } : {}),
-			// System prompt handling
-			systemPrompt: systemPrompt
-				? agent.systemPromptMode === "override"
-					? systemPrompt
-					: (defaultPrompt: string) => `${defaultPrompt}\n\n${systemPrompt}`
-				: undefined,
-			// Tool configuration - empty array means no discovery, but we need built-in tools
-			...(builtinTools.length > 0 ? { tools: await resolveBuiltinTools(builtinTools, cwd) } : {}),
-			// Extension paths (skip discovery if explicitly configured)
-			...(extensionPaths.length > 0 ? { additionalExtensionPaths: extensionPaths } : {}),
-			// Inline extension factories (passed directly, no file loading)
-			...(inlineExtensions && inlineExtensions.length > 0 ? { extensions: inlineExtensions } : {}),
-			// Skills configuration (undefined = discover, [] = skip)
-			...(skills !== undefined ? { skills: skills } : {}),
-			// Context files configuration (undefined = discover, [] = skip)
-			...(contextFiles !== undefined ? { contextFiles: contextFiles } : {}),
-			// Custom tools (for coordinator)
-			...(customTools ? { customTools } : {}),
+		// Pre-resolve built-in tools once (shared across retry attempts)
+		const resolvedBuiltinTools =
+			builtinTools.length > 0 ? await resolveBuiltinTools(builtinTools, cwd) : undefined;
+
+		// ─────────────────────────────────────────────────────────────────────
+		// Prompt Caching (KV Cache) — Feature 2
+		//
+		// For Anthropic/Bedrock providers, structure the system prompt as blocks
+		// with cache_control markers so the API can cache the stable prefix.
+		// This can reduce input token costs by up to 90% on repeated calls
+		// with the same system prompt + codebase context.
+		// ─────────────────────────────────────────────────────────────────────
+
+		/** Determine if the selected provider supports Anthropic-style prompt caching. */
+		const effectiveProviderForCache = inferProviderFromModel(
+			providerSelection.selectedModel || agent.model || routedModel || '',
+		);
+		const supportsCaching =
+			effectiveProviderForCache === 'anthropic' ||
+			effectiveProviderForCache === 'amazon-bedrock';
+
+		/**
+		 * Build the systemPrompt value to pass to createAgentSession.
+		 *
+		 * When caching is supported, return a structured blocks array with
+		 * cache_control markers on the stable (system prompt) section.
+		 * The dynamic task context is intentionally NOT marked for caching so it
+		 * does not pollute the cache with per-task content.
+		 *
+		 * Falls back to the standard string / callback form for other providers.
+		 */
+		const buildSystemPromptValue = (): any => {
+			if (!systemPrompt) return undefined;
+
+			if (supportsCaching) {
+				// Structured blocks with cache_control for Anthropic / Bedrock
+				if (agent.systemPromptMode === "override") {
+					return [
+						{
+							type: 'text' as const,
+							text: systemPrompt,
+							cache_control: { type: 'ephemeral' as const },
+						},
+					];
+				}
+				// append mode: default prompt (stable, cached) + agent system prompt (stable, cached)
+				return (defaultPrompt: string) => [
+					{
+						type: 'text' as const,
+						text: defaultPrompt,
+						cache_control: { type: 'ephemeral' as const },
+					},
+					{
+						type: 'text' as const,
+						text: systemPrompt,
+						cache_control: { type: 'ephemeral' as const },
+					},
+				];
+			}
+
+			// Standard string / function form for non-caching providers
+			return agent.systemPromptMode === "override"
+				? systemPrompt
+				: (defaultPrompt: string) => `${defaultPrompt}\n\n${systemPrompt}`;
 		};
 
-		const { session } = await createAgentSession(sessionOptions);
+		// Initial model string for the failover loop
+		const initialModelStr =
+			providerSelection.selectedModel || agent.model || routedModel || resolvedParentModel || '';
 
-		// Expose steer function for external steering
-		if (onSessionReady) {
-			onSessionReady(session.steer.bind(session));
-		}
+		// ─────────────────────────────────────────────────────────────────────
+		// In-Process Retry / Provider Failover — Feature 1
+		//
+		// runWithModel is the retry unit: create a fresh session with the given
+		// model, subscribe to events, run the prompt. State is reset on each
+		// attempt so retries start clean.
+		// ─────────────────────────────────────────────────────────────────────
 
-		// Expose abort function for terminating the session
-		if (onInterruptReady) {
-			onInterruptReady(session.abort.bind(session));
-		}
+		const runWithModel = async (modelStr: string): Promise<void> => {
+			// Reset accumulated state so each retry starts clean
+			currentResult.messages = [];
+			currentResult.usage = { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, cost: 0, contextTokens: 0, turns: 0 };
+			rawOutput = "";
 
-		// Subscribe to events for progress tracking
-		const unsubscribe = session.subscribe((event) => {
-			// Log all events to JSONL
-			try {
-				jsonlStream.write(JSON.stringify(event) + "\n");
-			} catch {}
+			const resolvedModelObj = modelStr ? await resolveModel(modelStr) : undefined;
 
-			switch (event.type) {
-				case "tool_execution_start":
-					currentResult.toolCount = (currentResult.toolCount ?? 0) + 1;
-					currentResult.currentTool = event.toolName;
-					currentResult.currentToolArgs = extractToolArgsPreview(event.args || {}) || undefined;
-					emitUpdate();
-					onProgress?.({
-						toolCount: currentResult.toolCount ?? 0,
-						tokens: currentResult.tokens ?? 0,
-						durationMs: Date.now() - startTime,
-						currentTool: currentResult.currentTool,
-						currentToolArgs: currentResult.currentToolArgs,
-						recentTools: currentResult.recentTools ?? [],
-						lastOutput: currentResult.output,
-						usage: {
-							input: currentResult.usage.input,
-							output: currentResult.usage.output,
-							cacheRead: currentResult.usage.cacheRead,
-							cacheWrite: currentResult.usage.cacheWrite,
-							cost: currentResult.usage.cost,
-							turns: currentResult.usage.turns,
-						},
-					});
-					break;
+			const sessionOptions: Parameters<typeof createAgentSession>[0] = {
+				cwd,
+				sessionManager: SessionManager!.inMemory(cwd),
+				// Use failover-provided model for this attempt
+				...(resolvedModelObj ? { model: resolvedModelObj } : {}),
+				// System prompt with optional cache_control markers (Feature 2)
+				systemPrompt: buildSystemPromptValue() as any,
+				// Tool configuration
+				...(resolvedBuiltinTools ? { tools: resolvedBuiltinTools } : {}),
+				// Extension paths
+				...(extensionPaths.length > 0 ? { additionalExtensionPaths: extensionPaths } : {}),
+				// Inline extension factories
+				...(inlineExtensions && inlineExtensions.length > 0 ? { extensions: inlineExtensions } : {}),
+				// Skills configuration
+				...(skills !== undefined ? { skills } : {}),
+				// Context files configuration
+				...(contextFiles !== undefined ? { contextFiles } : {}),
+				// Custom tools (for coordinator)
+				...(customTools ? { customTools } : {}),
+			};
 
-				case "tool_execution_end":
-					if (currentResult.currentTool) {
-						currentResult.recentTools?.unshift({
-							tool: currentResult.currentTool,
-							args: currentResult.currentToolArgs || "",
-							endMs: Date.now(),
+			const { session } = await createAgentSession!(sessionOptions);
+
+			// Expose steer function for external steering
+			if (onSessionReady) {
+				onSessionReady(session.steer.bind(session));
+			}
+
+			// Expose abort function for terminating the session
+			if (onInterruptReady) {
+				onInterruptReady(session.abort.bind(session));
+			}
+
+			/** Compute cache hit rate: cacheRead / (cacheRead + input) as a percentage. */
+			const getCacheHitRate = (): number => {
+				const total = currentResult.usage.cacheRead + currentResult.usage.input;
+				if (total === 0) return 0;
+				return Math.round((currentResult.usage.cacheRead / total) * 100);
+			};
+
+			// Subscribe to events for progress tracking
+			const unsubscribe = session.subscribe((event) => {
+				// Log all events to JSONL
+				try {
+					jsonlStream.write(JSON.stringify(event) + "\n");
+				} catch {}
+
+				switch (event.type) {
+					case "tool_execution_start":
+						currentResult.toolCount = (currentResult.toolCount ?? 0) + 1;
+						currentResult.currentTool = event.toolName;
+						currentResult.currentToolArgs = extractToolArgsPreview(event.args || {}) || undefined;
+						emitUpdate();
+						onProgress?.({
+							toolCount: currentResult.toolCount ?? 0,
+							tokens: currentResult.tokens ?? 0,
+							durationMs: Date.now() - startTime,
+							currentTool: currentResult.currentTool,
+							currentToolArgs: currentResult.currentToolArgs,
+							recentTools: currentResult.recentTools ?? [],
+							lastOutput: currentResult.output,
+							usage: {
+								input: currentResult.usage.input,
+								output: currentResult.usage.output,
+								cacheRead: currentResult.usage.cacheRead,
+								cacheWrite: currentResult.usage.cacheWrite,
+								cost: currentResult.usage.cost,
+								turns: currentResult.usage.turns,
+								cacheHitRate: getCacheHitRate(),
+							},
 						});
-						if ((currentResult.recentTools?.length || 0) > MAX_RECENT_TOOLS) {
-							currentResult.recentTools = currentResult.recentTools?.slice(0, MAX_RECENT_TOOLS);
-						}
-					}
-					currentResult.currentTool = undefined;
-					currentResult.currentToolArgs = undefined;
-					emitUpdate();
-					onProgress?.({
-						toolCount: currentResult.toolCount ?? 0,
-						tokens: currentResult.tokens ?? 0,
-						durationMs: Date.now() - startTime,
-						currentTool: currentResult.currentTool,
-						currentToolArgs: currentResult.currentToolArgs,
-						recentTools: currentResult.recentTools ?? [],
-						lastOutput: currentResult.output,
-						usage: {
-							input: currentResult.usage.input,
-							output: currentResult.usage.output,
-							cacheRead: currentResult.usage.cacheRead,
-							cacheWrite: currentResult.usage.cacheWrite,
-							cost: currentResult.usage.cost,
-							turns: currentResult.usage.turns,
-						},
-					});
-					break;
+						break;
 
-				case "message_update":
-					// Extract text from message content for progress display
-					const content = event.message?.content;
-					if (Array.isArray(content)) {
-						const lines: string[] = [];
-						for (const block of content) {
-							if (block.type === "text" && block.text) {
-								lines.push(...block.text.split("\n").filter((l: string) => l.trim()));
-							}
-						}
-						if (lines.length) {
-							const tail = lines.slice(-8);
-							currentResult.output = tail.join("\n");
-							emitUpdate();
-							onProgress?.({
-								toolCount: currentResult.toolCount ?? 0,
-								tokens: currentResult.tokens ?? 0,
-								durationMs: Date.now() - startTime,
-								currentTool: currentResult.currentTool,
-								currentToolArgs: currentResult.currentToolArgs,
-								recentTools: currentResult.recentTools ?? [],
-								lastOutput: currentResult.output,
-								usage: {
-									input: currentResult.usage.input,
-									output: currentResult.usage.output,
-									cacheRead: currentResult.usage.cacheRead,
-									cacheWrite: currentResult.usage.cacheWrite,
-									cost: currentResult.usage.cost,
-									turns: currentResult.usage.turns,
-								},
+					case "tool_execution_end":
+						if (currentResult.currentTool) {
+							currentResult.recentTools?.unshift({
+								tool: currentResult.currentTool,
+								args: currentResult.currentToolArgs || "",
+								endMs: Date.now(),
 							});
-						}
-					}
-					break;
-
-				case "message_end":
-					const msg = event.message as any;
-					currentResult.messages.push(msg);
-
-					if (msg.role === "assistant") {
-						currentResult.usage.turns++;
-						const usage = msg.usage;
-						if (usage) {
-							currentResult.usage.input += usage.input || 0;
-							currentResult.usage.output += usage.output || 0;
-							currentResult.usage.cacheRead += usage.cacheRead || 0;
-							currentResult.usage.cacheWrite += usage.cacheWrite || 0;
-							currentResult.usage.cost += usage.cost?.total || 0;
-							currentResult.usage.contextTokens = usage.totalTokens || 0;
-						}
-						if (!currentResult.model && msg.model) {
-							currentResult.model = msg.model;
-						}
-						if (msg.stopReason) {
-							currentResult.stopReason = msg.stopReason;
-						}
-						if (msg.errorMessage) {
-							currentResult.errorMessage = msg.errorMessage;
-						}
-						// Collect raw output text
-						for (const block of msg.content || []) {
-							if (block.type === "text" && block.text) {
-								rawOutput += block.text;
+							if ((currentResult.recentTools?.length || 0) > MAX_RECENT_TOOLS) {
+								currentResult.recentTools = currentResult.recentTools?.slice(0, MAX_RECENT_TOOLS);
 							}
 						}
+						currentResult.currentTool = undefined;
+						currentResult.currentToolArgs = undefined;
+						emitUpdate();
+						onProgress?.({
+							toolCount: currentResult.toolCount ?? 0,
+							tokens: currentResult.tokens ?? 0,
+							durationMs: Date.now() - startTime,
+							currentTool: currentResult.currentTool,
+							currentToolArgs: currentResult.currentToolArgs,
+							recentTools: currentResult.recentTools ?? [],
+							lastOutput: currentResult.output,
+							usage: {
+								input: currentResult.usage.input,
+								output: currentResult.usage.output,
+								cacheRead: currentResult.usage.cacheRead,
+								cacheWrite: currentResult.usage.cacheWrite,
+								cost: currentResult.usage.cost,
+								turns: currentResult.usage.turns,
+								cacheHitRate: getCacheHitRate(),
+							},
+						});
+						break;
+
+					case "message_update": {
+						// Extract text from message content for progress display
+						const content = event.message?.content;
+						if (Array.isArray(content)) {
+							const lines: string[] = [];
+							for (const block of content) {
+								if (block.type === "text" && block.text) {
+									lines.push(...block.text.split("\n").filter((l: string) => l.trim()));
+								}
+							}
+							if (lines.length) {
+								const tail = lines.slice(-8);
+								currentResult.output = tail.join("\n");
+								emitUpdate();
+								onProgress?.({
+									toolCount: currentResult.toolCount ?? 0,
+									tokens: currentResult.tokens ?? 0,
+									durationMs: Date.now() - startTime,
+									currentTool: currentResult.currentTool,
+									currentToolArgs: currentResult.currentToolArgs,
+									recentTools: currentResult.recentTools ?? [],
+									lastOutput: currentResult.output,
+									usage: {
+										input: currentResult.usage.input,
+										output: currentResult.usage.output,
+										cacheRead: currentResult.usage.cacheRead,
+										cacheWrite: currentResult.usage.cacheWrite,
+										cost: currentResult.usage.cost,
+										turns: currentResult.usage.turns,
+										cacheHitRate: getCacheHitRate(),
+									},
+								});
+							}
+						}
+						break;
 					}
-					emitUpdate(true);
-					onProgress?.({
-						toolCount: currentResult.toolCount ?? 0,
-						tokens: currentResult.tokens ?? 0,
-						durationMs: Date.now() - startTime,
-						currentTool: currentResult.currentTool,
-						currentToolArgs: currentResult.currentToolArgs,
-						recentTools: currentResult.recentTools ?? [],
-						lastOutput: currentResult.output,
-						usage: {
-							input: currentResult.usage.input,
-							output: currentResult.usage.output,
-							cacheRead: currentResult.usage.cacheRead,
-							cacheWrite: currentResult.usage.cacheWrite,
-							cost: currentResult.usage.cost,
-							turns: currentResult.usage.turns,
-						},
-					});
-					break;
+
+					case "message_end": {
+						const msg = event.message as any;
+						currentResult.messages.push(msg);
+
+						if (msg.role === "assistant") {
+							currentResult.usage.turns++;
+							const usage = msg.usage;
+							if (usage) {
+								currentResult.usage.input += usage.input || 0;
+								currentResult.usage.output += usage.output || 0;
+								currentResult.usage.cacheRead += usage.cacheRead || 0;
+								currentResult.usage.cacheWrite += usage.cacheWrite || 0;
+								currentResult.usage.cost += usage.cost?.total || 0;
+								currentResult.usage.contextTokens = usage.totalTokens || 0;
+								// Log cache metrics for observability (Feature 2)
+								if (usage.cacheRead || usage.cacheWrite) {
+									console.log(
+										`[cache] cache_read_input_tokens: ${usage.cacheRead || 0}, ` +
+										`cache_creation_input_tokens: ${usage.cacheWrite || 0}, ` +
+										`hit_rate: ${getCacheHitRate()}%`,
+									);
+								}
+							}
+							if (!currentResult.model && msg.model) {
+								currentResult.model = msg.model;
+							}
+							if (msg.stopReason) {
+								currentResult.stopReason = msg.stopReason;
+							}
+							if (msg.errorMessage) {
+								currentResult.errorMessage = msg.errorMessage;
+							}
+							// Collect raw output text
+							for (const block of msg.content || []) {
+								if (block.type === "text" && block.text) {
+									rawOutput += block.text;
+								}
+							}
+						}
+						emitUpdate(true);
+						onProgress?.({
+							toolCount: currentResult.toolCount ?? 0,
+							tokens: currentResult.tokens ?? 0,
+							durationMs: Date.now() - startTime,
+							currentTool: currentResult.currentTool,
+							currentToolArgs: currentResult.currentToolArgs,
+							recentTools: currentResult.recentTools ?? [],
+							lastOutput: currentResult.output,
+							usage: {
+								input: currentResult.usage.input,
+								output: currentResult.usage.output,
+								cacheRead: currentResult.usage.cacheRead,
+								cacheWrite: currentResult.usage.cacheWrite,
+								cost: currentResult.usage.cost,
+								turns: currentResult.usage.turns,
+								cacheHitRate: getCacheHitRate(),
+							},
+						});
+						break;
+					}
+				}
+			});
+
+			// Handle abort signal
+			if (signal) {
+				if (signal.aborted) {
+					currentResult.exitCode = 1;
+					currentResult.stopReason = "aborted";
+					throw new Error("Aborted before start");
+				}
+				signal.addEventListener(
+					"abort",
+					() => { session.abort(); },
+					{ once: true },
+				);
 			}
-		});
 
-		// Handle abort signal
-		if (signal) {
-			if (signal.aborted) {
-				currentResult.exitCode = 1;
-				currentResult.stopReason = "aborted";
-				throw new Error("Aborted before start");
-			}
-			signal.addEventListener(
-				"abort",
-				() => {
-					session.abort();
-				},
-				{ once: true }
-			);
-		}
+			// Send the task prompt and wait for completion
+			await session.prompt(task);
 
-		// Send the task prompt and wait for completion
-		await session.prompt(task);
+			// Clean up subscription
+			unsubscribe();
+		};
 
-		// Clean up subscription
-		unsubscribe();
+		// Run with in-process retry/failover across providers (Feature 1)
+		await runWithFailover(runWithModel, initialModelStr);
 
 		// Success
 		currentResult.exitCode = 0;
