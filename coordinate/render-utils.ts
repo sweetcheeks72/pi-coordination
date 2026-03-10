@@ -1016,6 +1016,8 @@ export function renderCoordinationDashboard(
 	/** Whether model routing is active (shows routing:on in header) */
 	modelRoutingEnabled: boolean = true,
 	costLimit?: number,
+	/** Whether context compaction / anti-drift memory is active (shows memory:on in header) */
+	memoryEnabled: boolean = false,
 ): string[] {
 	const lines: string[] = [];
 
@@ -1048,8 +1050,11 @@ export function renderCoordinationDashboard(
 		// Routing indicator
 		const routingStr = modelRoutingEnabled ? " · " + theme.fg("accent", "routing:on") : "";
 
+		// Memory / context-compaction indicator
+		const memoryStr = memoryEnabled ? " · " + theme.fg("accent", "memory:on") : "";
+
 		const leftLabel = theme.fg("dim", "coordinate ") + theme.fg("accent", piSafe(planName, 60));
-		const rightLabel = `${spinner} ${elapsed} · ${cost}${ctxStr}${routingStr}`;
+		const rightLabel = `${spinner} ${elapsed} · ${cost}${ctxStr}${routingStr}${memoryStr}`;
 
 		const leftVis = visibleWidth(leftLabel);
 		const rightVis = visibleWidth(rightLabel);
