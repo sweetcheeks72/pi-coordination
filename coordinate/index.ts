@@ -1768,7 +1768,7 @@ export function createCoordinateTool(events: EventBus): ToolDefinition<typeof Co
 					theme,
 					width - 4,
 					true,        // modelRoutingEnabled
-					costLimit,   // pass costLimit for cap display
+					pipelineState?.costLimit,  // pass costLimit for cap display
 				);
 				for (const line of dashboardLines) {
 					container.addChild(new Text(drawBoxLine(line, width, theme), 0, 0));
