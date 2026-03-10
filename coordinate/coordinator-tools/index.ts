@@ -17,6 +17,7 @@ import {
 	loadContext,
 	type ContextUpdater,
 } from "../worker-context.js";
+import { buildLessonsSectionForFilesSync } from "../lessons-loader.js";
 import { runAutoRepair } from "../auto-repair.js";
 import {
 	buildContinuationPrompt,
@@ -32,6 +33,12 @@ import {
 	type CoordinatorContext,
 } from "../coordinator-context.js";
 import { spawnWorkerSDK, type SDKWorkerHandle } from "./sdk-worker.js";
+import {
+	allocateWorktree,
+	mergeWorktreeBranch,
+	releaseWorktree,
+	type WorktreeAllocation,
+} from "../worktree-manager.js";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
@@ -40,6 +47,10 @@ interface RuntimeConfig {
 	supervisor?: { enabled?: boolean; nudgeThresholdMs?: number; restartThresholdMs?: number; maxRestarts?: number; checkIntervalMs?: number; dynamicSpawnTimeoutMs?: number; staleTaskTimeoutMs?: number };
 	models?: { scout?: string; planner?: string; coordinator?: string; worker?: string; reviewer?: string };
 	useSDKWorkers?: boolean;
+	/** When true, each worker gets an isolated git worktree to prevent file conflicts */
+	useWorktrees?: boolean;
+	/** Repository root for worktree operations (derived from cwd when useWorktrees is true) */
+	repoRoot?: string;
 }
 
 export function loadRuntimeConfig(coordDir: string): RuntimeConfig {
@@ -1241,6 +1252,57 @@ ${planContent ? `## Full Plan\n\`\`\`markdown\n${planContent}\n\`\`\`` : ""}
 					await saveCoordinatorContext(coordDir, coordContext);
 				}
 
+				// ── Worktree isolation setup ──────────────────────────────────────
+				const runtimeConfig = loadRuntimeConfig(coordDir);
+				const useWorktrees = runtimeConfig.useWorktrees === true;
+				const repoRoot = runtimeConfig.repoRoot || ctx.cwd;
+				// Map from taskId → worktree allocation (for merge/release after completion)
+				const worktreeAllocations = new Map<string, WorktreeAllocation>();
+
+				const allocateWorktreeForTask = async (taskId: string): Promise<string> => {
+					if (!useWorktrees) return ctx.cwd;
+					try {
+						const allocation = await allocateWorktree(repoRoot, state.sessionId, taskId);
+						worktreeAllocations.set(taskId, allocation);
+						console.log(`[worktree] Allocated ${allocation.worktreePath} for task ${taskId}`);
+						return allocation.worktreePath;
+					} catch (err) {
+						console.warn(`[worktree] Failed to allocate for ${taskId}, falling back to cwd: ${err}`);
+						return ctx.cwd;
+					}
+				};
+
+				const releaseWorktreeForTask = async (taskId: string, success: boolean): Promise<void> => {
+					if (!useWorktrees) return;
+					const allocation = worktreeAllocations.get(taskId);
+					if (!allocation) return;
+					worktreeAllocations.delete(taskId);
+
+					if (success) {
+						try {
+							const mergeResult = await mergeWorktreeBranch(allocation, repoRoot);
+							if (!mergeResult.success) {
+								console.warn(`[worktree] Merge conflicts for task ${taskId}:`, mergeResult.conflicts);
+								await storage.appendEvent({
+									type: "coordinator" as const,
+									message: `⚠ Worktree merge conflicts for ${taskId}: ${mergeResult.conflicts?.join(", ") || "unknown"}`,
+									timestamp: Date.now(),
+								});
+							}
+						} catch (err) {
+							console.warn(`[worktree] Merge failed for task ${taskId}: ${err}`);
+						}
+					}
+
+					try {
+						await releaseWorktree(allocation, repoRoot);
+						console.log(`[worktree] Released ${allocation.worktreePath} for task ${taskId}`);
+					} catch (err) {
+						console.warn(`[worktree] Failed to release worktree for ${taskId}: ${err}`);
+					}
+				};
+				// ── End worktree setup ────────────────────────────────────────────
+
 				const handles: ((WorkerHandle | SDKWorkerHandle) & { taskId: string })[] = [];
 				const maxWorkers = params.maxWorkers || Infinity;
 
@@ -1261,12 +1323,14 @@ ${planContent ? `## Full Plan\n\`\`\`markdown\n${planContent}\n\`\`\`` : ""}
 						workerId: workerIdentity,
 					});
 
+					const taskFiles = task.files || [];
+					const lessonsSection = buildLessonsSectionForFilesSync(taskFiles);
 					const handshakeSpec = `## Task: ${task.id}
 
-${task.description}
+${lessonsSection}${task.description}
 
 ### Files
-${task.files?.map(f => `- ${f}`).join("\n") || "No specific files assigned"}
+${taskFiles.map(f => `- ${f}`).join("\n") || "No specific files assigned"}
 
 ### Acceptance Criteria
 ${task.acceptanceCriteria?.map(c => `- ${c}`).join("\n") || "- Complete the task as described"}
@@ -1274,6 +1338,7 @@ ${task.acceptanceCriteria?.map(c => `- ${c}`).join("\n") || "- Complete the task
 ${planContent ? `### Full Plan\n\`\`\`markdown\n${planContent}\n\`\`\`` : ""}
 `;
 
+					const workerCwd = await allocateWorktreeForTask(task.id);
 					const handle = spawnWorkerProcess(
 						{
 							agent: params.agentName || "coordination/worker",
@@ -1284,7 +1349,7 @@ ${planContent ? `### Full Plan\n\`\`\`markdown\n${planContent}\n\`\`\`` : ""}
 							identity: workerIdentity,
 						},
 						coordDir,
-						ctx.cwd,
+						workerCwd,
 						storage,
 						undefined,
 						obs || undefined,
@@ -1478,12 +1543,14 @@ ${planContent ? `### Full Plan\n\`\`\`markdown\n${planContent}\n\`\`\`` : ""}
 							workerId: workerIdentity,
 						});
 
+						const taskFiles2 = task.files || [];
+						const lessonsSection2 = buildLessonsSectionForFilesSync(taskFiles2);
 						const handshakeSpec = `## Task: ${task.id}
 
-${task.description}
+${lessonsSection2}${task.description}
 
 ### Files
-${task.files?.map(f => `- ${f}`).join("\n") || "No specific files assigned"}
+${taskFiles2.map(f => `- ${f}`).join("\n") || "No specific files assigned"}
 
 ### Acceptance Criteria
 ${task.acceptanceCriteria?.map(c => `- ${c}`).join("\n") || "- Complete the task as described"}
