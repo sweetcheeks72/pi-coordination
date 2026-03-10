@@ -122,6 +122,7 @@ import {
 	getQALoopSummary,
 } from "./qa-feedback.js";
 import { TaskQueueManager } from "./task-queue.js";
+import { checkGate, type HITLMode } from "./hitl-gate.js";
 import type { SpecTask } from "./spec-parser.js";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
@@ -240,6 +241,11 @@ interface CoordinationRuntime extends AgentRuntime {
 
 const CoordinateParams = Type.Object({
 	plan: Type.String({ description: "Path to TASK-XX format spec file. Use 'plan' tool first to create specs from prose/PRDs." }),
+	hitl: Type.Optional(Type.Union([
+		Type.Literal("strict"),
+		Type.Literal("permissive"),
+		Type.Literal("off"),
+	], { description: "HITL (Human-in-the-Loop) permission gate mode. 'strict' = require approval for critical AND high severity actions. 'permissive' = require approval for critical-only actions. 'off' = disabled (default: 'permissive')" })),
 	agents: Type.Optional(Type.Union([
 		Type.Array(Type.String()),
 		Type.Number(),
@@ -1110,6 +1116,35 @@ See: pi-coordination README for spec format documentation.`,
 
 			const taskQueueManager = new TaskQueueManager(coordDir);
 			await taskQueueManager.createFromPlan(planPath, hash(planContent), enrichedEntries);
+
+			// ── HITL Gate: scan tasks for high-stakes patterns before dispatch ──
+			const hitlMode: HITLMode = (params.hitl as HITLMode) ?? "permissive";
+			if (hitlMode !== "off") {
+				const heldTaskIds: string[] = [];
+				for (const task of enrichedEntries) {
+					const gateResult = await checkGate(
+						task.id,
+						"coordinator",
+						task.description,
+						coordDir,
+						hitlMode,
+					);
+					if (gateResult.held) {
+						heldTaskIds.push(task.id);
+					}
+				}
+				if (heldTaskIds.length > 0) {
+					const bar = "═".repeat(62);
+					console.log(`\n╔${bar}╗`);
+					console.log(`║  ⛔ HITL gates triggered for ${heldTaskIds.length} task(s) — awaiting approval  ║`);
+					console.log(`╚${bar}╝`);
+					for (const id of heldTaskIds) {
+						const gateFile = path.join(coordDir, `hitl-gate-${id}.json`);
+						console.log(`  ${id}  gate file: ${gateFile}`);
+					}
+					console.log(`\n  HITL mode: ${hitlMode} | Approve or reject in gate files above\n`);
+				}
+			}
 		}
 
 		if (shouldRunPhase("coordinator")) {
@@ -1378,7 +1413,7 @@ See: pi-coordination README for spec format documentation.`,
 				} catch { return []; }
 			})();
 			recapPath = await generateCoordinationRecap(
-				{ coordDir, planPath, costLimit: params.costLimit, sessionId: coordSessionId },
+				{ coordDir, planPath, costLimit: params.costLimit, sessionId: coordSessionId, hitlMode: (params.hitl as HITLMode) ?? "permissive" },
 				{
 					status: isError ? "failed" : "complete",
 					startedAt: initialState.startedAt,
