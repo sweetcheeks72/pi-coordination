@@ -11,6 +11,7 @@ import { promisify } from "node:util";
 import { AuditLog } from "./audit-log.js";
 import type { CoordinationEvent, WorkerStateFile, Task, PipelinePhase } from "./types.js";
 import { getQALoopSummary } from "./qa-feedback.js";
+import { getHITLSummary, type HITLMode } from "./hitl-gate.js";
 
 // Pricing constants for routing savings estimate (kept in sync with sdk-runner MODEL_PRICE_PER_MTOK)
 const BASELINE_PRICE_PER_MTOK = 3.00; // all-premium (claude-sonnet-4-6) baseline
@@ -33,6 +34,8 @@ export interface CoordinationConfig {
 	coordDir: string;
 	planPath?: string;
 	costLimit?: number;
+	/** HITL mode for this session (used to render Governance section) */
+	hitlMode?: HITLMode;
 }
 
 export interface CoordinationSessionState {
@@ -466,6 +469,75 @@ function renderCostSection(
 		routingSavingsSection;
 }
 
+// ─────────────────────────────────────────────────────────────────────────────
+// HITL Governance section
+// ─────────────────────────────────────────────────────────────────────────────
+
+async function renderGovernanceSection(
+	coordDir: string,
+	mode: HITLMode,
+): Promise<string> {
+	try {
+		const summary = await getHITLSummary(coordDir, mode);
+
+		const modeColor =
+			mode === "off" ? COLORS.textMuted : mode === "strict" ? COLORS.success : COLORS.accent;
+
+		const decisionsDetail =
+			summary.gatesTriggered === 0
+				? `<span style="color:${COLORS.textMuted}; font-family:monospace;">None triggered</span>`
+				: (() => {
+						const parts: string[] = [];
+						if (summary.approved > 0)
+							parts.push(`<span style="color:${COLORS.success};">${summary.approved} approved</span>`);
+						if (summary.rejected > 0)
+							parts.push(`<span style="color:${COLORS.error};">${summary.rejected} rejected</span>`);
+						if (summary.modified > 0)
+							parts.push(`<span style="color:${COLORS.warning};">${summary.modified} modified</span>`);
+						if (summary.pending > 0)
+							parts.push(`<span style="color:${COLORS.warning};">${summary.pending} pending</span>`);
+						return parts.join(", ");
+					})();
+
+		const logPathHtml =
+			summary.gatesTriggered > 0
+				? `<a href="${esc(`file://${summary.logPath}`)}" style="color:${COLORS.accent}; word-break:break-all;">${esc(summary.logPath)}</a>`
+				: `<span style="color:${COLORS.textMuted}; font-family:monospace;">—</span>`;
+
+		const rows = [
+			["HITL mode", `<span style="color:${modeColor}; font-family:monospace; font-weight:bold;">${esc(mode)}</span>`],
+			["Gates triggered", `<span style="font-family:monospace; color:${COLORS.text};">${summary.gatesTriggered}</span>`],
+			["Decisions", decisionsDetail],
+			["Decisions log", logPathHtml],
+		];
+
+		const tableRows = rows
+			.map(
+				([k, v]) => `
+		<tr>
+			<td style="color:${COLORS.textMuted}; padding:6px 12px 6px 0; font-family:monospace; white-space:nowrap;">${k}</td>
+			<td style="padding:6px 0;">${v}</td>
+		</tr>`,
+			)
+			.join("");
+
+		const euNote = `<p style="font-family:monospace; color:${COLORS.textMuted}; margin:12px 0 0; font-size:0.85em;">
+			HITL gates support EU AI Act Article 14 (human oversight) and enterprise compliance requirements.
+			All decisions are recorded in the append-only decisions log above.
+		</p>`;
+
+		return (
+			sectionHeader("🛡️ Governance") +
+			card(
+				`<table style="border-collapse:collapse; width:100%;">${tableRows}</table>${euNote}`,
+			)
+		);
+	} catch {
+		// Non-fatal — skip if summary fails
+		return "";
+	}
+}
+
 function renderTranscriptSection(coordDir: string): string {
 	const eventsPath = path.join(coordDir, "events.jsonl");
 	const fileUrl = `file://${eventsPath}`;
@@ -606,6 +678,12 @@ export async function generateCoordinationRecap(
 		? renderAuditLogSection(config.coordDir, config.sessionId)
 		: "";
 
+	// HITL Governance section (async, non-fatal)
+	const governanceSection = await renderGovernanceSection(
+		config.coordDir,
+		config.hitlMode ?? "permissive",
+	);
+
 	const html = `<!DOCTYPE html>
 <html lang="en">
 <head>
@@ -656,6 +734,7 @@ export async function generateCoordinationRecap(
 	${renderTestsSection(events)}
 	${renderAgentsSection(activities)}
 	${renderCostSection(workers, costByPhase, totalCost)}
+	${governanceSection}
 	${qaSection}
 	${auditSection}
 	${renderTranscriptSection(config.coordDir)}
