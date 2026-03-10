@@ -1016,11 +1016,13 @@ export function renderCoordinationDashboard(
 	/** Whether model routing is active (shows routing:on in header) */
 	modelRoutingEnabled: boolean = true,
 	costLimit?: number,
+	/** Whether MCP lazy tool loading is active (shows lazy-tools:on in header) */
+	lazyToolsEnabled: boolean = false,
 ): string[] {
 	const lines: string[] = [];
 
 	// ── Layer 1 — Session header ───────────────────────────────────────────────
-	// coordinate <plan>    ⠸ 8m12s · $0.23 · ctx 62% · routing:on
+	// coordinate <plan>    ⠸ 8m12s · $0.23 · ctx 62% · routing:on · lazy-tools:on
 	{
 		const spinner = theme.fg("warning", getSpinnerFrame());
 		const elapsed = theme.fg("dim", formatDuration(pipeline.elapsed));
@@ -1048,8 +1050,11 @@ export function renderCoordinationDashboard(
 		// Routing indicator
 		const routingStr = modelRoutingEnabled ? " · " + theme.fg("accent", "routing:on") : "";
 
+		// Lazy tools indicator
+		const lazyToolsStr = lazyToolsEnabled ? " · " + theme.fg("accent", "lazy-tools:on") : "";
+
 		const leftLabel = theme.fg("dim", "coordinate ") + theme.fg("accent", piSafe(planName, 60));
-		const rightLabel = `${spinner} ${elapsed} · ${cost}${ctxStr}${routingStr}`;
+		const rightLabel = `${spinner} ${elapsed} · ${cost}${ctxStr}${routingStr}${lazyToolsStr}`;
 
 		const leftVis = visibleWidth(leftLabel);
 		const rightVis = visibleWidth(rightLabel);
