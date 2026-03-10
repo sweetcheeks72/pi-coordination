@@ -6,6 +6,9 @@
  * into worker task prompts to improve coordination quality over time.
  *
  * Storage: ~/.pi/session-memory/lessons.json (written by consolidate-sessions.sh)
+ *
+ * Also combines with PR history lessons from ~/.pi/pr-lessons.json
+ * (written by ingest-pr-history.sh) via buildCombinedContext().
  */
 
 import * as fs from "node:fs/promises";
@@ -195,4 +198,48 @@ export async function buildLessonsSectionForFiles(filesInScope: string[]): Promi
 export function buildLessonsSectionForFilesSync(filesInScope: string[]): string {
 	const lessons = loadRelevantLessonsSync(filesInScope);
 	return buildLessonsSection(lessons);
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Combined context (sessions + PR history)
+// ─────────────────────────────────────────────────────────────────────────────
+
+import { loadPRLessonsForFiles, buildPRLessonsSection } from "./pr-history-loader.js";
+
+/**
+ * Build a combined context section merging session lessons and PR review history.
+ *
+ * This is the recommended injection point for worker prompts — it includes
+ * both lessons mined from past sessions AND lessons from declined/closed PRs.
+ *
+ * @param filesInScope - List of file paths the current task will touch.
+ * @returns Combined markdown string. Empty string if no relevant context.
+ */
+export function buildCombinedContext(filesInScope: string[]): string {
+	const sessionLessons = loadRelevantLessonsSync(filesInScope);
+	const prLessons = loadPRLessonsForFiles(filesInScope);
+
+	let context = "";
+	if (sessionLessons.length > 0) context += buildLessonsSection(sessionLessons);
+	if (prLessons.length > 0) {
+		if (context.length > 0) context += "\n\n";
+		context += buildPRLessonsSection(prLessons);
+	}
+	return context;
+}
+
+/**
+ * Async version of buildCombinedContext for use in async prompt-building paths.
+ */
+export async function buildCombinedContextAsync(filesInScope: string[]): Promise<string> {
+	const sessionLessons = await loadRelevantLessons(filesInScope);
+	const prLessons = loadPRLessonsForFiles(filesInScope);
+
+	let context = "";
+	if (sessionLessons.length > 0) context += buildLessonsSection(sessionLessons);
+	if (prLessons.length > 0) {
+		if (context.length > 0) context += "\n\n";
+		context += buildPRLessonsSection(prLessons);
+	}
+	return context;
 }

@@ -17,7 +17,7 @@ import {
 	loadContext,
 	type ContextUpdater,
 } from "../worker-context.js";
-import { buildLessonsSectionForFilesSync } from "../lessons-loader.js";
+import { buildLessonsSectionForFilesSync, buildCombinedContext } from "../lessons-loader.js";
 import { runAutoRepair } from "../auto-repair.js";
 import {
 	buildContinuationPrompt,
@@ -1324,7 +1324,7 @@ ${planContent ? `## Full Plan\n\`\`\`markdown\n${planContent}\n\`\`\`` : ""}
 					});
 
 					const taskFiles = task.files || [];
-					const lessonsSection = buildLessonsSectionForFilesSync(taskFiles);
+					const lessonsSection = buildCombinedContext(taskFiles);
 					const handshakeSpec = `## Task: ${task.id}
 
 ${lessonsSection}${task.description}
@@ -1547,7 +1547,7 @@ ${planContent ? `### Full Plan\n\`\`\`markdown\n${planContent}\n\`\`\`` : ""}
 						});
 
 						const taskFiles2 = task.files || [];
-						const lessonsSection2 = buildLessonsSectionForFilesSync(taskFiles2);
+						const lessonsSection2 = buildCombinedContext(taskFiles2);
 						const handshakeSpec = `## Task: ${task.id}
 
 ${lessonsSection2}${task.description}
