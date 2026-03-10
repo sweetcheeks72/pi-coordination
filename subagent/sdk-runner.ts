@@ -228,6 +228,20 @@ export interface SDKRunnerConfig {
 	onInterruptReady?: (abort: () => Promise<void>) => void;
 	/** Called on progress updates (tool events, messages). */
 	onProgress?: (progress: SDKProgress) => void;
+	/**
+	 * Enable MCP lazy tool loading.
+	 * When true, injects a compact tool list + synthetic search_tools tool
+	 * instead of loading all MCP tool schemas eagerly into context.
+	 * Saves up to 85% of context tokens on tool-schema overhead.
+	 * Default: false (opt-in until stable).
+	 */
+	lazyTools?: boolean;
+	/**
+	 * Pre-built tool index for lazy loading.
+	 * If lazyTools is true and this is provided, the compact tool list will
+	 * be prepended to the task prompt and search_tools will be available.
+	 */
+	toolIndex?: import("../coordinate/mcp-tool-index.js").ToolIndex;
 }
 
 /**
@@ -259,7 +273,40 @@ export async function runAgentSDK(config: SDKRunnerConfig): Promise<SingleResult
 		onSessionReady,
 		onInterruptReady,
 		onProgress,
+		lazyTools,
+		toolIndex,
 	} = config;
+
+	// ── MCP Lazy Tool Loading ────────────────────────────────────────────────
+	// When lazyTools is enabled, prepend a compact tool list to the task
+	// and inject the synthetic search_tools tool instead of full schemas.
+	let effectiveTask = task;
+	let effectiveCustomTools = customTools;
+	if (lazyTools && toolIndex) {
+		const { buildCompactToolList, SEARCH_TOOLS_TOOL, handleSearchToolsCall, logTokenSavings } =
+			await import("../coordinate/mcp-tool-index.js");
+
+		// Estimate savings
+		const allSchemasJSON = JSON.stringify(
+			toolIndex.entries.map((e) => ({ name: e.name, description: e.description, schema: e.schema })),
+		);
+		logTokenSavings(toolIndex, allSchemasJSON);
+
+		// Prepend compact tool list to give worker context
+		const compactList = buildCompactToolList(toolIndex);
+		effectiveTask = `${compactList}\n\n---\n\n${task}`;
+
+		// Add synthetic search_tools tool to worker's custom tools
+		const searchToolDefinition: ToolDefinitionType = {
+			...SEARCH_TOOLS_TOOL,
+			execute: async (args: Record<string, unknown>) => {
+				const query = typeof args.query === "string" ? args.query : "";
+				return handleSearchToolsCall(toolIndex, query);
+			},
+		} as unknown as ToolDefinitionType;
+
+		effectiveCustomTools = [...(customTools ?? []), searchToolDefinition];
+	}
 
 	// Ensure SDK is available
 	if (!(await ensureSDK()) || !createAgentSession || !SessionManager) {
@@ -333,7 +380,7 @@ export async function runAgentSDK(config: SDKRunnerConfig): Promise<SingleResult
 
 	// Write input artifact
 	const systemPrompt = agent.systemPrompt.trim();
-	const inputContent = systemPrompt ? `# System Prompt\n\n${systemPrompt}\n\n# Task\n\n${task}` : task;
+	const inputContent = systemPrompt ? `# System Prompt\n\n${systemPrompt}\n\n# Task\n\n${effectiveTask}` : effectiveTask;
 	try {
 		fs.writeFileSync(artifactPaths.inputPath, inputContent, { encoding: "utf-8", mode: 0o600 });
 	} catch {}
@@ -494,7 +541,7 @@ export async function runAgentSDK(config: SDKRunnerConfig): Promise<SingleResult
 				// Context files configuration
 				...(contextFiles !== undefined ? { contextFiles } : {}),
 				// Custom tools (for coordinator)
-				...(customTools ? { customTools } : {}),
+				...(effectiveCustomTools ? { customTools: effectiveCustomTools } : {}),
 			};
 
 			const { session } = await createAgentSession!(sessionOptions);
@@ -698,7 +745,7 @@ export async function runAgentSDK(config: SDKRunnerConfig): Promise<SingleResult
 			}
 
 			// Send the task prompt and wait for completion
-			await session.prompt(task);
+			await session.prompt(effectiveTask);
 
 			// Clean up subscription
 			unsubscribe();

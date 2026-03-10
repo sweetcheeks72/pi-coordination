@@ -1018,8 +1018,6 @@ export function renderCoordinationDashboard(
 	costLimit?: number,
 	/** Whether MCP lazy tool loading is active (shows lazy-tools:on in header) */
 	lazyToolsEnabled: boolean = false,
-	/** Number of active git worktrees (shows worktrees:N in header when > 0) */
-	worktreeCount: number = 0,
 ): string[] {
 	const lines: string[] = [];
 
@@ -1055,11 +1053,8 @@ export function renderCoordinationDashboard(
 		// Lazy tools indicator
 		const lazyToolsStr = lazyToolsEnabled ? " · " + theme.fg("accent", "lazy-tools:on") : "";
 
-		// Worktree isolation indicator
-		const worktreeStr = worktreeCount > 0 ? " · " + theme.fg("accent", `worktrees:${worktreeCount}`) : "";
-
 		const leftLabel = theme.fg("dim", "coordinate ") + theme.fg("accent", piSafe(planName, 60));
-		const rightLabel = `${spinner} ${elapsed} · ${cost}${ctxStr}${routingStr}${lazyToolsStr}${worktreeStr}`;
+		const rightLabel = `${spinner} ${elapsed} · ${cost}${ctxStr}${routingStr}${lazyToolsStr}`;
 
 		const leftVis = visibleWidth(leftLabel);
 		const rightVis = visibleWidth(rightLabel);
