@@ -262,6 +262,7 @@ const CoordinateParams = Type.Object({
 		Type.Number(),
 	], { description: "Worker agents: array of names or count (default: 4 workers)" })),
 	logPath: Type.Optional(Type.String({ description: "Path for coordination log output. Defaults to cwd. Set to empty string to disable." })),
+	background: Type.Optional(Type.Boolean({ description: "If true, detach the coordination run so you can close the terminal and come back to results. Returns immediately with a run ID. Poll status with scripts/pi-status.sh or getRunStatus()." })),
 	resume: Type.Optional(Type.Union([
 		Type.Boolean({ description: "true = resume from last checkpoint for this spec (task-level resume)" }),
 		Type.String({ description: "Checkpoint ID to resume from (phase-level pipeline checkpoint)" }),
@@ -1614,6 +1615,44 @@ export function createCoordinateTool(events: EventBus): ToolDefinition<typeof Co
 			const typedParams = params as CoordinateParamsType;
 			const resultsDir = resolveAsyncResultsDir(ctx.cwd, typedParams.asyncResultsDir);
 
+			// ── Background (overnight) mode ───────────────────────────────────
+			// Detaches the run into a child process so the user can close their
+			// terminal and come back later to find results.
+			if (typedParams.background) {
+				try {
+					const { startBackgroundRun } = await import("./background-runner.js");
+					const specPath = path.resolve(ctx.cwd, typedParams.plan);
+					try {
+						await fs.access(specPath);
+					} catch (err) {
+						return {
+							content: [{ type: "text", text: `Failed to read plan file: ${specPath}\n${err}` }],
+							isError: true,
+						};
+					}
+					const opts: Record<string, unknown> = { ...typedParams, background: false };
+					const run = await startBackgroundRun(specPath, opts as any, ctx.cwd);
+					const specName = path.basename(specPath, path.extname(specPath));
+					return {
+						content: [{
+							type: "text",
+							text: [
+								`[background] run ${run.id} started — spec: ${specName}`,
+								`  watch: tail -f ${run.logPath}`,
+								`  status: cat ${run.statusPath}`,
+								`  or: bash scripts/pi-status.sh ${run.id}`,
+							].join("\n"),
+						}],
+						details: { backgroundRun: run },
+					};
+				} catch (err) {
+					return {
+						content: [{ type: "text", text: `Failed to start background run: ${err}` }],
+						isError: true,
+					};
+				}
+			}
+
 			if (typedParams.async) {
 				if (!jitiCliPath) {
 					return {
@@ -1737,11 +1776,13 @@ export function createCoordinateTool(events: EventBus): ToolDefinition<typeof Co
 			const planPath = args.plan || "...";
 			const agentCount = Array.isArray(args.agents) ? args.agents.length : (args.agents || 0);
 			const asyncLabel = args.async ? theme.fg("warning", " [async]") : "";
+			const backgroundLabel = (args as any).background ? theme.fg("warning", " [background]") : "";
 			const expandHint = theme.fg("dim", " [Ctrl+O: expand]");
 			let text = theme.fg("toolTitle", theme.bold("coordinate ")) +
 				theme.fg("accent", planPath) +
 				theme.fg("muted", ` (${agentCount} agents)`) +
 				asyncLabel +
+				backgroundLabel +
 				expandHint;
 			return new Text(text, 0, 0);
 		},
