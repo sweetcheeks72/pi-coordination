@@ -99,7 +99,7 @@ import {
 	runPlannerPhaseWrapper,
 	runReviewFixLoop,
 } from "./pipeline.js";
-import type { CoordinationState, CoordinationEvent, WorkerStateFile, WorkerStatus, CoordinationStatus, PipelinePhase, PhaseResult, CostState, FileReservation } from "./types.js";
+import type { CoordinationState, CoordinationEvent, WorkerStateFile, WorkerStatus, CoordinationStatus, PipelinePhase, PhaseResult, CostState, FileReservation, Task } from "./types.js";
 import type { ReviewResult } from "./phases/review.js";
 import { ObservabilityContext } from "./observability/index.js";
 import { validateCoordination } from "./validation/index.js";
@@ -110,6 +110,13 @@ import { createStreamingValidator, type StreamingValidator } from "./validation/
 // import { runInlineQuestionsTUI, type Answer } from "./inline-questions-tui.js";
 import { parseSpec } from "./spec-parser.js";
 import { validateSpec, formatValidationResult } from "./spec-validator.js";
+import {
+	loadProgressSnapshot,
+	deleteProgressSnapshot,
+	findResumeCoordDir,
+} from "./progress-tracker.js";
+import { TaskQueueManager } from "./task-queue.js";
+import type { SpecTask } from "./spec-parser.js";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const require = createRequire(import.meta.url);
@@ -232,7 +239,10 @@ const CoordinateParams = Type.Object({
 		Type.Number(),
 	], { description: "Worker agents: array of names or count (default: 4 workers)" })),
 	logPath: Type.Optional(Type.String({ description: "Path for coordination log output. Defaults to cwd. Set to empty string to disable." })),
-	resume: Type.Optional(Type.String({ description: "Checkpoint ID to resume from" })),
+	resume: Type.Optional(Type.Union([
+		Type.Boolean({ description: "true = resume from last checkpoint for this spec (task-level resume)" }),
+		Type.String({ description: "Checkpoint ID to resume from (phase-level pipeline checkpoint)" }),
+	], { description: "Resume from checkpoint: pass true for task-level resume (skip already-completed tasks) or a checkpoint ID string for phase-level resume" })),
 	maxFixCycles: Type.Optional(Type.Number({ description: "Maximum review/fix cycles (default: 5)" })),
 	sameIssueLimit: Type.Optional(Type.Number({ description: "Times same issue can recur before giving up (default: 2)" })),
 	checkTests: Type.Optional(Type.Boolean({ description: "Whether reviewer should check for tests (default: true)" })),
@@ -292,6 +302,35 @@ interface CoordinationRunResult {
 	result: AgentToolResult<CoordinationDetails>;
 	coordDir: string;
 	traceId: string;
+}
+
+/**
+ * Convert parsed spec tasks to Task queue entries, optionally pre-marking
+ * already-completed tasks so they are skipped by spawn_from_queue workers.
+ */
+function specTasksToQueueEntries(
+	specTasks: SpecTask[],
+	planPath: string,
+	planHash: string,
+	completedIds: ReadonlySet<string>,
+	failedIds: ReadonlySet<string>,
+): Task[] {
+	const priorityMap: Record<string, number> = { P0: 0, P1: 1, P2: 2, P3: 3 };
+	return specTasks.map((st): Task => ({
+		id: st.id,
+		description: [
+			`## ${st.title || st.id}`,
+			st.description || "",
+			st.acceptance ? `**Acceptance:** ${st.acceptance}` : "",
+		].filter(Boolean).join("\n\n"),
+		priority: priorityMap[st.priority] ?? 2,
+		priorityLabel: st.priority,
+		status: completedIds.has(st.id) ? "complete" : failedIds.has(st.id) ? "failed" : "pending",
+		files: st.files.map((f) => f.path),
+		dependsOn: st.dependsOn,
+		acceptanceCriteria: st.acceptance ? [st.acceptance] : [],
+		parentTaskId: st.parentTaskId,
+	}));
 }
 
 function buildCoordinatorTask(
@@ -636,7 +675,7 @@ See: pi-coordination README for spec format documentation.`,
 	let reviewHistory: ReviewResult[] = [];
 	let resumeFromPhase: PipelinePhase | null = null;
 
-	if (params.resume) {
+	if (params.resume && typeof params.resume === "string") {
 		try {
 			const restored = await checkpointManager.restoreFromCheckpoint(params.resume, storage);
 			pipelineState = restored.pipelineState;
@@ -1017,6 +1056,38 @@ See: pi-coordination README for spec format documentation.`,
 			process.env.PI_COORDINATION_SHARED_CONTEXT = sharedContextPath;
 		} catch {}
 
+		// ─────────────────────────────────────────────────────────────────────
+		// Seed tasks.json from spec tasks before the coordinator phase.
+		// This ensures spawn_from_queue can work and enables progress tracking.
+		// When resume: true, completed tasks are pre-marked so workers skip them.
+		// ─────────────────────────────────────────────────────────────────────
+		{
+			const completedIds = new Set<string>();
+			const failedIds = new Set<string>();
+
+			if (params.resume === true) {
+				const progressSnapshot = await loadProgressSnapshot(coordDir, hash(planContent));
+				if (progressSnapshot && progressSnapshot.completedTasks.length > 0) {
+					for (const id of progressSnapshot.completedTasks) completedIds.add(id);
+					for (const id of (progressSnapshot.failedTasks ?? [])) failedIds.add(id);
+					const skippedList = progressSnapshot.completedTasks.join(", ");
+					console.log(`[resume] Skipping ${skippedList} (already complete) — resuming from checkpoint`);
+				} else {
+					console.log("[resume] No matching checkpoint found — starting fresh");
+				}
+			}
+
+			const specTaskEntries = specTasksToQueueEntries(
+				parsedSpec.tasks,
+				planPath,
+				hash(planContent),
+				completedIds,
+				failedIds,
+			);
+			const taskQueueManager = new TaskQueueManager(coordDir);
+			await taskQueueManager.createFromPlan(planPath, hash(planContent), specTaskEntries);
+		}
+
 		if (shouldRunPhase("coordinator")) {
 			const coordSpan = obs.spans.startSpan("phase:coordinator", "phase");
 			await obs.snapshots.capture("phase_start", "coordinator");
@@ -1274,6 +1345,14 @@ See: pi-coordination README for spec format documentation.`,
 
 		const recapSuffix = recapPath ? `\n\nRecap: ${recapPath}` : "";
 
+		// ─────────────────────────────────────────────────────────────────────
+		// Clean up progress.json on successful completion so subsequent runs
+		// start fresh rather than skipping tasks that already ran.
+		// ─────────────────────────────────────────────────────────────────────
+		if (!isError) {
+			await deleteProgressSnapshot(coordDir);
+		}
+
 		return {
 			result: {
 				content: [{ type: "text", text: finalSummary + recapSuffix }],
@@ -1437,6 +1516,25 @@ export function createCoordinateTool(events: EventBus): ToolDefinition<typeof Co
 				};
 			}
 
+			// When resume === true, look for a previously-interrupted run of
+			// the same spec so we can resume in the same coordination directory.
+			let resumeCoordDir: string | undefined;
+			if (typedParams.resume === true) {
+				try {
+					const planPath = path.resolve(ctx.cwd, typedParams.plan);
+					const planContent = await fs.readFile(planPath, "utf-8");
+					const specHash = hash(planContent);
+					const sessionDir = process.env.PI_SESSION_DIR || path.join(os.homedir(), ".pi", "sessions", "default");
+					const found = await findResumeCoordDir(sessionDir, specHash);
+					if (found) {
+						console.log(`[resume] Found checkpoint in ${found}`);
+						resumeCoordDir = found;
+					}
+				} catch {
+					// Non-fatal: fall back to a fresh run
+				}
+			}
+
 			const { result } = await runCoordinationSession({
 				runtime: { cwd: ctx.cwd, events },
 				params: typedParams,
@@ -1446,6 +1544,7 @@ export function createCoordinateTool(events: EventBus): ToolDefinition<typeof Co
 					abort: () => ctx.abort(),
 				},
 				signal,
+				...(resumeCoordDir ? { coordDir: resumeCoordDir } : {}),
 			});
 			return result;
 		},

@@ -2,6 +2,7 @@ import * as fs from "node:fs/promises";
 import * as fsSync from "node:fs";
 import * as path from "node:path";
 import type { Task, TaskQueue, TaskStatus } from "./types.js";
+import { PROGRESS_FILE } from "./progress-tracker.js";
 
 export class TaskQueueManager {
 	private queuePath: string;
@@ -159,6 +160,9 @@ export class TaskQueueManager {
 			this.updateBlockedTasks(queue);
 
 			await fs.writeFile(this.queuePath, JSON.stringify(queue, null, 2));
+
+			// Update checkpoint file so a crashed run can be resumed
+			await this.writeProgressCheckpoint(queue).catch(() => {});
 		});
 	}
 
@@ -175,6 +179,8 @@ export class TaskQueueManager {
 				task.status = "failed";
 				task.failureReason = reason;
 				await fs.writeFile(this.queuePath, JSON.stringify(queue, null, 2));
+				// Update checkpoint: record permanent failure
+				await this.writeProgressCheckpoint(queue).catch(() => {});
 				return false;
 			}
 
@@ -421,5 +427,41 @@ export class TaskQueueManager {
 				task.blockedBy = undefined;
 			}
 		}
+	}
+
+	/**
+	 * Write (or update) progress.json alongside tasks.json so a crashed
+	 * run can be resumed.  The call is best-effort — failures are silently
+	 * swallowed by the caller.
+	 */
+	private async writeProgressCheckpoint(queue: TaskQueue): Promise<void> {
+		const progressPath = path.join(this.coordDir, PROGRESS_FILE);
+
+		// Preserve metadata from an existing snapshot (startedAt, specPath)
+		let existing: Record<string, unknown> = {};
+		try {
+			existing = JSON.parse(await fs.readFile(progressPath, "utf-8"));
+		} catch {
+			// No existing snapshot — create fresh
+		}
+
+		const completedTasks = queue.tasks
+			.filter((t) => t.status === "complete")
+			.map((t) => t.id);
+		const failedTasks = queue.tasks
+			.filter((t) => t.status === "failed")
+			.map((t) => t.id);
+
+		const snapshot = {
+			specHash: existing.specHash ?? queue.planHash,
+			specPath: existing.specPath ?? queue.planPath,
+			startedAt: existing.startedAt ?? new Date().toISOString(),
+			completedTasks,
+			failedTasks,
+			phase: "workers",
+			lastCheckpointAt: new Date().toISOString(),
+		};
+
+		await fs.writeFile(progressPath, JSON.stringify(snapshot, null, 2));
 	}
 }
