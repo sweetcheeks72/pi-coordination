@@ -72,6 +72,8 @@ export interface PRLesson {
 		filesReviewed?: string;
 		concerns?: string;
 	} | null;
+	/** True if any CodeRabbit comment was present with substantial body (>100 chars) */
+	codeRabbitSummaryPresent?: boolean;
 	ingestedAt: string;
 }
 
@@ -111,6 +113,21 @@ function readPRLessonsSync(): PRLessonsStore {
 // ─────────────────────────────────────────────────────────────────────────────
 
 /**
+ * Generic basenames that are too common to be meaningful for basename-only matching.
+ * When a PR file or query file has one of these basenames, we require partial
+ * directory overlap before declaring a basename match.
+ */
+const GENERIC_BASENAMES = new Set([
+	'index.ts', 'index.tsx', 'index.js', 'index.jsx',
+	'types.ts', 'types.tsx', 'utils.ts', 'utils.tsx',
+	'helpers.ts', 'helpers.js', 'handler.ts', 'handler.js',
+	'constants.ts', 'constants.js', 'config.ts', 'config.js',
+	'hooks.ts', 'hooks.tsx', 'store.ts', 'store.tsx',
+	'styles.ts', 'styles.css', 'styles.scss',
+	'README.md', 'package.json', 'tsconfig.json',
+]);
+
+/**
  * Determine whether a PR lesson is relevant to any of the files in scope.
  *
  * Matching rules (same logic as lessons-loader.ts isRelevant):
@@ -146,8 +163,25 @@ function isPRRelevant(pr: PRLesson, filesInScope: string[]): boolean {
 			return true;
 		}
 
-		// Basename match
-		if (baseNamesScope.has(path.basename(affected))) return true;
+		// Basename match — but only if the basename is specific enough
+		const queryBasename = path.basename(affected);
+		const prBasename = queryBasename; // same variable, reuse for clarity
+		if (baseNamesScope.has(queryBasename)) {
+			if (!GENERIC_BASENAMES.has(queryBasename)) {
+				// Specific enough — match on basename alone
+				return true;
+			}
+			// Generic basename — require partial directory match (last 2 path segments)
+			const prDir = path.dirname(path.normalize(affected)).split(path.sep).slice(-2).join('/');
+			for (const f of normalizedScope) {
+				if (path.basename(f) === queryBasename) {
+					const qDir = path.dirname(f).split(path.sep).slice(-2).join('/');
+					if (prDir && qDir && prDir === qDir) {
+						return true;
+					}
+				}
+			}
+		}
 
 		// Directory prefix match (e.g. PR touched "app/transactions/" and scope has files in it)
 		const dir = normalizedAffected.endsWith(path.sep)
@@ -425,11 +459,4 @@ export function buildPRLessonsSection(lessons: PRLesson[]): string {
 	return lines.join("\n");
 }
 
-/**
- * Convenience: load relevant PR lessons for a set of files and return the
- * formatted markdown section in one call.
- */
-export function buildPRLessonsSectionForFiles(filesInScope: string[]): string {
-	const lessons = loadPRLessonsForFiles(filesInScope);
-	return buildPRLessonsSection(lessons);
-}
+

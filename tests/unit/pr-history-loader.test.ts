@@ -18,6 +18,7 @@ import {
 	buildPRLessonsSection,
 	type PRLesson,
 } from "../../coordinate/pr-history-loader.js";
+import { buildCombinedContext } from "../../coordinate/lessons-loader.js";
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Mock data helpers
@@ -44,7 +45,7 @@ function writeTempStore(prs: PRLesson[]): string {
 	const storePath = path.join(tmp, "pr-lessons.json");
 	fs.writeFileSync(
 		storePath,
-		JSON.stringify({ version: 1, ingestedAt: new Date().toISOString(), prs }),
+		JSON.stringify({ version: 2, ingestedAt: new Date().toISOString(), prs }),
 		"utf-8",
 	);
 	return storePath;
@@ -378,6 +379,180 @@ async function main() {
 			result.includes("focused") || result.includes("unrelated") || result.includes("single concern"),
 			`Expected fallback lesson about focused PRs in result: ${result.slice(0, 300)}`,
 		);
+	});
+
+	// ─────────────────────────────────────────────────────────────────────────
+	// FIX 5: Basename specificity gate — generic filenames should NOT over-match
+	// ─────────────────────────────────────────────────────────────────────────
+
+	runner.section("basename specificity gate (FIX 5)");
+
+	await runner.test("specific basename (bulk.ts) matches across different directories", () => {
+		const pr = makeMockPR({
+			id: "owner/repo#7",
+			filesAffected: ["app/transactions/bulk.ts"],
+			lessons: ["Bulk transaction lesson"],
+		});
+
+		const storePath = writeTempStore([pr]);
+		const origEnv = process.env.PR_LESSONS_STORE_PATH;
+		process.env.PR_LESSONS_STORE_PATH = storePath;
+
+		try {
+			// Different prefix, same specific basename — should still match
+			const results = loadPRLessonsForFiles(["coordinate/src/bulk.ts"]);
+			assert(results.length === 1, `Expected 1 specific basename match, got ${results.length}`);
+		} finally {
+			if (origEnv === undefined) delete process.env.PR_LESSONS_STORE_PATH;
+			else process.env.PR_LESSONS_STORE_PATH = origEnv;
+		}
+	});
+
+	await runner.test("generic basename (index.ts) does NOT match when directories differ", () => {
+		const pr = makeMockPR({
+			id: "owner/repo#8",
+			filesAffected: ["app/payments/index.ts"],
+			lessons: ["Payment index lesson"],
+		});
+
+		const storePath = writeTempStore([pr]);
+		const origEnv = process.env.PR_LESSONS_STORE_PATH;
+		process.env.PR_LESSONS_STORE_PATH = storePath;
+
+		try {
+			// Generic basename, completely different directory — should NOT match
+			const results = loadPRLessonsForFiles(["coordinate/workers/index.ts"]);
+			assert(
+				results.length === 0,
+				`Expected 0 results for generic basename with different dir, got ${results.length}`,
+			);
+		} finally {
+			if (origEnv === undefined) delete process.env.PR_LESSONS_STORE_PATH;
+			else process.env.PR_LESSONS_STORE_PATH = origEnv;
+		}
+	});
+
+	await runner.test("generic basename (index.ts) DOES match when last two directory segments overlap", () => {
+		const pr = makeMockPR({
+			id: "owner/repo#9",
+			filesAffected: ["app/payments/index.ts"],
+			lessons: ["Payment index lesson"],
+		});
+
+		const storePath = writeTempStore([pr]);
+		const origEnv = process.env.PR_LESSONS_STORE_PATH;
+		process.env.PR_LESSONS_STORE_PATH = storePath;
+
+		try {
+			// Generic basename, same last-two-segment directory — should match
+			const results = loadPRLessonsForFiles(["src/app/payments/index.ts"]);
+			assert(
+				results.length === 1,
+				`Expected 1 result for generic basename with matching dir, got ${results.length}`,
+			);
+		} finally {
+			if (origEnv === undefined) delete process.env.PR_LESSONS_STORE_PATH;
+			else process.env.PR_LESSONS_STORE_PATH = origEnv;
+		}
+	});
+
+	// ─────────────────────────────────────────────────────────────────────────
+	// FIX 10: Integration test for full pipe (buildCombinedContext)
+	// ─────────────────────────────────────────────────────────────────────────
+
+	runner.section("buildCombinedContext integration (FIX 10)");
+
+	await runner.test("buildCombinedContext returns PR lesson for specific file match", () => {
+		const pr = makeMockPR({
+			id: "Zimopia/talisman#200",
+			repo: "Zimopia/talisman",
+			prNumber: 200,
+			prTitle: "Bulk transaction refactor",
+			closedAt: "2025-09-01T00:00:00Z",
+			closeReason: "changes-requested",
+			filesAffected: ["app/transactions/bulk.ts"],
+			reviewComments: [
+				{
+					body: "Race condition risk in the bulk path — concurrency here is problematic",
+					path: "app/transactions/bulk.ts",
+					author: "reviewer-A",
+					isCodeRabbit: false,
+					isBot: false,
+					type: "inline",
+				},
+			],
+			lessons: ["Watch for race conditions in bulk.ts — flagged in review"],
+		});
+
+		const storePath = writeTempStore([pr]);
+		const origEnv = process.env.PR_LESSONS_STORE_PATH;
+		process.env.PR_LESSONS_STORE_PATH = storePath;
+
+		try {
+			const context = buildCombinedContext(["app/transactions/bulk.ts"]);
+			assert(context.length > 0, "Expected non-empty context for matching file");
+			assert(
+				context.includes("bulk.ts") || context.includes("Bulk") || context.includes("talisman"),
+				`Expected context to reference PR details, got: ${context.slice(0, 200)}`,
+			);
+		} finally {
+			if (origEnv === undefined) delete process.env.PR_LESSONS_STORE_PATH;
+			else process.env.PR_LESSONS_STORE_PATH = origEnv;
+		}
+	});
+
+	await runner.test("buildCombinedContext does NOT include lessons for unrelated files", () => {
+		const pr = makeMockPR({
+			id: "owner/repo#300",
+			repo: "owner/repo",
+			prNumber: 300,
+			prTitle: "Payment service fix",
+			filesAffected: ["src/payments/checkout.ts"],
+			lessons: ["Payment checkout lesson — very specific"],
+		});
+
+		const storePath = writeTempStore([pr]);
+		const origEnv = process.env.PR_LESSONS_STORE_PATH;
+		process.env.PR_LESSONS_STORE_PATH = storePath;
+
+		try {
+			// Completely unrelated file — should produce empty context
+			const context = buildCombinedContext(["src/auth/login.ts"]);
+			assert(
+				!context.includes("Payment checkout lesson"),
+				`Expected unrelated lesson to be excluded, but got it in context`,
+			);
+		} finally {
+			if (origEnv === undefined) delete process.env.PR_LESSONS_STORE_PATH;
+			else process.env.PR_LESSONS_STORE_PATH = origEnv;
+		}
+	});
+
+	await runner.test("buildCombinedContext does NOT over-match on generic index.ts basename", () => {
+		const pr = makeMockPR({
+			id: "owner/repo#400",
+			repo: "owner/repo",
+			prNumber: 400,
+			prTitle: "Analytics module refactor",
+			filesAffected: ["src/analytics/reporting/index.ts"],
+			lessons: ["Analytics-specific lesson that should not leak"],
+		});
+
+		const storePath = writeTempStore([pr]);
+		const origEnv = process.env.PR_LESSONS_STORE_PATH;
+		process.env.PR_LESSONS_STORE_PATH = storePath;
+
+		try {
+			// Different module's index.ts — should NOT match due to FIX 5 specificity gate
+			const context = buildCombinedContext(["src/auth/session/index.ts"]);
+			assert(
+				!context.includes("Analytics-specific lesson"),
+				`FIX 5 specificity gate failed: generic index.ts over-matched across modules. Got context: ${context.slice(0, 200)}`,
+			);
+		} finally {
+			if (origEnv === undefined) delete process.env.PR_LESSONS_STORE_PATH;
+			else process.env.PR_LESSONS_STORE_PATH = origEnv;
+		}
 	});
 
 	// ─────────────────────────────────────────────────────────────────────────

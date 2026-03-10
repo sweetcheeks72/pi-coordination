@@ -593,7 +593,12 @@ export function createCoordinatorTools(): ToolDefinition<any, any>[] {
 					const outputPath = path.join(outputsDir, `${workerId}.md`);
 					const outputSection = `## Output\nWrite primary results to: ${outputPath}\n\n`;
 
-					const enrichedSpec = `${w.handshakeSpec}
+					// Inject PR lessons and session lessons for files in this worker's scope (FIX 7)
+					const filesInScope = preAssignment?.files || [];
+					const lessonsSection = buildCombinedContext(filesInScope);
+					const lessonPrefix = lessonsSection ? `${lessonsSection}\n\n` : "";
+
+					const enrichedSpec = `${lessonPrefix}${w.handshakeSpec}
 
 ## Your Context
 - **Identity:** ${workerIdentity}
