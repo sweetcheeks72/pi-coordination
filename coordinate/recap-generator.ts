@@ -9,6 +9,7 @@ import * as path from "node:path";
 import { exec } from "node:child_process";
 import { promisify } from "node:util";
 import type { CoordinationEvent, WorkerStateFile, Task, PipelinePhase } from "./types.js";
+import { getQALoopSummary } from "./qa-feedback.js";
 
 // Pricing constants for routing savings estimate (kept in sync with sdk-runner MODEL_PRICE_PER_MTOK)
 const BASELINE_PRICE_PER_MTOK = 3.00; // all-premium (claude-sonnet-4-6) baseline
@@ -486,6 +487,7 @@ export async function generateCoordinationRecap(
 	workers: WorkerStateFile[],
 	tasks: Task[],
 	events: CoordinationEvent[],
+	qaResolvedIds?: string[],
 ): Promise<string> {
 	// Gather data
 	const cwd = config.coordDir.replace(/\/[^/]+$/, "") || process.cwd();

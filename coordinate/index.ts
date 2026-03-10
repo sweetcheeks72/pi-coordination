@@ -86,6 +86,7 @@ function loadCoordinationSettings(): NormalizedSettings {
 import { runSingleAgent, type AgentRuntime } from "../subagent/runner.js";
 import type { SingleResult, SubagentDetails } from "../subagent/types.js";
 import { FileBasedStorage } from "./state.js";
+import { AuditLog } from "./audit-log.js";
 import { generateCoordinationLog } from "./log-generator.js";
 import { CheckpointManager } from "./checkpoint.js";
 import {
@@ -115,6 +116,11 @@ import {
 	deleteProgressSnapshot,
 	findResumeCoordDir,
 } from "./progress-tracker.js";
+import {
+	enrichTaskWithQAFailures,
+	autoResolveFailuresForSession,
+	getQALoopSummary,
+} from "./qa-feedback.js";
 import { TaskQueueManager } from "./task-queue.js";
 import type { SpecTask } from "./spec-parser.js";
 
@@ -814,6 +820,12 @@ See: pi-coordination README for spec format documentation.`,
 		},
 	});
 
+	// ── Audit log ─────────────────────────────────────────────────────────────
+	// Tamper-evident, append-only JSONL log with SHA256 hash chain.
+	// Required for EU AI Act traceability and SOC2 compliance.
+	const auditLog = new AuditLog(coordDir, coordSessionId);
+	auditLog.append({ type: "session.start", sessionId: coordSessionId, agentRole: "coordinator" });
+
 	let streamingValidator: StreamingValidator | null = null;
 	let unsubscribeStreaming: (() => void) | null = null;
 
@@ -1084,8 +1096,20 @@ See: pi-coordination README for spec format documentation.`,
 				completedIds,
 				failedIds,
 			);
+
+			// ── QA Feedback Loop: enrich task descriptions with known failures ──
+			const enrichedEntries = await Promise.all(
+				specTaskEntries.map(async (task) => {
+					const enrichedDescription = await enrichTaskWithQAFailures(
+						task.description,
+						task.files ?? [],
+					);
+					return { ...task, description: enrichedDescription };
+				}),
+			);
+
 			const taskQueueManager = new TaskQueueManager(coordDir);
-			await taskQueueManager.createFromPlan(planPath, hash(planContent), specTaskEntries);
+			await taskQueueManager.createFromPlan(planPath, hash(planContent), enrichedEntries);
 		}
 
 		if (shouldRunPhase("coordinator")) {
@@ -1283,6 +1307,31 @@ See: pi-coordination README for spec format documentation.`,
 			},
 		});
 
+		// ── Audit log: per-worker events + session complete ───────────────────
+		try {
+			for (const w of workerStates) {
+				const eventType = w.status === "complete" ? "worker.complete" : "task.failed";
+				auditLog.append({
+					type: eventType,
+					sessionId: coordSessionId,
+					agentRole: "worker",
+					taskId: w.identity,
+					filesModified: w.filesModified,
+					tokensIn: w.usage?.input,
+					tokensOut: w.usage?.output,
+					costUsd: w.usage?.cost,
+				});
+			}
+			auditLog.append({
+				type: isError ? "session.error" : "session.complete",
+				sessionId: coordSessionId,
+				agentRole: "coordinator",
+				costUsd: costState.total,
+			});
+		} catch (auditErr) {
+			console.error(`[audit] Failed to write audit log: ${auditErr}`);
+		}
+
 		let validationResult: ValidationResult | undefined;
 		if (params.validate) {
 			validationResult = await validateCoordination({
@@ -1304,6 +1353,18 @@ See: pi-coordination README for spec format documentation.`,
 		const finalSummary = logFilePath
 			? `${summary}\n\nLog saved to: ${logFilePath}`
 			: summary;
+
+		// ── QA Feedback Loop: auto-resolve failures for files modified this session ──
+		let qaResolvedIds: string[] = [];
+		if (!isError) {
+			try {
+				const allModifiedFiles = [...new Set(workerStates.flatMap(w => w.filesModified))];
+				qaResolvedIds = await autoResolveFailuresForSession(allModifiedFiles, coordSessionId);
+			} catch (qaErr) {
+				// Non-fatal
+				console.error(`[qa-loop] Auto-resolve failed: ${qaErr}`);
+			}
+		}
 
 		// Generate HTML recap
 		let recapPath: string | undefined;
@@ -1327,6 +1388,7 @@ See: pi-coordination README for spec format documentation.`,
 				workerStates,
 				tasksForRecap,
 				events,
+				qaResolvedIds,
 			);
 			process.stdout.write(`\n📄 Session recap: ${recapPath}\n`);
 			// Open the recap
@@ -1389,6 +1451,20 @@ See: pi-coordination README for spec format documentation.`,
 		});
 
 		updatePhaseStatus("failed", "failed", pipelineContext, String(err));
+
+		// ── Audit log: fatal session error ────────────────────────────────────
+		try {
+			auditLog.append({
+				type: "session.error",
+				sessionId: coordSessionId,
+				agentRole: "coordinator",
+				costUsd: costState.total,
+				decision: String(err),
+			});
+		} catch {
+			// Best-effort — don't mask the original error
+		}
+
 		return {
 			result: {
 				content: [{ type: "text", text: `Coordination failed: ${err}` }],

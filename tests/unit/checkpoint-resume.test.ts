@@ -171,7 +171,7 @@ async function main() {
 		}
 	});
 
-	await runner.test("retriable failure does NOT write to progress.json", async () => {
+	await runner.test("retriable failure does NOT add the task to failedTasks in progress.json", async () => {
 		const dir = await makeTempDir();
 		try {
 			const manager = await seedTaskQueue(dir, "hash004");
@@ -182,15 +182,25 @@ async function main() {
 
 			assert(willRetry, "should retry");
 
-			// progress.json should NOT exist for a retriable failure
-			let progressExists = false;
+			// progress.json is written at claim time (to record claimedTasks).
+			// After a retriable failure the task returns to pending, so it should
+			// NOT appear in failedTasks — only in claimedTasks (which will be
+			// treated as retry-eligible on resume).
+			const progressPath = path.join(dir, "progress.json");
+			let snapshot: ProgressSnapshot | null = null;
 			try {
-				await fs.access(path.join(dir, "progress.json"));
-				progressExists = true;
+				snapshot = JSON.parse(await fs.readFile(progressPath, "utf-8")) as ProgressSnapshot;
 			} catch {
-				// expected
+				// file may not exist — that's also acceptable
 			}
-			assert(!progressExists, "progress.json should not exist after retriable failure");
+
+			if (snapshot) {
+				assertEqual(
+					snapshot.failedTasks.length,
+					0,
+					"retriable failure should NOT appear in failedTasks",
+				);
+			}
 		} finally {
 			await cleanup(dir);
 		}
@@ -327,6 +337,174 @@ async function main() {
 
 			const found = await findResumeCoordDir(sessionDir, "targetHash");
 			assertEqual(found, coordDir, "should return the matching coordination dir");
+		} finally {
+			await cleanup(sessionDir);
+		}
+	});
+
+	// ─────────────────────────────────────────────────────────────────────────
+	// Section 6: NEW — claimedTasks persisted at claim time (Fix 2)
+	// ─────────────────────────────────────────────────────────────────────────
+
+	runner.section("claimedTasks — persisted at claim time (Fix 2)");
+
+	await runner.test("claimTask writes taskId to claimedTasks in progress.json", async () => {
+		const dir = await makeTempDir();
+		try {
+			const manager = await seedTaskQueue(dir, "claimHash");
+
+			// Claim TASK-01 — no complete/fail yet, just claimed
+			const claimed = await manager.claimTask("TASK-01", "worker-1");
+			assertExists(claimed, "claimTask should return the task");
+
+			const progressPath = path.join(dir, "progress.json");
+			const snapshot = JSON.parse(await fs.readFile(progressPath, "utf-8")) as ProgressSnapshot;
+
+			assert(
+				Array.isArray(snapshot.claimedTasks),
+				"claimedTasks should be an array",
+			);
+			assert(
+				snapshot.claimedTasks.includes("TASK-01"),
+				"TASK-01 should appear in claimedTasks immediately after being claimed",
+			);
+			assertEqual(snapshot.completedTasks.length, 0, "no completedTasks yet");
+		} finally {
+			await cleanup(dir);
+		}
+	});
+
+	await runner.test("after markTaskComplete, claimedTasks is empty and task moves to completedTasks", async () => {
+		const dir = await makeTempDir();
+		try {
+			const manager = await seedTaskQueue(dir, "claimCompleteHash");
+
+			await manager.claimTask("TASK-01", "worker-1");
+			await manager.markTaskComplete("TASK-01", "worker-1");
+
+			const progressPath = path.join(dir, "progress.json");
+			const snapshot = JSON.parse(await fs.readFile(progressPath, "utf-8")) as ProgressSnapshot;
+
+			assertEqual(
+				snapshot.claimedTasks.length,
+				0,
+				"claimedTasks should be empty once the task is complete",
+			);
+			assert(snapshot.completedTasks.includes("TASK-01"), "TASK-01 in completedTasks");
+		} finally {
+			await cleanup(dir);
+		}
+	});
+
+	// ─────────────────────────────────────────────────────────────────────────
+	// Section 7: NEW — loadProgressSnapshot merges claimedTasks on resume (Fix 2)
+	// ─────────────────────────────────────────────────────────────────────────
+
+	runner.section("loadProgressSnapshot — claimed tasks re-queued on resume (Fix 2)");
+
+	await runner.test("claimed (but not completed) task is merged into failedTasks on load", async () => {
+		const dir = await makeTempDir();
+		try {
+			// Simulate a crashed run: write a progress.json that has a claimedTask
+			// but NOT in completedTasks.
+			const crashSnapshot: ProgressSnapshot = {
+				specHash: "crashHash",
+				specPath: "/fake/plan.md",
+				startedAt: new Date().toISOString(),
+				completedTasks: ["TASK-01"],
+				failedTasks: [],
+				claimedTasks: ["TASK-02"], // was in-progress when crash happened
+				phase: "workers",
+				lastCheckpointAt: new Date().toISOString(),
+			};
+			await fs.writeFile(
+				path.join(dir, "progress.json"),
+				JSON.stringify(crashSnapshot, null, 2),
+			);
+
+			const logs: string[] = [];
+			const origLog = console.log;
+			console.log = (...args: unknown[]) => logs.push(args.join(" "));
+
+			let result: ProgressSnapshot | null = null;
+			try {
+				result = await loadProgressSnapshot(dir, "crashHash");
+			} finally {
+				console.log = origLog;
+			}
+
+			assertExists(result, "snapshot should be returned");
+			assert(
+				result!.failedTasks.includes("TASK-02"),
+				"TASK-02 should be moved into failedTasks",
+			);
+			assert(
+				!result!.failedTasks.includes("TASK-01"),
+				"TASK-01 should NOT appear in failedTasks (it completed)",
+			);
+			assertEqual(result!.claimedTasks.length, 0, "claimedTasks cleared after merge");
+			assert(
+				logs.some((l) => l.includes("TASK-02") && l.includes("re-queuing")),
+				"should log a re-queuing message for TASK-02",
+			);
+		} finally {
+			await cleanup(dir);
+		}
+	});
+
+	// ─────────────────────────────────────────────────────────────────────────
+	// Section 8: NEW — findResumeCoordDir warnings (Fix 1)
+	// ─────────────────────────────────────────────────────────────────────────
+
+	runner.section("findResumeCoordDir — warnings on missing prior run (Fix 1)");
+
+	await runner.test("warns when coordBase dir does not exist at all", async () => {
+		const sessionDir = await makeTempDir();
+		try {
+			// Do NOT create sessionDir/coordination — simulates a brand-new session
+			const warnings: string[] = [];
+			const origWarn = console.warn;
+			console.warn = (...args: unknown[]) => warnings.push(args.join(" "));
+
+			let result: string | null = "sentinel";
+			try {
+				result = await findResumeCoordDir(sessionDir, "anyHash");
+			} finally {
+				console.warn = origWarn;
+			}
+
+			assertEqual(result, null, "should return null");
+			assert(
+				warnings.some((w) => w.includes("no prior run") || w.includes("starting fresh")),
+				"should warn about no prior run",
+			);
+		} finally {
+			await cleanup(sessionDir);
+		}
+	});
+
+	await runner.test("warns when coordBase exists but no matching spec hash", async () => {
+		const sessionDir = await makeTempDir();
+		try {
+			// Create an empty coordination dir — no subdirs with matching hash
+			await fs.mkdir(path.join(sessionDir, "coordination"), { recursive: true });
+
+			const warnings: string[] = [];
+			const origWarn = console.warn;
+			console.warn = (...args: unknown[]) => warnings.push(args.join(" "));
+
+			let result: string | null = "sentinel";
+			try {
+				result = await findResumeCoordDir(sessionDir, "missingHash");
+			} finally {
+				console.warn = origWarn;
+			}
+
+			assertEqual(result, null, "should return null");
+			assert(
+				warnings.some((w) => w.includes("missingHash") || w.includes("starting fresh")),
+				"should warn about no matching spec hash",
+			);
 		} finally {
 			await cleanup(sessionDir);
 		}

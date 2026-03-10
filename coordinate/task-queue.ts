@@ -124,6 +124,11 @@ export class TaskQueueManager {
 			task.claimedAt = Date.now();
 
 			await fs.writeFile(this.queuePath, JSON.stringify(queue, null, 2));
+
+			// Persist the claimed task immediately so a coordinator crash doesn't
+			// silently leave a partially-edited task appearing as not-started.
+			await this.writeClaimedCheckpoint(taskId, queue).catch(() => {});
+
 			return task;
 		});
 	}
@@ -451,6 +456,9 @@ export class TaskQueueManager {
 		const failedTasks = queue.tasks
 			.filter((t) => t.status === "failed")
 			.map((t) => t.id);
+		const claimedTasks = queue.tasks
+			.filter((t) => t.status === "claimed")
+			.map((t) => t.id);
 
 		const snapshot = {
 			specHash: existing.specHash ?? queue.planHash,
@@ -458,7 +466,47 @@ export class TaskQueueManager {
 			startedAt: existing.startedAt ?? new Date().toISOString(),
 			completedTasks,
 			failedTasks,
+			claimedTasks,
 			phase: "workers",
+			lastCheckpointAt: new Date().toISOString(),
+		};
+
+		await fs.writeFile(progressPath, JSON.stringify(snapshot, null, 2));
+	}
+
+	/**
+	 * Add a task ID to the `claimedTasks` list in progress.json immediately
+	 * after it is claimed.  This ensures that a coordinator crash between claim
+	 * and completion is detected on resume and the task is re-queued.
+	 *
+	 * The call is best-effort — failures are silently swallowed by the caller.
+	 */
+	private async writeClaimedCheckpoint(taskId: string, queue: TaskQueue): Promise<void> {
+		const progressPath = path.join(this.coordDir, PROGRESS_FILE);
+
+		let existing: Record<string, unknown> = {};
+		try {
+			existing = JSON.parse(await fs.readFile(progressPath, "utf-8"));
+		} catch {
+			// No existing snapshot yet — will be created fresh
+		}
+
+		const claimedTasks: string[] = Array.isArray(existing.claimedTasks)
+			? (existing.claimedTasks as string[])
+			: [];
+
+		if (!claimedTasks.includes(taskId)) {
+			claimedTasks.push(taskId);
+		}
+
+		const snapshot = {
+			specHash: existing.specHash ?? queue.planHash,
+			specPath: existing.specPath ?? queue.planPath,
+			startedAt: existing.startedAt ?? new Date().toISOString(),
+			completedTasks: Array.isArray(existing.completedTasks) ? existing.completedTasks : [],
+			failedTasks: Array.isArray(existing.failedTasks) ? existing.failedTasks : [],
+			claimedTasks,
+			phase: existing.phase ?? "workers",
 			lastCheckpointAt: new Date().toISOString(),
 		};
 

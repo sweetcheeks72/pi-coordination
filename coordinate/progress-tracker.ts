@@ -37,6 +37,8 @@ export interface ProgressSnapshot {
 	completedTasks: string[];
 	/** Task IDs that failed permanently */
 	failedTasks: string[];
+	/** Task IDs that were in-progress (claimed) at the last checkpoint — may be partially edited */
+	claimedTasks: string[];
 	/** Pipeline phase at last checkpoint */
 	phase: string;
 	/** ISO timestamp of the last update */
@@ -46,6 +48,11 @@ export interface ProgressSnapshot {
 /**
  * Load an existing progress snapshot from a coordination directory.
  * Returns null if the file is missing or if the specHash doesn't match.
+ *
+ * On load, any tasks recorded in `claimedTasks` that are NOT also in
+ * `completedTasks` are treated as failed (they were in-progress when the
+ * coordinator crashed and may have left partial file edits).  Each such task
+ * is logged and merged into `failedTasks` before the snapshot is returned.
  */
 export async function loadProgressSnapshot(
 	coordDir: string,
@@ -61,6 +68,22 @@ export async function loadProgressSnapshot(
 			);
 			return null;
 		}
+
+		// Merge in-progress tasks from a previous crash into failedTasks so they
+		// are re-queued for retry on resume.
+		const completedSet = new Set(data.completedTasks ?? []);
+		const failedSet = new Set(data.failedTasks ?? []);
+		for (const taskId of data.claimedTasks ?? []) {
+			if (!completedSet.has(taskId)) {
+				console.log(`[checkpoint] ${taskId} was in-progress at crash — re-queuing for retry`);
+				failedSet.add(taskId);
+			}
+		}
+		data.failedTasks = Array.from(failedSet);
+		// Clear claimedTasks after merging so they don't get re-processed on a
+		// second resume from the same snapshot.
+		data.claimedTasks = [];
+
 		return data;
 	} catch {
 		return null;
@@ -84,7 +107,8 @@ export async function deleteProgressSnapshot(coordDir: string): Promise<void> {
  * `progress.json` whose specHash matches the supplied hash.
  *
  * Returns the most-recently-created matching coordination directory, or null
- * if none is found.
+ * if none is found.  When resume was requested but no prior run exists, a
+ * clear warning is emitted so the caller knows a fresh run is starting.
  */
 export async function findResumeCoordDir(
 	sessionDir: string,
@@ -108,8 +132,15 @@ export async function findResumeCoordDir(
 				// Not a matching dir — continue
 			}
 		}
+		// coordBase exists but no directory matched the spec hash
+		console.warn(
+			`[checkpoint] No completed-task checkpoint found for spec hash ${specHash} — starting fresh`,
+		);
 	} catch {
 		// coordBase doesn't exist yet
+		console.warn(
+			"[checkpoint] Resume requested but no prior run found for this spec — starting fresh",
+		);
 	}
 	return null;
 }
