@@ -1016,13 +1016,15 @@ export function renderCoordinationDashboard(
 	/** Whether model routing is active (shows routing:on in header) */
 	modelRoutingEnabled: boolean = true,
 	costLimit?: number,
-	/** Whether context compaction / anti-drift memory is active (shows memory:on in header) */
-	memoryEnabled: boolean = false,
+	/** Whether MCP lazy tool loading is active (shows lazy-tools:on in header) */
+	lazyToolsEnabled: boolean = false,
+	/** Number of active git worktrees (shows worktrees:N in header when > 0) */
+	worktreeCount: number = 0,
 ): string[] {
 	const lines: string[] = [];
 
 	// ── Layer 1 — Session header ───────────────────────────────────────────────
-	// coordinate <plan>    ⠸ 8m12s · $0.23 · ctx 62% · routing:on
+	// coordinate <plan>    ⠸ 8m12s · $0.23 · ctx 62% · routing:on · lazy-tools:on
 	{
 		const spinner = theme.fg("warning", getSpinnerFrame());
 		const elapsed = theme.fg("dim", formatDuration(pipeline.elapsed));
@@ -1050,11 +1052,14 @@ export function renderCoordinationDashboard(
 		// Routing indicator
 		const routingStr = modelRoutingEnabled ? " · " + theme.fg("accent", "routing:on") : "";
 
-		// Memory / context-compaction indicator
-		const memoryStr = memoryEnabled ? " · " + theme.fg("accent", "memory:on") : "";
+		// Lazy tools indicator
+		const lazyToolsStr = lazyToolsEnabled ? " · " + theme.fg("accent", "lazy-tools:on") : "";
+
+		// Worktree isolation indicator
+		const worktreeStr = worktreeCount > 0 ? " · " + theme.fg("accent", `worktrees:${worktreeCount}`) : "";
 
 		const leftLabel = theme.fg("dim", "coordinate ") + theme.fg("accent", piSafe(planName, 60));
-		const rightLabel = `${spinner} ${elapsed} · ${cost}${ctxStr}${routingStr}${memoryStr}`;
+		const rightLabel = `${spinner} ${elapsed} · ${cost}${ctxStr}${routingStr}${lazyToolsStr}${worktreeStr}`;
 
 		const leftVis = visibleWidth(leftLabel);
 		const rightVis = visibleWidth(rightLabel);

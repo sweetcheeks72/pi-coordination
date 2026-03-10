@@ -1324,6 +1324,7 @@ ${planContent ? `### Full Plan\n\`\`\`markdown\n${planContent}\n\`\`\`` : ""}
 						supervisor?.removeWorker(handle.workerId);
 
 						if (exitCode === 0) {
+							await releaseWorktreeForTask(handle.taskId, true);
 							await taskQueue.markTaskComplete(handle.taskId, handle.identity);
 							// Update coordinator context with success
 							updateAssignmentOutcome(coordContext!, handle.taskId, "success");
@@ -1335,6 +1336,8 @@ ${planContent ? `### Full Plan\n\`\`\`markdown\n${planContent}\n\`\`\`` : ""}
 								filesModified: [],
 							});
 						} else if (exitCode === 42 || exitCode !== 0) {
+							// Release worktree on failure (no merge)
+							await releaseWorktreeForTask(handle.taskId, false);
 							// Handle both explicit restart requests (42) and failures
 							const count = (restartCounts.get(handle.taskId) || 0) + 1;
 							restartCounts.set(handle.taskId, count);
@@ -1388,7 +1391,7 @@ ${planContent ? `### Full Plan\n\`\`\`markdown\n${planContent}\n\`\`\`` : ""}
 												identity: workerIdentity,
 											},
 											coordDir,
-											ctx.cwd,
+											await allocateWorktreeForTask(task.id),
 											storage,
 											undefined,
 											obs || undefined,
@@ -1501,7 +1504,7 @@ ${planContent ? `### Full Plan\n\`\`\`markdown\n${planContent}\n\`\`\`` : ""}
 								identity: workerIdentity,
 							},
 							coordDir,
-							ctx.cwd,
+							await allocateWorktreeForTask(task.id),
 							storage,
 							undefined,
 							obs || undefined,
@@ -1572,6 +1575,18 @@ ${planContent ? `### Full Plan\n\`\`\`markdown\n${planContent}\n\`\`\`` : ""}
 				}
 
 				supervisor?.stop();
+
+				// Cleanup any remaining worktrees (handles crash/abort cases)
+				if (useWorktrees) {
+					await Promise.allSettled(
+						[...worktreeAllocations.entries()].map(([taskId, allocation]) =>
+							releaseWorktree(allocation, repoRoot).catch(err =>
+								console.warn(`[worktree] Final cleanup failed for ${taskId}: ${err}`),
+							),
+						),
+					);
+					worktreeAllocations.clear();
+				}
 
 				const queue = await taskQueue.getQueue();
 				const completed = queue.tasks.filter(t => t.status === "complete").length;

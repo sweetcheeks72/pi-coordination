@@ -131,6 +131,10 @@ import {
 import { TaskQueueManager } from "./task-queue.js";
 import { checkGate, type HITLMode } from "./hitl-gate.js";
 import type { SpecTask } from "./spec-parser.js";
+import {
+	shouldUseWorktrees,
+	registerWorktreeCleanupHandlers,
+} from "./worktree-manager.js";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const require = createRequire(import.meta.url);
@@ -274,6 +278,7 @@ const CoordinateParams = Type.Object({
 	costLimit: Type.Optional(Type.Number({ description: "Cost limit in dollars - ends gracefully before next review cycle (default: 40)" })),
 	validate: Type.Optional(Type.Boolean({ description: "Run validation after completion (default: false)" })),
 	validateStream: Type.Optional(Type.Boolean({ description: "Stream invariant warnings in real-time (default: false)" })),
+	useWorktrees: Type.Optional(Type.Boolean({ description: "Give each parallel worker an isolated git worktree (default: auto-detect)" })),
 	coordinator: Type.Optional(Type.Union([
 		Type.String(),
 		Type.Object({ model: Type.Optional(Type.String()) }),
@@ -799,15 +804,27 @@ See: pi-coordination README for spec format documentation.`,
 		},
 	};
 
+	const workerCount = (normalizeAgents(params.agents) ?? settings.agents ?? ["worker", "worker", "worker", "worker"]).length;
+	const enableWorktrees = params.useWorktrees !== undefined
+		? params.useWorktrees
+		: await shouldUseWorktrees(runtime.cwd, workerCount);
+
 	const runtimeConfig = {
 		selfReview: pipelineConfig.selfReview,
 		supervisor: pipelineConfig.supervisor,
 		models: pipelineConfig.models,
+		useWorktrees: enableWorktrees,
+		repoRoot: runtime.cwd,
 	};
 	await fs.writeFile(
 		path.join(coordDir, "runtime-config.json"),
 		JSON.stringify(runtimeConfig, null, 2),
 	);
+
+	if (enableWorktrees) {
+		registerWorktreeCleanupHandlers(runtime.cwd, coordSessionId);
+		console.log(`[worktrees] Isolation enabled — each worker gets its own git worktree`);
+	}
 
 	// Save execution info
 	const executionInfo = {
