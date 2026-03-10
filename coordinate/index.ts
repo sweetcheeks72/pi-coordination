@@ -134,6 +134,7 @@ import type { SpecTask } from "./spec-parser.js";
 import {
 	shouldUseWorktrees,
 	registerWorktreeCleanupHandlers,
+	cleanupAllWorktrees,
 } from "./worktree-manager.js";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));

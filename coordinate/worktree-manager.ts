@@ -84,6 +84,7 @@ export async function allocateWorktree(
 		try {
 			await execAsync(`git worktree remove "${worktreePath}" --force`, { cwd: repoRoot });
 		} catch {
+			// If removal fails, try manual cleanup
 			await fs.rm(worktreePath, { recursive: true, force: true });
 		}
 	}
@@ -101,13 +102,15 @@ export async function allocateWorktree(
 		{ cwd: repoRoot },
 	);
 
-	return {
+	const allocation: WorktreeAllocation = {
 		worktreePath,
 		branchName,
 		taskId,
 		createdAt: new Date().toISOString(),
 		baseBranch,
 	};
+
+	return allocation;
 }
 
 /**
@@ -120,25 +123,30 @@ export async function releaseWorktree(
 	allocation: WorktreeAllocation,
 	repoRoot: string,
 ): Promise<void> {
+	// Remove the worktree directory
 	try {
 		await execAsync(
 			`git worktree remove "${allocation.worktreePath}" --force`,
 			{ cwd: repoRoot },
 		);
 	} catch {
+		// If git command fails, try manual rm
 		try {
 			await fs.rm(allocation.worktreePath, { recursive: true, force: true });
 		} catch {
+			// Best-effort; log but don't throw
 			console.warn(`[worktree] Failed to remove directory: ${allocation.worktreePath}`);
 		}
 	}
 
+	// Delete the branch
 	try {
 		execSync(`git branch -d "${allocation.branchName}"`, {
 			cwd: repoRoot,
 			stdio: "pipe",
 		});
 	} catch {
+		// Branch may already be deleted or not yet merged — force delete
 		try {
 			execSync(`git branch -D "${allocation.branchName}"`, {
 				cwd: repoRoot,
@@ -149,6 +157,7 @@ export async function releaseWorktree(
 		}
 	}
 
+	// Prune the worktree list
 	try {
 		execSync("git worktree prune", { cwd: repoRoot, stdio: "pipe" });
 	} catch {
@@ -158,6 +167,9 @@ export async function releaseWorktree(
 
 /**
  * Merge a worktree branch back into the current working branch.
+ *
+ * Runs `git merge {branchName} --no-ff -m "Merge {taskId}"` in the repo root.
+ * Returns the list of conflicting files if the merge fails.
  *
  * @param allocation    The WorktreeAllocation to merge
  * @param repoRoot      Absolute path to the git repository root
@@ -171,9 +183,11 @@ export async function mergeWorktreeBranch(
 ): Promise<{ success: boolean; conflicts?: string[] }> {
 	const target = targetBranch ?? allocation.baseBranch;
 
+	// Ensure we are on the target branch
 	try {
 		execSync(`git checkout "${target}"`, { cwd: repoRoot, stdio: "pipe" });
 	} catch {
+		// If checkout fails the branch may not exist — abort
 		return {
 			success: false,
 			conflicts: [`Could not checkout target branch: ${target}`],
@@ -187,6 +201,7 @@ export async function mergeWorktreeBranch(
 		);
 		return { success: true };
 	} catch (err) {
+		// Collect conflicting files
 		let conflicts: string[] = [];
 		try {
 			const { stdout } = await execAsync(
@@ -198,11 +213,13 @@ export async function mergeWorktreeBranch(
 				.map((l) => l.trim())
 				.filter(Boolean);
 		} catch {
+			// Fallback: parse from error message
 			const msg = String(err);
 			const conflictMatches = msg.match(/CONFLICT[^:]*: (.+)/g) || [];
 			conflicts = conflictMatches.map((m) => m.replace(/CONFLICT[^:]*: /, "").trim());
 		}
 
+		// Abort the merge to leave the working tree clean
 		try {
 			execSync("git merge --abort", { cwd: repoRoot, stdio: "pipe" });
 		} catch {
@@ -215,6 +232,9 @@ export async function mergeWorktreeBranch(
 
 /**
  * Clean up ALL worktrees for a given session.
+ *
+ * Used during SIGINT/SIGTERM handlers or after a coordination session ends.
+ * Lists all worktrees whose path matches the session pattern and removes them.
  *
  * @param repoRoot   Absolute path to the git repository root
  * @param sessionId  Session ID to clean up
@@ -234,6 +254,7 @@ export async function cleanupAllWorktrees(
 		return;
 	}
 
+	// Parse "worktree /path/to/dir" lines
 	const paths = worktreeList
 		.split("\n")
 		.filter((line) => line.startsWith("worktree "))
@@ -242,8 +263,10 @@ export async function cleanupAllWorktrees(
 
 	await Promise.allSettled(
 		paths.map(async (worktreePath) => {
+			// Derive branch name from path: pi-coord-{session}-{task} → agent/{session}/{task}
 			const suffix = path.basename(worktreePath).replace(`pi-coord-${safeSession}-`, "");
 			const branchName = `agent/${safeSession}/${suffix}`;
+
 			const allocation: WorktreeAllocation = {
 				worktreePath,
 				branchName,
@@ -260,7 +283,7 @@ export async function cleanupAllWorktrees(
  * Auto-detect whether worktree isolation should be used for this coordination session.
  *
  * Returns true when:
- * - More than 1 worker is running in parallel
+ * - More than 1 worker is running in parallel (no isolation benefit for single workers)
  * - The target directory is a non-bare git repo
  *
  * @param repoRoot     Directory to check
@@ -273,8 +296,10 @@ export async function shouldUseWorktrees(
 	if (workerCount <= 1) return false;
 
 	try {
+		// Check it's a valid git repo
 		execSync("git rev-parse --git-dir", { cwd: repoRoot, stdio: "pipe" });
 
+		// Check it's not a bare repo
 		const isBare = execSync("git rev-parse --is-bare-repository", {
 			cwd: repoRoot,
 			stdio: "pipe",
@@ -291,6 +316,7 @@ export async function shouldUseWorktrees(
 
 /**
  * Register process exit handlers to clean up all worktrees for a session.
+ * Call this once after starting a coordination session with worktrees enabled.
  *
  * @param repoRoot   Absolute path to the git repository root
  * @param sessionId  Session ID to clean up on exit
@@ -300,6 +326,7 @@ export function registerWorktreeCleanupHandlers(
 	sessionId: string,
 ): void {
 	const cleanup = () => {
+		// Synchronous best-effort cleanup on process exit
 		const safeSession = safeName(sessionId).slice(0, 20);
 		const prefix = `pi-coord-${safeSession}-`;
 
