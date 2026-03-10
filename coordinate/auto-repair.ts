@@ -41,6 +41,11 @@ export interface RepairContext {
 	 */
 	spawnRepairWorker: (prompt: string) => Promise<{ exitCode: number; filesModified: string[] }>;
 	/**
+	 * Optional: override the verification function (used for testing).
+	 * When not provided, the default tsc + npm-test runner is used.
+	 */
+	verify?: (cwd: string) => Promise<{ passed: boolean; output: string }>;
+	/**
 	 * Optional callback to update worker repair state for display purposes.
 	 * Called before each repair attempt so the dashboard can show "auto-repair N/3".
 	 */
@@ -170,21 +175,20 @@ export async function runAutoRepair(ctx: RepairContext): Promise<RepairResult> {
 	const maxRetries = ctx.maxRetries ?? 3;
 
 	// Decide whether to run verification at all
-	const hasTypeScriptFiles = ctx.filesModified.some(
-		f => f.endsWith(".ts") || f.endsWith(".tsx"),
-	);
 	const hasTsConfig = fsSync.existsSync(path.join(ctx.cwd, "tsconfig.json"));
 	const hasPackageJson = fsSync.existsSync(path.join(ctx.cwd, "package.json"));
 
-	if (!hasTypeScriptFiles && !hasTsConfig && !hasPackageJson) {
+	if (!hasTsConfig && !hasPackageJson) {
 		// Nothing to verify — treat as pass without consuming an attempt slot
 		return { success: true, attempts: 0 };
 	}
 
 	let lastError = "";
 
+	const verificationFn = ctx.verify ?? runVerification;
+
 	for (let attempt = 1; attempt <= maxRetries; attempt++) {
-		const verification = await runVerification(ctx.cwd);
+		const verification = await verificationFn(ctx.cwd);
 
 		if (verification.passed) {
 			return { success: true, attempts: attempt };
