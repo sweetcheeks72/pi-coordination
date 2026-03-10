@@ -90,6 +90,13 @@ import { AuditLog } from "./audit-log.js";
 import { generateCoordinationLog } from "./log-generator.js";
 import { CheckpointManager } from "./checkpoint.js";
 import {
+	compactSession,
+	loadCrossSessionDigest,
+	buildWorkerContextHeader,
+	type CompletedTask,
+	type SessionDigest,
+} from "./context-compactor.js";
+import {
 	type PipelineConfig,
 	type PipelineContext,
 	initializePipelineState,
@@ -619,7 +626,18 @@ See: pi-coordination README for spec format documentation.`,
 	}
 
 	// Two-track architecture: coordinate always runs on valid specs
-	// Scout and planner phases are now in the plan tool
+	// ── Context Compaction: load prior session digest (cross-session memory) ──
+	const planSpecHash = hash(planContent);
+	let priorSessionDigest: SessionDigest | null = null;
+	try {
+		priorSessionDigest = await loadCrossSessionDigest(planSpecHash);
+		if (priorSessionDigest) {
+			console.log(`[context] Loading prior session digest from ${priorSessionDigest.createdAt} (phase: ${priorSessionDigest.phase})`);
+		}
+	} catch {
+		// Non-fatal: cross-session memory is best-effort
+	}
+
 	console.log(`[coordinate] Starting execution with ${parsedSpec.tasks.length} tasks`);
 
 	const initialState: CoordinationState = {
@@ -1063,7 +1081,14 @@ See: pi-coordination README for spec format documentation.`,
 		const scoutContext = pipelineState.scoutContext || "";
 		let sharedContextReady = false;
 		try {
-			await writeSharedContextFile(sharedContextPath, planContent, scoutContext);
+			// If we have a prior session digest, include its context header in the shared context
+			const priorContextHeader = priorSessionDigest
+				? buildWorkerContextHeader(priorSessionDigest)
+				: "";
+			const augmentedScoutContext = priorContextHeader
+				? `${priorContextHeader}\n${scoutContext}`.trim()
+				: scoutContext;
+			await writeSharedContextFile(sharedContextPath, planContent, augmentedScoutContext);
 			sharedContextReady = true;
 			process.env.PI_COORDINATION_SHARED_CONTEXT = sharedContextPath;
 		} catch {}
@@ -1179,6 +1204,37 @@ See: pi-coordination README for spec format documentation.`,
 			updatePhaseStatus("workers", "complete", pipelineContext);
 
 			coordExitError = coordinatorResult.exitCode !== 0 || coordinatorResult.stopReason === "error" || coordinatorResult.stopReason === "aborted";
+		}
+
+		// ── Context Compaction: distill session state at workers→review boundary ──
+		if (!coordExitError && shouldRunPhase("review")) {
+			try {
+				const compactionWorkerStates = await storage.listWorkerStates();
+				const completedTasksForDigest: CompletedTask[] = compactionWorkerStates
+					.filter(w => w.status === "complete")
+					.map(w => ({
+						taskId: w.id,
+						title: w.identity,
+						filesModified: w.filesModified,
+						summary: undefined,
+					}));
+
+				const sessionDigest = await compactSession(
+					coordDir,
+					coordSessionId,
+					completedTasksForDigest,
+					planContent,
+					"workers",
+				);
+				console.log(`[context] Session digest saved — ${sessionDigest.filesModified.length} files, ${sessionDigest.completedTaskSummaries.length} tasks, ${sessionDigest.openQuestions.length} open questions`);
+
+				// Prepend digest header to reviewer context (via env var for reviewer agent pickup)
+				const contextHeader = buildWorkerContextHeader(sessionDigest);
+				process.env.PI_SESSION_CONTEXT_HEADER = contextHeader;
+			} catch (compactionErr) {
+				// Non-fatal: compaction is a best-effort anti-drift measure
+				console.warn(`[context] Session compaction failed (non-fatal): ${compactionErr}`);
+			}
 		}
 
 		if (!coordExitError && shouldRunPhase("review")) {
@@ -1769,6 +1825,7 @@ export function createCoordinateTool(events: EventBus): ToolDefinition<typeof Co
 					width - 4,
 					true,        // modelRoutingEnabled
 					pipelineState?.costLimit,  // pass costLimit for cap display
+					true,        // memoryEnabled: context compaction is always active
 				);
 				for (const line of dashboardLines) {
 					container.addChild(new Text(drawBoxLine(line, width, theme), 0, 0));
