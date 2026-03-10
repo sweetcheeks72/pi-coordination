@@ -1667,6 +1667,7 @@ export function createCoordinateTool(events: EventBus): ToolDefinition<typeof Co
 				cost: details.cost?.total || 0,
 				costByPhase: details.cost?.byPhase,
 				elapsed: Date.now() - (details.startedAt || Date.now()),
+				costLimit: details.cost?.limit,
 			} : null;
 
 			// ─────────────────────────────────────────────────────────────────
@@ -1766,6 +1767,8 @@ export function createCoordinateTool(events: EventBus): ToolDefinition<typeof Co
 					taskEntries,
 					theme,
 					width - 4,
+					true,        // modelRoutingEnabled
+					costLimit,   // pass costLimit for cap display
 				);
 				for (const line of dashboardLines) {
 					container.addChild(new Text(drawBoxLine(line, width, theme), 0, 0));

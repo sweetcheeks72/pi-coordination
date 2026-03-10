@@ -1001,6 +1001,36 @@ ${planContent ? `## Full Plan\n\`\`\`markdown\n${planContent}\n\`\`\`` : ""}
 					createdAt: Date.now(),
 				});
 
+				// Write structured questions file for Pi's interview tool (HANDRaiser → interview wiring)
+				try {
+					const questionsFile = path.join(coordDir, 'handraiser-questions.json');
+					let existingQuestions: any[] = [];
+					if (fsSync.existsSync(questionsFile)) {
+						try {
+							const existing = JSON.parse(fsSync.readFileSync(questionsFile, 'utf-8'));
+							existingQuestions = existing.questions || [];
+						} catch {}
+					}
+					const qIndex = existingQuestions.length;
+					existingQuestions.push({
+						id: `q${qIndex + 1}`,
+						type: 'single',
+						question: `[${identity}] ${params.question}`,
+						options: params.options,
+					});
+					const questionsPayload = {
+						title: `✋ ${existingQuestions.length} agent${existingQuestions.length > 1 ? 's have' : ' has'} questions`,
+						description: 'Answer before the review phase begins',
+						questions: existingQuestions,
+					};
+					fsSync.writeFileSync(questionsFile, JSON.stringify(questionsPayload, null, 2));
+					console.log(`[handraiser] Questions saved to: ${questionsFile}`);
+					console.log(`[handraiser] Run: interview({ questions: "${questionsFile}" }) to answer`);
+				} catch (writeErr) {
+					// Non-fatal: continue with queue-based fallback
+					console.warn('[handraiser] Failed to write questions file:', writeErr);
+				}
+
 				await obs?.events.emit({
 					type: "escalation_created",
 					escalationId: id,

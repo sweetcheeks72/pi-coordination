@@ -1024,7 +1024,16 @@ export function renderCoordinationDashboard(
 	{
 		const spinner = theme.fg("warning", getSpinnerFrame());
 		const elapsed = theme.fg("dim", formatDuration(pipeline.elapsed));
-		const cost = theme.fg("muted", formatCost(pipeline.cost));
+
+		// Determine cost color: yellow if ≥ 80% of cap
+		const costColor: "muted" | "warning" | "error" = 
+			costLimit && pipeline.cost >= costLimit * 0.8 
+				? (pipeline.cost >= costLimit ? "error" : "warning")
+				: "muted";
+		const costDisplay = costLimit 
+			? `${formatCost(pipeline.cost)} / ${formatCost(costLimit)} cap`
+			: formatCost(pipeline.cost);
+		const cost = theme.fg(costColor, costDisplay);
 
 		// Context health: aggregate across workers, pick highest pressure
 		const allCtx = workers.map(w => w.contextPct ?? 0);
@@ -1039,13 +1048,13 @@ export function renderCoordinationDashboard(
 		// Routing indicator
 		const routingStr = modelRoutingEnabled ? " · " + theme.fg("accent", "routing:on") : "";
 
-		const leftLabel = theme.fg("dim", "coordinate ") + theme.fg("accent", planName);
+		const leftLabel = theme.fg("dim", "coordinate ") + theme.fg("accent", piSafe(planName, 60));
 		const rightLabel = `${spinner} ${elapsed} · ${cost}${ctxStr}${routingStr}`;
 
 		const leftVis = visibleWidth(leftLabel);
 		const rightVis = visibleWidth(rightLabel);
 		const gap = Math.max(1, width - leftVis - rightVis);
-		lines.push(leftLabel + " ".repeat(gap) + rightLabel);
+		lines.push(piSafe(leftLabel + " ".repeat(gap) + rightLabel, 205));
 	}
 
 	// ── Layer 2 — Phase row ────────────────────────────────────────────────────
@@ -1083,7 +1092,7 @@ export function renderCoordinationDashboard(
 			const titleParts = active.map(t =>
 				theme.fg("dim", truncateText(`${t.id} ${t.title}`, Math.max(10, Math.floor(titleWidth / active.length) - 2))
 			));
-			lines.push(indent + titleParts.join("  "));
+			lines.push(piSafe(indent + titleParts.join("  "), 205));
 		}
 	}
 
@@ -1104,7 +1113,7 @@ export function renderCoordinationDashboard(
 				: theme.fg("error", "✗");
 
 		// Name: 12 chars padded (e.g. "swift_fox   ")
-		const namePadded = theme.fg(isActive ? "accent" : "dim", w.name.slice(0, 12).padEnd(12));
+		const namePadded = theme.fg(isActive ? "accent" : "dim", piSafe(w.name, 60).slice(0, 12).padEnd(12));
 
 		// Task ID: 7 chars
 		const taskIdStr = w.taskId
@@ -1130,6 +1139,7 @@ export function renderCoordinationDashboard(
 		} else if (w.taskTitle) {
 			actionStr = theme.fg("dim", truncateText(w.taskTitle, 30));
 		}
+		actionStr = piSafe(actionStr, 80);
 
 		// Duration + cost + ctx%
 		const timeStr = theme.fg("dim", formatDuration(w.durationMs).padEnd(4));

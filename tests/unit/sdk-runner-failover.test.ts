@@ -259,7 +259,7 @@ async function main() {
 		assert(result.startsWith("success-on-"), `Expected success after cascade, got: ${result}`);
 	});
 
-	await runner.test("does not include initialModel twice when it appears in PROVIDER_CASCADE", async () => {
+	await runner.test("does not retry initialModel from CASCADE when it was already tried as initial", async () => {
 		const modelsUsed: string[] = [];
 
 		// Use a model that's in the PROVIDER_CASCADE
@@ -277,13 +277,13 @@ async function main() {
 			// may throw if all fail — we just care about deduplication
 		}
 
-		// The initialModel should NOT appear twice in the first position
-		const firstOccurrence = modelsUsed.indexOf(cascadeModel);
-		const secondOccurrence = modelsUsed.indexOf(cascadeModel, firstOccurrence + 1);
-		// After exhausting 2 attempts, the model should not be retried again from CASCADE
+		// The initialModel should appear at most 2 times (2 per-model retry attempts),
+		// NOT more than that (which would indicate it was added again from PROVIDER_CASCADE).
+		const totalOccurrences = modelsUsed.filter((m) => m === cascadeModel).length;
 		assert(
-			secondOccurrence === -1 || secondOccurrence > firstOccurrence + 1,
-			"initialModel should not appear consecutively twice from both initial + cascade",
+			totalOccurrences <= 2,
+			`initialModel '${cascadeModel}' should appear ≤2 times (per-model limit). ` +
+			`Appeared ${totalOccurrences} times — likely added again from PROVIDER_CASCADE despite being the initial model.`,
 		);
 	});
 
