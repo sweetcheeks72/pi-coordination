@@ -122,6 +122,7 @@ import {
 	getQALoopSummary,
 } from "./qa-feedback.js";
 import { TaskQueueManager } from "./task-queue.js";
+import { checkGate, type HITLMode } from "./hitl-gate.js";
 import type { SpecTask } from "./spec-parser.js";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
@@ -240,11 +241,17 @@ interface CoordinationRuntime extends AgentRuntime {
 
 const CoordinateParams = Type.Object({
 	plan: Type.String({ description: "Path to TASK-XX format spec file. Use 'plan' tool first to create specs from prose/PRDs." }),
+	hitl: Type.Optional(Type.Union([
+		Type.Literal("strict"),
+		Type.Literal("permissive"),
+		Type.Literal("off"),
+	], { description: "HITL (Human-in-the-Loop) permission gate mode. 'strict' = require approval for critical AND high severity actions. 'permissive' = require approval for critical-only actions. 'off' = disabled (default: 'permissive')" })),
 	agents: Type.Optional(Type.Union([
 		Type.Array(Type.String()),
 		Type.Number(),
 	], { description: "Worker agents: array of names or count (default: 4 workers)" })),
 	logPath: Type.Optional(Type.String({ description: "Path for coordination log output. Defaults to cwd. Set to empty string to disable." })),
+	background: Type.Optional(Type.Boolean({ description: "If true, detach the coordination run so you can close the terminal and come back to results. Returns immediately with a run ID. Poll status with scripts/pi-status.sh or getRunStatus()." })),
 	resume: Type.Optional(Type.Union([
 		Type.Boolean({ description: "true = resume from last checkpoint for this spec (task-level resume)" }),
 		Type.String({ description: "Checkpoint ID to resume from (phase-level pipeline checkpoint)" }),
@@ -1110,6 +1117,35 @@ See: pi-coordination README for spec format documentation.`,
 
 			const taskQueueManager = new TaskQueueManager(coordDir);
 			await taskQueueManager.createFromPlan(planPath, hash(planContent), enrichedEntries);
+
+			// ── HITL Gate: scan tasks for high-stakes patterns before dispatch ──
+			const hitlMode: HITLMode = (params.hitl as HITLMode) ?? "permissive";
+			if (hitlMode !== "off") {
+				const heldTaskIds: string[] = [];
+				for (const task of enrichedEntries) {
+					const gateResult = await checkGate(
+						task.id,
+						"coordinator",
+						task.description,
+						coordDir,
+						hitlMode,
+					);
+					if (gateResult.held) {
+						heldTaskIds.push(task.id);
+					}
+				}
+				if (heldTaskIds.length > 0) {
+					const bar = "═".repeat(62);
+					console.log(`\n╔${bar}╗`);
+					console.log(`║  ⛔ HITL gates triggered for ${heldTaskIds.length} task(s) — awaiting approval  ║`);
+					console.log(`╚${bar}╝`);
+					for (const id of heldTaskIds) {
+						const gateFile = path.join(coordDir, `hitl-gate-${id}.json`);
+						console.log(`  ${id}  gate file: ${gateFile}`);
+					}
+					console.log(`\n  HITL mode: ${hitlMode} | Approve or reject in gate files above\n`);
+				}
+			}
 		}
 
 		if (shouldRunPhase("coordinator")) {
@@ -1378,7 +1414,7 @@ See: pi-coordination README for spec format documentation.`,
 				} catch { return []; }
 			})();
 			recapPath = await generateCoordinationRecap(
-				{ coordDir, planPath, costLimit: params.costLimit, sessionId: coordSessionId },
+				{ coordDir, planPath, costLimit: params.costLimit, sessionId: coordSessionId, hitlMode: (params.hitl as HITLMode) ?? "permissive" },
 				{
 					status: isError ? "failed" : "complete",
 					startedAt: initialState.startedAt,
@@ -1506,6 +1542,44 @@ export function createCoordinateTool(events: EventBus): ToolDefinition<typeof Co
 			const typedParams = params as CoordinateParamsType;
 			const resultsDir = resolveAsyncResultsDir(ctx.cwd, typedParams.asyncResultsDir);
 
+			// ── Background (overnight) mode ───────────────────────────────────
+			// Detaches the run into a child process so the user can close their
+			// terminal and come back later to find results.
+			if (typedParams.background) {
+				try {
+					const { startBackgroundRun } = await import("./background-runner.js");
+					const specPath = path.resolve(ctx.cwd, typedParams.plan);
+					try {
+						await fs.access(specPath);
+					} catch (err) {
+						return {
+							content: [{ type: "text", text: `Failed to read plan file: ${specPath}\n${err}` }],
+							isError: true,
+						};
+					}
+					const opts: Record<string, unknown> = { ...typedParams, background: false };
+					const run = await startBackgroundRun(specPath, opts as any, ctx.cwd);
+					const specName = path.basename(specPath, path.extname(specPath));
+					return {
+						content: [{
+							type: "text",
+							text: [
+								`[background] run ${run.id} started — spec: ${specName}`,
+								`  watch: tail -f ${run.logPath}`,
+								`  status: cat ${run.statusPath}`,
+								`  or: bash scripts/pi-status.sh ${run.id}`,
+							].join("\n"),
+						}],
+						details: { backgroundRun: run },
+					};
+				} catch (err) {
+					return {
+						content: [{ type: "text", text: `Failed to start background run: ${err}` }],
+						isError: true,
+					};
+				}
+			}
+
 			if (typedParams.async) {
 				if (!jitiCliPath) {
 					return {
@@ -1629,11 +1703,13 @@ export function createCoordinateTool(events: EventBus): ToolDefinition<typeof Co
 			const planPath = args.plan || "...";
 			const agentCount = Array.isArray(args.agents) ? args.agents.length : (args.agents || 0);
 			const asyncLabel = args.async ? theme.fg("warning", " [async]") : "";
+			const backgroundLabel = (args as any).background ? theme.fg("warning", " [background]") : "";
 			const expandHint = theme.fg("dim", " [Ctrl+O: expand]");
 			let text = theme.fg("toolTitle", theme.bold("coordinate ")) +
 				theme.fg("accent", planPath) +
 				theme.fg("muted", ` (${agentCount} agents)`) +
 				asyncLabel +
+				backgroundLabel +
 				expandHint;
 			return new Text(text, 0, 0);
 		},
