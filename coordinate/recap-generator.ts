@@ -10,6 +10,17 @@ import { exec } from "node:child_process";
 import { promisify } from "node:util";
 import type { CoordinationEvent, WorkerStateFile, Task, PipelinePhase } from "./types.js";
 
+// Pricing constants for routing savings estimate (kept in sync with sdk-runner MODEL_PRICE_PER_MTOK)
+const BASELINE_PRICE_PER_MTOK = 3.00; // all-premium (claude-sonnet-4-6) baseline
+const ROUTING_PRICE_PER_MTOK: Record<string, number> = {
+	scout:       0.80,  // nova-pro
+	planner:     3.00,  // claude-sonnet-4-5
+	coordinator: 3.00,  // claude-sonnet-4-5
+	worker:      3.00,  // claude-sonnet-4-6
+	reviewer:    3.00,  // claude-sonnet-4-5
+	verifier:    0.80,  // nova-pro
+};
+
 const execAsync = promisify(exec);
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -404,9 +415,53 @@ function renderCostSection(
 		<th style="font-family:monospace; color:${COLORS.textMuted}; padding:6px 0; text-align:left; font-weight:normal;">Cost</th>
 	</tr>`;
 
+	// ── Model routing savings estimate ────────────────────────────────────────
+	// Calculate estimated savings: tokens_routed_to_cheap_models × (baseline_price - actual_price)
+	let routingSavings = 0;
+	const routingBreakdownRows: string[] = [];
+	for (const w of workers) {
+		// Extract agent role from identity (format: "role:TASK-XX-shortid" or just "role")
+		const roleMatch = w.identity.match(/^([a-z]+)(?:[:\-]|$)/i);
+		const role = roleMatch ? roleMatch[1].toLowerCase() : null;
+		if (!role) continue;
+		const rolePriceMtok = ROUTING_PRICE_PER_MTOK[role];
+		if (rolePriceMtok === undefined) continue; // role not in routing table → no routing
+
+		const totalTokens = (w.usage?.input || 0) + (w.usage?.output || 0) + (w.usage?.cacheRead || 0);
+		if (totalTokens <= 0) continue;
+
+		const savingsMtok = BASELINE_PRICE_PER_MTOK - rolePriceMtok;
+		if (savingsMtok <= 0) continue; // premium role, no savings
+
+		const savingsForWorker = (totalTokens / 1_000_000) * savingsMtok;
+		routingSavings += savingsForWorker;
+		routingBreakdownRows.push(`
+		<tr>
+			<td style="font-family:monospace; color:${COLORS.textMuted}; padding:3px 12px 3px 0;">${esc(role)}</td>
+			<td style="font-family:monospace; color:${COLORS.text}; padding:3px 12px 3px 0;">${totalTokens.toLocaleString()}</td>
+			<td style="font-family:monospace; color:${COLORS.success}; padding:3px 0;">~${esc(formatCostNum(savingsForWorker))}</td>
+		</tr>`);
+	}
+
+	const routingSavingsSection = routingSavings > 0 ? card(`
+		<h3 style="font-family:monospace; color:${COLORS.textMuted}; margin:0 0 12px; font-size:0.9em; text-transform:uppercase; letter-spacing:0.05em;">Model Routing Savings</h3>
+		<p style="font-family:monospace; color:${COLORS.textMuted}; margin:0 0 12px; font-size:0.85em;">Estimated vs all-premium (sonnet-4-6) baseline. Cheaper models used for scout/verifier roles.</p>
+		<table style="border-collapse:collapse; width:100%; margin-bottom:12px;">
+			<tr style="border-bottom:1px solid ${COLORS.border};">
+				<th style="font-family:monospace; color:${COLORS.textMuted}; padding:6px 12px 6px 0; text-align:left; font-weight:normal;">Role</th>
+				<th style="font-family:monospace; color:${COLORS.textMuted}; padding:6px 12px 6px 0; text-align:left; font-weight:normal;">Tokens</th>
+				<th style="font-family:monospace; color:${COLORS.textMuted}; padding:6px 0; text-align:left; font-weight:normal;">Saved</th>
+			</tr>
+			${routingBreakdownRows.join("")}
+		</table>
+		<div style="font-family:monospace; font-size:1.05em; color:${COLORS.success}; font-weight:bold;">
+			Model routing saved: ~${esc(formatCostNum(routingSavings))} (estimated vs all-sonnet baseline)
+		</div>`) : "";
+
 	return sectionHeader("💰 Cost & Tokens") + 
 		card(`<h3 style="font-family:monospace; color:${COLORS.textMuted}; margin:0 0 12px; font-size:0.9em; text-transform:uppercase; letter-spacing:0.05em;">By Phase</h3><table style="border-collapse:collapse; width:100%;">${phaseRows}${totalRow}</table>`) +
-		(workerTokenRows ? card(`<h3 style="font-family:monospace; color:${COLORS.textMuted}; margin:0 0 12px; font-size:0.9em; text-transform:uppercase; letter-spacing:0.05em;">By Worker</h3><table style="border-collapse:collapse; width:100%;">${workerHeader}${workerTokenRows}</table>`) : "");
+		(workerTokenRows ? card(`<h3 style="font-family:monospace; color:${COLORS.textMuted}; margin:0 0 12px; font-size:0.9em; text-transform:uppercase; letter-spacing:0.05em;">By Worker</h3><table style="border-collapse:collapse; width:100%;">${workerHeader}${workerTokenRows}</table>`) : "") +
+		routingSavingsSection;
 }
 
 function renderTranscriptSection(coordDir: string): string {

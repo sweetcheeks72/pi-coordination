@@ -47,6 +47,45 @@ async function ensureSDK(): Promise<boolean> {
 const UPDATE_THROTTLE_MS = 250;
 const MAX_RECENT_TOOLS = 5;
 
+/**
+ * Model routing by agent role / task complexity.
+ * Cheap models for recon, mid-tier for planning/review, premium for implementation.
+ * Overridden by explicit agent.model config in the agent's frontmatter.
+ *
+ * Target: 40–60% cost reduction vs routing everything to the premium tier.
+ */
+const MODEL_ROUTING: Record<string, string> = {
+	scout:       'amazon-bedrock/us.amazon.nova-pro-v1:0',
+	planner:     'amazon-bedrock/us.anthropic.claude-sonnet-4-5',
+	coordinator: 'amazon-bedrock/us.anthropic.claude-sonnet-4-5',
+	worker:      'amazon-bedrock/us.anthropic.claude-sonnet-4-6',
+	reviewer:    'amazon-bedrock/us.anthropic.claude-sonnet-4-5',
+	verifier:    'amazon-bedrock/us.amazon.nova-pro-v1:0',
+};
+
+/** Human-readable tier labels for logging. */
+const MODEL_ROUTING_TIER: Record<string, string> = {
+	scout:       'cheap',
+	planner:     'mid',
+	coordinator: 'mid',
+	worker:      'premium',
+	reviewer:    'mid',
+	verifier:    'cheap',
+};
+
+/**
+ * Approximate blended (input+output) price per 1 M tokens for each routing model.
+ * Used for savings estimation in the recap.
+ * Values are estimates; actual pricing varies by cache hit rate and I/O ratio.
+ */
+export const MODEL_PRICE_PER_MTOK: Record<string, number> = {
+	'amazon-bedrock/us.amazon.nova-pro-v1:0':       0.80,
+	'amazon-bedrock/us.anthropic.claude-sonnet-4-5': 3.00,
+	'amazon-bedrock/us.anthropic.claude-sonnet-4-6': 3.00,
+};
+/** Baseline price per 1 M tokens if every agent ran on the premium model (claude-sonnet-4-6). */
+export const BASELINE_PRICE_PER_MTOK = 3.00;
+
 function extractToolArgsPreview(args: Record<string, unknown>): string | null {
 	const previewKeys = ["command", "file_path", "path", "pattern", "query", "url", "task", "prompt"];
 	for (const key of previewKeys) {
@@ -159,7 +198,20 @@ export async function runAgentSDK(config: SDKRunnerConfig): Promise<SingleResult
 	const startTime = Date.now();
 	const runId = randomUUID();
 	const resolvedParentModel = resolveParentModelHint(parentModel, process.env.PI_MODEL);
-	const providerSelection = selectModelCandidate(agent.model, resolvedParentModel);
+
+	// Apply model routing: use role-based tier when no explicit model is configured.
+	// Explicit agent.model always takes priority over the routing table.
+	const agentRole = agent.name.toLowerCase();
+	const routedModel = (!agent.model && MODEL_ROUTING[agentRole]) ? MODEL_ROUTING[agentRole] : undefined;
+	if (routedModel) {
+		const tier = MODEL_ROUTING_TIER[agentRole] ?? 'unknown';
+		const shortModel = routedModel.split('/').pop() ?? routedModel;
+		const savings = BASELINE_PRICE_PER_MTOK - (MODEL_PRICE_PER_MTOK[routedModel] ?? BASELINE_PRICE_PER_MTOK);
+		const savingsNote = savings > 0 ? ` saved ~$${(savings * 0.1).toFixed(2)} vs sonnet` : '';
+		console.log(`[model-routing] ${agentRole} → ${shortModel} (tier: ${tier},${savingsNote})`);
+	}
+	const effectiveModelSpec = agent.model || routedModel;
+	const providerSelection = selectModelCandidate(effectiveModelSpec, resolvedParentModel);
 	const artifactPaths = createArtifactPaths(artifactLabel ?? agent.name, runId, artifactsDir);
 
 	// Initialize result tracking
@@ -171,12 +223,13 @@ export async function runAgentSDK(config: SDKRunnerConfig): Promise<SingleResult
 		messages: [],
 		stderr: "",
 		usage: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, cost: 0, contextTokens: 0, turns: 0 },
-		model: providerSelection.selectedModel || agent.model || resolvedParentModel,
+		model: providerSelection.selectedModel || agent.model || routedModel || resolvedParentModel,
 		providerSelection,
 		step,
 		artifactPaths,
 		toolCount: 0,
 		recentTools: [],
+		routedModel,
 	};
 
 	let lastUpdateMs = 0;

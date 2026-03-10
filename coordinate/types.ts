@@ -109,6 +109,12 @@ export interface WorkerStateFile {
 	errorType: string | null;
 	errorMessage: string | null;
 	deviations?: WorkerDeviation[];
+	/** Populated while auto-repair is running or after it completes */
+	repairState?: {
+		status: "running" | "success" | "failed";
+		attempt: number;
+		maxAttempts: number;
+	};
 }
 
 export type CoordinationEvent =

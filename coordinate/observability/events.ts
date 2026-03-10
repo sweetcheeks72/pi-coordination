@@ -8,7 +8,7 @@ export type EventListener = (event: ObservableEvent) => void;
 
 type EventType = ObservableEvent["type"];
 
-type AutoFilledFields = "id" | "timestamp" | "traceId" | "spanId" | "parentSpanId" | "actor" | "actorType" | "causedBy";
+type AutoFilledFields = "id" | "timestamp" | "traceId" | "spanId" | "parentSpanId" | "actor" | "actorType" | "causedBy" | "phase";
 
 type EventPayload<T extends EventType> = Omit<
 	Extract<ObservableEvent, { type: T }>,

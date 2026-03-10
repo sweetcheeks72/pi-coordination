@@ -239,7 +239,7 @@ async function listSupplementaryFiles(dir: string): Promise<string[]> {
 		const entries = await fs.readdir(dir, { withFileTypes: true, recursive: true });
 		return entries
 			.filter(e => e.isFile() && e.name.endsWith(".md") && e.name !== "main.md")
-			.map(e => path.join(e.parentPath || e.path, e.name));
+			.map(e => path.join(e.parentPath || (e as any).path, e.name));
 	} catch {
 		return [];
 	}

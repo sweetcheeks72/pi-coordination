@@ -285,6 +285,7 @@ interface CoordinationRunOptions {
 	sessionDir?: string;
 	coordDir?: string;
 	traceId?: string;
+	defaultModel?: string;
 }
 
 interface CoordinationRunResult {
@@ -668,7 +669,7 @@ See: pi-coordination README for spec format documentation.`,
 	const normalizeAgents = (v: string[] | number | undefined): string[] | undefined =>
 		typeof v === "number" ? Array(v).fill("worker") : v;
 	const normalizeBoolOrObj = <T extends object>(v: boolean | T | undefined): T | undefined =>
-		typeof v === "boolean" ? { enabled: v } as T : v;
+		typeof v === "boolean" ? ({ enabled: v } as unknown as T) : v;
 	const normalizePhaseConfig = <T extends { model?: string }>(v: string | T | boolean | undefined): T | undefined => {
 		if (typeof v === "string") return { model: v } as T;
 		if (typeof v === "boolean") return { enabled: v } as T;
@@ -804,7 +805,7 @@ See: pi-coordination README for spec format documentation.`,
 		costState,
 		reviewHistory,
 		signal,
-		onUpdate,
+		onUpdate: onUpdate as ((partial: AgentToolResult<unknown>) => void) | undefined,
 		obs,
 		abort: () => toolCtx.abort(),
 	};
@@ -874,7 +875,7 @@ See: pi-coordination README for spec format documentation.`,
 
 	let lastCoordToolEndMs = 0; // Dedup coordinator tool events
 	const coordOnUpdate: typeof onUpdate = onUpdate ? (partial) => {
-		const result = partial.details?.results[0];
+		const result = (partial.details as any)?.results?.[0];
 		if (result) {
 			lastCoordResult = result;
 			
@@ -1040,7 +1041,7 @@ See: pi-coordination README for spec format documentation.`,
 				planDir,
 				undefined,
 				signal,
-				coordOnUpdate,
+				coordOnUpdate as any,
 				makeDetails,
 				{
 					outputLimits: pipelineConfig.maxOutput,
@@ -1070,7 +1071,7 @@ See: pi-coordination README for spec format documentation.`,
 				costState,
 				reviewHistory.map(r => r.issues),
 			);
-			await obs.events.emit({ type: "checkpoint_saved", checkpointId, phase: "coordinator" });
+			await obs.events.emit({ type: "checkpoint_saved", checkpointId, phase: "coordinator" } as any);
 
 			await saveProgressDoc(pipelineContext);
 			await obs.snapshots.capture("phase_end", "coordinator");
@@ -1346,7 +1347,7 @@ export function createCoordinateTool(events: EventBus): ToolDefinition<typeof Co
 			"Start multi-agent coordination session. Pass any markdown file (spec, PRD, plan) directly - the planner decomposes it into parallel tasks. Don't rewrite or convert the file first. Saves a markdown log to the project directory (configurable via logPath parameter or PI_COORDINATION_LOG_DIR env var).",
 		parameters: CoordinateParams,
 
-		async execute(_toolCallId, params, signal, onUpdate, ctx) {
+		async execute(_toolCallId, params, signal, onUpdate, ctx): Promise<any> {
 			const typedParams = params as CoordinateParamsType;
 			const resultsDir = resolveAsyncResultsDir(ctx.cwd, typedParams.asyncResultsDir);
 
@@ -1451,7 +1452,7 @@ export function createCoordinateTool(events: EventBus): ToolDefinition<typeof Co
 
 		renderCall(args, theme) {
 			const planPath = args.plan || "...";
-			const agentCount = args.agents?.length || 0;
+			const agentCount = Array.isArray(args.agents) ? args.agents.length : (args.agents || 0);
 			const asyncLabel = args.async ? theme.fg("warning", " [async]") : "";
 			const expandHint = theme.fg("dim", " [Ctrl+O: expand]");
 			let text = theme.fg("toolTitle", theme.bold("coordinate ")) +
@@ -1482,7 +1483,7 @@ export function createCoordinateTool(events: EventBus): ToolDefinition<typeof Co
 			const width = Math.min(process.stdout.columns || 120, 120); // Dynamic width, max 120
 
 			// Convert to display state for shared renderers
-			const workerDisplays: WorkerDisplayState[] = workers.map(w => workerStateToDisplay(w));
+			const workerDisplays: WorkerDisplayState[] = workers.map(w => workerStateToDisplay(w as any));
 			
 			// Build pipeline state
 			const pipelineState: PipelineDisplayState | null = details.pipeline ? {

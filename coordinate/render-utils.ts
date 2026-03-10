@@ -247,6 +247,12 @@ export interface WorkerDisplayState {
 	currentFile?: string | null;
 	currentTool?: string | null;
 	lastOutput?: string; // Last captured output for live feedback
+	/** Populated while auto-repair is active or after it completes */
+	repairState?: {
+		status: "running" | "success" | "failed";
+		attempt: number;
+		maxAttempts: number;
+	};
 }
 
 /**
@@ -295,6 +301,7 @@ export function workerStateToDisplay(w: WorkerStateFile): WorkerDisplayState {
 		currentFile: w.currentFile,
 		currentTool: w.currentTool,
 		lastOutput: w.lastOutput,
+		repairState: w.repairState,
 	};
 }
 
@@ -390,9 +397,18 @@ export function renderWorkersCompact(
 	lines.push(`${theme.fg("muted", "Workers:")} ${summary}`);
 
 	// Active workers detail - show task info
-	const active = workers.filter(w => w.status === "working" || w.status === "waiting");
+	// Include workers that are currently being auto-repaired
+	const active = workers.filter(w =>
+		w.status === "working" || w.status === "waiting" || w.repairState?.status === "running",
+	);
 	for (const w of active.slice(0, 4)) {
-		const icon = theme.fg(getStatusColor(w.status), getSpinnerFrame());
+		// Override icon for repair state
+		let icon: string;
+		if (w.repairState?.status === "running") {
+			icon = theme.fg("warning", "⟳");
+		} else {
+			icon = theme.fg(getStatusColor(w.status), getSpinnerFrame());
+		}
 		// Pad raw name first, then apply color (ANSI codes break padEnd)
 		const namePadded = theme.fg("accent", w.name.padEnd(14));
 		const time = theme.fg("dim", formatDuration(w.durationMs));
@@ -404,9 +420,14 @@ export function renderWorkersCompact(
 		const baseLen = 2 + 1 + 1 + 14 + 1 + 6 + 1 + 6 + 1 + (w.contextPct ? 4 : 0) + 1;
 		const taskSpace = Math.max(0, width - baseLen - 2);
 		
-		// Show task ID and title
+		// Show repair status if active, otherwise show task ID and title
 		let taskInfo = "";
-		if (w.taskId || w.taskTitle) {
+		if (w.repairState?.status === "running") {
+			// e.g. "TASK-02  auto-repair 2/3"
+			const repairLabel = `auto-repair ${w.repairState.attempt}/${w.repairState.maxAttempts}`;
+			const taskId = w.taskId ? `${w.taskId}  ` : "";
+			taskInfo = `${theme.fg("accent", taskId)}${theme.fg("warning", repairLabel)}`;
+		} else if (w.taskId || w.taskTitle) {
 			const taskIdLen = w.taskId?.length || 0;
 			const taskId = w.taskId ? theme.fg("accent", w.taskId) : "";
 			// Reserve space for taskId + ": " separator
@@ -460,6 +481,12 @@ export interface TaskCentricEntry {
 	durationMs?: number;
 	cost?: number;
 	currentFile?: string;
+	/** Populated while auto-repair is running for this task's worker */
+	repairState?: {
+		status: "running" | "success" | "failed";
+		attempt: number;
+		maxAttempts: number;
+	};
 }
 
 /**
@@ -586,9 +613,12 @@ export function renderTasksCentric(
 			? theme.fg("muted", formatCost(task.cost).padEnd(COST_W))
 			: theme.fg("dim", "".padEnd(COST_W));
 
-		// Current file annotation (active tasks only)
+		// Current file annotation (active tasks only) — or repair status
 		let fileAnnotation = "";
-		if (isActive && task.currentFile) {
+		if (task.repairState?.status === "running") {
+			const repairLabel = `auto-repair ${task.repairState.attempt}/${task.repairState.maxAttempts}`;
+			fileAnnotation = `  ${theme.fg("warning", "⟳")} ${theme.fg("warning", repairLabel)}`;
+		} else if (isActive && task.currentFile) {
 			const fileName = task.currentFile.split("/").pop() || task.currentFile;
 			const truncated = truncateText(fileName, 20);
 			fileAnnotation = `  ${theme.fg("dim", "←")} ${theme.fg("dim", truncated)}`;
@@ -976,11 +1006,13 @@ export function renderCoordinationDashboard(
 	tasks: TaskCentricEntry[],
 	theme: Theme,
 	width: number,
+	/** Whether model routing is active (shows routing:on in header) */
+	modelRoutingEnabled: boolean = true,
 ): string[] {
 	const lines: string[] = [];
 
 	// ── Layer 1 — Session header ───────────────────────────────────────────────
-	// coordinate <plan>    ⠸ 8m12s · $0.23 · ctx 62%
+	// coordinate <plan>    ⠸ 8m12s · $0.23 · ctx 62% · routing:on
 	{
 		const spinner = theme.fg("warning", getSpinnerFrame());
 		const elapsed = theme.fg("dim", formatDuration(pipeline.elapsed));
@@ -996,8 +1028,11 @@ export function renderCoordinationDashboard(
 			ctxStr = " · " + theme.fg(ctxColor, `ctx ${maxCtx}%`);
 		}
 
+		// Routing indicator
+		const routingStr = modelRoutingEnabled ? " · " + theme.fg("accent", "routing:on") : "";
+
 		const leftLabel = theme.fg("dim", "coordinate ") + theme.fg("accent", planName);
-		const rightLabel = `${spinner} ${elapsed} · ${cost}${ctxStr}`;
+		const rightLabel = `${spinner} ${elapsed} · ${cost}${ctxStr}${routingStr}`;
 
 		const leftVis = visibleWidth(leftLabel);
 		const rightVis = visibleWidth(rightLabel);

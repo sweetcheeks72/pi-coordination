@@ -22,7 +22,7 @@ import { discoverAgents } from "../../subagent/agents.js";
 import { FileBasedStorage } from "../state.js";
 import type { PreAssignment } from "../types.js";
 import { createWorkerObservability, type ObservabilityContext } from "../observability/index.js";
-import { spawnWorkerProcess, type WorkerHandle } from "./index.js";
+import { spawnWorkerProcess, type WorkerHandle, type SDKWorkerHandle } from "./index.js";
 
 interface RuntimeConfig {
 	selfReview?: { enabled?: boolean; maxCycles?: number };
@@ -77,7 +77,7 @@ export interface SDKCoordinatorToolsConfig {
  * });
  * ```
  */
-export function getCoordinatorToolsForSDK(config: SDKCoordinatorToolsConfig): ToolDefinition[] {
+export function getCoordinatorToolsForSDK(config: SDKCoordinatorToolsConfig): ToolDefinition<any, any>[] {
 	const { coordDir, identity, cwd, traceId } = config;
 
 	const storage = new FileBasedStorage(coordDir);
@@ -90,7 +90,7 @@ export function getCoordinatorToolsForSDK(config: SDKCoordinatorToolsConfig): To
 		return obs;
 	};
 
-	const tools: ToolDefinition[] = [
+	const tools: ToolDefinition<any, any>[] = [
 		{
 			name: "spawn_workers",
 			label: "Spawn Workers",
@@ -119,7 +119,7 @@ export function getCoordinatorToolsForSDK(config: SDKCoordinatorToolsConfig): To
 
 				const workerPreps: WorkerPrep[] = [];
 				const identityMap: Array<{ logical: string; actual: string }> = [];
-				const handles: WorkerHandle[] = [];
+				const handles: (WorkerHandle | SDKWorkerHandle)[] = [];
 
 				for (const w of params.workers) {
 					const workerId = randomUUID();
@@ -145,7 +145,7 @@ export function getCoordinatorToolsForSDK(config: SDKCoordinatorToolsConfig): To
 				for (const prep of workerPreps) {
 					const { spec: w, workerId, identity: workerIdentity, preAssignment } = prep;
 
-					const adjacentMappings = w.adjacentWorkers?.map(ln => {
+					const adjacentMappings = w.adjacentWorkers?.map((ln: string) => {
 						const mapping = identityMap.find(m => m.logical === ln);
 						return mapping ? `${ln} -> ${mapping.actual}` : ln;
 					}).join(", ") || "none";
@@ -562,7 +562,7 @@ ${planContent ? `## Full Plan\n\`\`\`markdown\n${planContent}\n\`\`\`` : ""}
 					timestamp: Date.now(),
 				});
 
-				const deviations = params.deviations?.map((d) => ({ type: "deviation", description: d, timestamp: Date.now() })) || [];
+				const deviations = params.deviations?.map((d: any) => ({ type: "deviation", description: d, timestamp: Date.now() })) || [];
 				const existingDeviations = state.deviations || [];
 
 				await storage.updateState({

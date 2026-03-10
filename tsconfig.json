@@ -1,0 +1,24 @@
+{
+  "compilerOptions": {
+    "target": "ES2022",
+    "module": "ESNext",
+    "moduleResolution": "Bundler",
+    "lib": ["ES2022"],
+    "strict": true,
+    "noEmit": true,
+    "skipLibCheck": true,
+    "resolveJsonModule": true,
+    "esModuleInterop": true,
+    "allowSyntheticDefaultImports": true,
+    "allowImportingTsExtensions": true,
+    "baseUrl": ".",
+    "paths": {
+      "@sinclair/typebox": ["node_modules/@sinclair/typebox"],
+      "@sinclair/typebox/*": ["node_modules/@sinclair/typebox/*"],
+      "@mariozechner/pi-agent-core": ["types/pi-agent-core.d.ts"],
+      "@mariozechner/pi-ai": ["types/pi-ai.d.ts"]
+    }
+  },
+  "include": ["**/*.ts"],
+  "exclude": ["node_modules", "dist"]
+}

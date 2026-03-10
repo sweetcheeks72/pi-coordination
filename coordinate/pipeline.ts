@@ -110,6 +110,7 @@ export function initializeCostState(costLimit: number): CostState {
 			workers: 0,
 			review: 0,
 			fixes: 0,
+			integration: 0,
 			complete: 0,
 			failed: 0,
 		},
@@ -133,7 +134,7 @@ export function updatePhaseStatus(
 		phaseResult.attempt++;
 
 		ctx.obs?.events.setPhase(phase);
-		ctx.obs?.events.emit({ type: "phase_started", phase }).catch(() => {});
+		ctx.obs?.events.emit({ type: "phase_started", phase } as any).catch(() => {});
 	}
 
 	if (status === "complete" || status === "failed") {
@@ -168,7 +169,7 @@ export function updatePhaseStatus(
 			phase,
 			duration,
 			cost,
-		}).catch(() => {});
+		} as any).catch(() => {});
 	}
 }
 
@@ -195,8 +196,8 @@ export async function checkCostLimit(ctx: PipelineContext): Promise<boolean> {
 
 	if (total >= limit && !limitReached) {
 		ctx.costState.limitReached = true;
-		await ctx.storage.appendEvent({ type: "cost_limit_reached", total, limit, timestamp: Date.now() });
-		await ctx.obs?.events.emit({ type: "cost_limit_reached", total, limit });
+		await ctx.storage.appendEvent({ type: "cost_limit_reached", total, limit, timestamp: Date.now() } as any);
+		await ctx.obs?.events.emit({ type: "cost_limit_reached", total, limit } as any);
 		console.warn(`[COST LIMIT] Reached $${total.toFixed(2)} / $${limit.toFixed(2)} - ending coordination gracefully`);
 		ctx.pipelineState.exitReason = "cost_limit";
 		return true;
@@ -276,7 +277,7 @@ export async function runScoutPhaseWrapper(
 								timestamp: Date.now(),
 							}).catch((err) => {
 								ctx.obs?.errors.capture(err, {
-									category: "telemetry_error",
+									category: "telemetry_error" as any,
 									severity: "warning",
 									actor: "scout",
 									phase: "scout",
@@ -335,7 +336,7 @@ export async function runScoutPhaseWrapper(
 			ctx.costState,
 			ctx.reviewHistory.map(r => r.issues),
 		);
-		await ctx.obs?.events.emit({ type: "checkpoint_saved", checkpointId, phase: "scout" });
+		await ctx.obs?.events.emit({ type: "checkpoint_saved", checkpointId, phase: "scout" } as any);
 
 		await saveProgressDoc(ctx);
 		await ctx.obs?.snapshots.capture("phase_end", "scout");
@@ -396,7 +397,7 @@ export async function runPlannerPhaseWrapper(
 								timestamp: Date.now(),
 							}).catch((err) => {
 								ctx.obs?.errors.capture(err, {
-									category: "telemetry_error",
+									category: "telemetry_error" as any,
 									severity: "warning",
 									actor: "planner",
 									phase: "planner",
@@ -557,7 +558,7 @@ export async function runReviewPhaseWrapper(
 			ctx.costState,
 			ctx.reviewHistory.map(r => r.issues),
 		);
-		await ctx.obs?.events.emit({ type: "checkpoint_saved", checkpointId, phase: "review" });
+		await ctx.obs?.events.emit({ type: "checkpoint_saved", checkpointId, phase: "review" } as any);
 
 		// Create tasks from reviewer's newTasks (if any)
 		if (result.newTasks && result.newTasks.length > 0) {
@@ -669,7 +670,7 @@ export async function runFixPhaseWrapper(
 			ctx.costState,
 			ctx.reviewHistory.map(r => r.issues),
 		);
-		await ctx.obs?.events.emit({ type: "checkpoint_saved", checkpointId, phase: "fixes" });
+		await ctx.obs?.events.emit({ type: "checkpoint_saved", checkpointId, phase: "fixes" } as any);
 
 		await saveProgressDoc(ctx);
 		span && ctx.obs?.spans.endSpan(span.id, "ok", { issuesFixed: result.issuesFixed }, { cost: result.cost });
@@ -698,7 +699,7 @@ export async function runIntegrationReviewWrapper(
 	await ctx.obs?.events.emit({
 		type: "phase_started",
 		phase: "integration",
-	});
+	} as any);
 
 	updatePhaseStatus("integration", "running", ctx);
 
@@ -707,7 +708,7 @@ export async function runIntegrationReviewWrapper(
 		const integrationConfig: IntegrationReviewConfig = {
 			model: config.models?.reviewer,
 			outputLimits: config.maxOutput,
-			onProgress: ctx.onUpdate,
+			onProgress: ctx.onUpdate as any,
 		};
 
 		const result = await runIntegrationReview(
@@ -732,7 +733,7 @@ export async function runIntegrationReviewWrapper(
 				duration: result.duration,
 				cost: result.cost,
 			},
-		});
+		} as any);
 
 		await saveProgressDoc(ctx);
 		span && ctx.obs?.spans.endSpan(span.id, "ok", { issueCount: result.issues.length }, { cost: result.cost });

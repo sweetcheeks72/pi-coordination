@@ -2,7 +2,7 @@ import { randomUUID } from "node:crypto";
 import type { ReviewIssue, WorkerStateFile } from "../types.js";
 import type { AgentRuntime } from "../../subagent/runner.js";
 import { FileBasedStorage } from "../state.js";
-import { spawnWorkerProcess, type WorkerHandle } from "../coordinator-tools/index.js";
+import { spawnWorkerProcess, type WorkerHandle, type SDKWorkerHandle } from "../coordinator-tools/index.js";
 import type { ObservabilityContext } from "../observability/index.js";
 
 function groupBy<T, K extends string>(items: T[], keyFn: (item: T) => K): Record<K, T[]> {
@@ -69,7 +69,7 @@ export async function runFixPhase(
 		}
 	}
 
-	const handles: WorkerHandle[] = [];
+	const handles: (WorkerHandle | SDKWorkerHandle)[] = [];
 	let totalCost = 0;
 
 	for (const [originalWorkerId, workerIssueList] of workerIssues) {

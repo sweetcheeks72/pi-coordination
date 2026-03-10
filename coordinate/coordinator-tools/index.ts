@@ -17,6 +17,7 @@ import {
 	loadContext,
 	type ContextUpdater,
 } from "../worker-context.js";
+import { runAutoRepair } from "../auto-repair.js";
 import {
 	buildContinuationPrompt,
 	inferFailureReason,
@@ -334,8 +335,8 @@ export function spawnWorkerProcess(
 				// Emit tool_call event to main event stream for visibility
 				storage.appendEvent({
 					type: "tool_call",
-					tool: currentTool,
-					file: currentToolArgs || currentFile,
+					tool: currentTool ?? undefined,
+					file: currentToolArgs || currentFile || undefined,
 					workerId: config.logicalName || workerId,
 					timestamp: Date.now(),
 				}).catch(() => {});
@@ -494,7 +495,7 @@ const WorkerSpec = Type.Object({
 	model: Type.Optional(Type.String({ description: "Model override for this worker" })),
 });
 
-export function createCoordinatorTools(): ToolDefinition[] {
+export function createCoordinatorTools(): ToolDefinition<any, any>[] {
 	const coordDir = process.env.PI_COORDINATION_DIR;
 	const identity = process.env.PI_AGENT_IDENTITY;
 
@@ -511,7 +512,7 @@ export function createCoordinatorTools(): ToolDefinition[] {
 		return obs;
 	};
 
-	const tools: ToolDefinition[] = [
+	const tools: ToolDefinition<any, any>[] = [
 		{
 			name: "spawn_workers",
 			label: "Spawn Workers",
@@ -540,7 +541,7 @@ export function createCoordinatorTools(): ToolDefinition[] {
 
 				const workerPreps: WorkerPrep[] = [];
 				const identityMap: IdentityMapping[] = [];
-				const handles: WorkerHandle[] = [];
+				const handles: (WorkerHandle | SDKWorkerHandle)[] = [];
 
 				for (const w of params.workers) {
 					const workerId = randomUUID();
@@ -566,7 +567,7 @@ export function createCoordinatorTools(): ToolDefinition[] {
 				for (const prep of workerPreps) {
 					const { spec: w, workerId, identity: workerIdentity, preAssignment } = prep;
 
-					const adjacentMappings = w.adjacentWorkers?.map(ln => {
+					const adjacentMappings = w.adjacentWorkers?.map((ln: string) => {
 						const mapping = identityMap.find(m => m.logical === ln);
 						return mapping ? `${ln} -> ${mapping.actual}` : ln;
 					}).join(", ") || "none";
@@ -679,6 +680,98 @@ ${planContent ? `## Full Plan\n\`\`\`markdown\n${planContent}\n\`\`\`` : ""}
 								turns: workerState?.usage.turns || 0,
 							},
 						});
+
+						// ── Compiler feedback loop: auto-repair ──────────────────────
+						// Detect project root: check ctx.cwd first, then coordDir parent chain
+						const projectCwd = ctx.cwd;
+						const hasTsConfig = fsSync.existsSync(path.join(projectCwd, "tsconfig.json"));
+						const hasPkgJson = fsSync.existsSync(path.join(projectCwd, "package.json"));
+
+						if (hasTsConfig || hasPkgJson) {
+							const filesModified = [...(workerState?.filesModified || [])];
+							const taskId = workerState?.identity?.match(/TASK-[\d.]+/)?.[0] ?? handle.workerId.slice(0, 8);
+
+							const repairResult = await runAutoRepair({
+								taskId,
+								workerOutput: workerState?.lastOutput ?? "",
+								originalHandshakeSpec: workerState?.handshakeSpec ?? "",
+								filesModified,
+								coordDir,
+								cwd: projectCwd,
+								maxRetries: 3,
+
+								onRepairAttempt: async (attempt, maxAttempts) => {
+									await storage.updateWorkerState(handle.workerId, (s) => ({
+										...s,
+										repairState: { status: "running", attempt, maxAttempts },
+									})).catch(() => {});
+									await storage.appendEvent({
+										type: "worker_output",
+										workerId: handle.workerId,
+										workerName: handle.identity,
+										preview: `[auto-repair] ${taskId}: attempt ${attempt}/${maxAttempts}`,
+										timestamp: Date.now(),
+									});
+								},
+
+								spawnRepairWorker: async (repairPrompt) => {
+									const repairWorkerId = randomUUID();
+									const repairShortId = repairWorkerId.slice(0, 4);
+									const repairIdentity = `repair:${taskId}-${repairShortId}`;
+									const repairHandle = spawnWorkerProcess(
+										{
+											agent: "coordination/worker",
+											handshakeSpec: repairPrompt,
+											steps: [],
+											logicalName: `repair-${taskId}-${repairShortId}`,
+											workerId: repairWorkerId,
+											identity: repairIdentity,
+										},
+										coordDir,
+										projectCwd,
+										storage,
+										undefined,
+										obs ?? undefined,
+									);
+									const repairExitCode = await repairHandle.promise;
+									const repairState = await storage.readWorkerState(repairWorkerId).catch(() => null);
+									return {
+										exitCode: repairExitCode,
+										filesModified: repairState?.filesModified ?? [],
+									};
+								},
+							});
+
+							if (repairResult.success) {
+								await storage.updateWorkerState(handle.workerId, (s) => ({
+									...s,
+									repairState: { status: "success", attempt: repairResult.attempts, maxAttempts: 3 },
+								})).catch(() => {});
+							} else {
+								// Mark for human review
+								await storage.updateWorkerState(handle.workerId, (s) => ({
+									...s,
+									repairState: { status: "failed", attempt: repairResult.attempts, maxAttempts: 3 },
+								})).catch(() => {});
+								await storage.appendEvent({
+									type: "worker_output",
+									workerId: handle.workerId,
+									workerName: handle.identity,
+									preview: `[auto-repair] ${taskId}: FAILED after ${repairResult.attempts} attempt(s) — needs-review`,
+									timestamp: Date.now(),
+								});
+								// Write failure summary so reviewers can see what went wrong
+								try {
+									const needsReviewPath = path.join(coordDir, `needs-review-${handle.workerId.slice(0, 8)}.md`);
+									await fs.writeFile(
+										needsReviewPath,
+										`# Auto-Repair Failed: ${taskId}\n\nWorker: ${handle.identity}\n\n## Last Error\n\n\`\`\`\n${repairResult.finalError ?? "(none)"}\n\`\`\`\n`,
+										"utf-8",
+									);
+								} catch {}
+							}
+						}
+						// ── End compiler feedback loop ───────────────────────────────
 					}
 				}
 
@@ -690,7 +783,7 @@ ${planContent ? `## Full Plan\n\`\`\`markdown\n${planContent}\n\`\`\`` : ""}
 
 				return {
 					content: [{ type: "text", text: `All ${handles.length} workers completed:\n${workerResults.join("\n")}` }],
-					details: { workers: handles.map((h) => ({ workerId: h.workerId, identity: h.identity, pid: h.pid })) },
+					details: { workers: handles.map((h) => ({ workerId: h.workerId, identity: h.identity, pid: (h as any).pid })) },
 				};
 			},
 		},
@@ -741,6 +834,7 @@ ${planContent ? `## Full Plan\n\`\`\`markdown\n${planContent}\n\`\`\`` : ""}
 							text: `File conflict: ${params.files.join(", ")} already assigned to ${result.conflict?.agent}`,
 						}],
 						isError: true,
+						details: undefined,
 					};
 				}
 
@@ -763,6 +857,7 @@ ${planContent ? `## Full Plan\n\`\`\`markdown\n${planContent}\n\`\`\`` : ""}
 
 				return {
 					content: [{ type: "text", text: `Assigned ${params.files.join(", ")} to ${params.workerLogicalName}` }],
+					details: undefined,
 				};
 			},
 		},
@@ -803,6 +898,7 @@ ${planContent ? `## Full Plan\n\`\`\`markdown\n${planContent}\n\`\`\`` : ""}
 
 				return {
 					content: [{ type: "text", text: `Notified ${params.affectedWorkers.length} workers of deviation` }],
+					details: undefined,
 				};
 			},
 		},
@@ -875,6 +971,7 @@ ${planContent ? `## Full Plan\n\`\`\`markdown\n${planContent}\n\`\`\`` : ""}
 				const workerStates = await storage.listWorkerStates();
 				return {
 					content: [{ type: "text", text: `Broadcast sent to ${workerStates.length} workers` }],
+					details: undefined,
 				};
 			},
 		},
@@ -993,6 +1090,7 @@ ${planContent ? `## Full Plan\n\`\`\`markdown\n${planContent}\n\`\`\`` : ""}
 
 				return {
 					content: [{ type: "text", text: `Contract created: ${params.item}` }],
+					details: undefined,
 				};
 			},
 		},
@@ -1008,6 +1106,7 @@ ${planContent ? `## Full Plan\n\`\`\`markdown\n${planContent}\n\`\`\`` : ""}
 				await storage.updateProgress(params.content);
 				return {
 					content: [{ type: "text", text: "PROGRESS.md updated" }],
+					details: undefined,
 				};
 			},
 		},
@@ -1032,6 +1131,7 @@ ${planContent ? `## Full Plan\n\`\`\`markdown\n${planContent}\n\`\`\`` : ""}
 							text: "ERROR: Cannot complete - no workers have been spawned. You MUST call spawn_workers() first to create workers that will execute the plan.",
 						}],
 						isError: true,
+						details: undefined,
 					};
 				}
 
@@ -1044,6 +1144,7 @@ ${planContent ? `## Full Plan\n\`\`\`markdown\n${planContent}\n\`\`\`` : ""}
 							text: `ERROR: Cannot complete - ${incompleteWorkers.length} worker(s) not finished.\n\nWorker status:\n${workerStatus}\n\nCall check_status() to monitor progress and wait for all workers to complete.`,
 						}],
 						isError: true,
+						details: undefined,
 					};
 				}
 
@@ -1056,7 +1157,7 @@ ${planContent ? `## Full Plan\n\`\`\`markdown\n${planContent}\n\`\`\`` : ""}
 					timestamp: Date.now(),
 				});
 
-				const deviations = params.deviations?.map((d) => ({ type: "deviation", description: d, timestamp: Date.now() })) || [];
+				const deviations = params.deviations?.map((d: any) => ({ type: "deviation", description: d, timestamp: Date.now() })) || [];
 				const existingDeviations = state.deviations || [];
 
 				await storage.updateState({
@@ -1110,7 +1211,7 @@ ${planContent ? `## Full Plan\n\`\`\`markdown\n${planContent}\n\`\`\`` : ""}
 					await saveCoordinatorContext(coordDir, coordContext);
 				}
 
-				const handles: (WorkerHandle & { taskId: string })[] = [];
+				const handles: ((WorkerHandle | SDKWorkerHandle) & { taskId: string })[] = [];
 				const maxWorkers = params.maxWorkers || Infinity;
 
 				while (handles.length < maxWorkers) {
@@ -1171,10 +1272,12 @@ ${planContent ? `### Full Plan\n\`\`\`markdown\n${planContent}\n\`\`\`` : ""}
 				if (handles.length === 0) {
 					return {
 						content: [{ type: "text", text: "No pending tasks in queue" }],
+						details: undefined,
 					};
 				}
 
-				let supervisor: SupervisorLoop | null = null;
+				// eslint-disable-next-line @typescript-eslint/no-explicit-any
+				let supervisor: any = null;
 				const runtimeConfig = loadRuntimeConfig(coordDir);
 				if (params.enableSupervisor !== false && runtimeConfig.supervisor?.enabled !== false) {
 					supervisor = new SupervisorLoop(coordDir, storage, taskQueue, runtimeConfig.supervisor);
@@ -1268,7 +1371,7 @@ ${planContent ? `### Full Plan\n\`\`\`markdown\n${planContent}\n\`\`\`` : ""}
 										activeHandles.set(newWorkerId, handleWithTask);
 										supervisor?.addWorker(handleWithTask);
 
-										handleWithTask.promise.then(code => processWorkerExit(handleWithTask, code));
+										handleWithTask.promise.then(code => processWorkerExit(handleWithTask as unknown as WorkerHandle & { taskId: string }, code));
 									}
 								}
 							} else {
@@ -1385,7 +1488,7 @@ ${planContent ? `### Full Plan\n\`\`\`markdown\n${planContent}\n\`\`\`` : ""}
 						activeHandles.set(newWorkerId, handleWithTask);
 						supervisor?.addWorker(handleWithTask);
 
-						handleWithTask.promise.then(code => processWorkerExit(handleWithTask, code));
+						handleWithTask.promise.then(code => processWorkerExit(handleWithTask as unknown as WorkerHandle & { taskId: string }, code));
 						return true;
 					} catch (err) {
 						// Spawn failed - release the claimed task so it can be retried
@@ -1409,7 +1512,7 @@ ${planContent ? `### Full Plan\n\`\`\`markdown\n${planContent}\n\`\`\`` : ""}
 				};
 
 				for (const handle of handles) {
-					handle.promise.then(code => processWorkerExitWithSpawn(handle, code));
+					handle.promise.then(code => processWorkerExitWithSpawn(handle as unknown as WorkerHandle & { taskId: string }, code));
 				}
 
 				// Dynamic spawning loop with deadlock protection

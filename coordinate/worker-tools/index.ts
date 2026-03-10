@@ -171,7 +171,7 @@ export function registerWorkerTools(pi: ExtensionAPI, ctx?: WorkerToolsContext):
 
 	registerWorkerEventHandlers(pi, storage, identity, workerId);
 
-	const tools: ToolDefinition[] = [
+	const tools: ToolDefinition<any, any>[] = [
 		{
 			name: "agent_chat",
 			label: "Agent Chat",

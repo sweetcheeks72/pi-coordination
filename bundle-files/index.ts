@@ -163,7 +163,7 @@ function buildTree(files: FileInfo[]): string {
 		let current = tree;
 		for (let i = 0; i < parts.length - 1; i++) {
 			if (!current[parts[i]]) current[parts[i]] = {};
-			current = current[parts[i]] as Record<string, unknown>;
+			current = current[parts[i]] as unknown as Record<string, FileInfo | Record<string, unknown>>;
 		}
 		current[parts[parts.length - 1]] = file;
 	}
@@ -182,7 +182,7 @@ function buildTree(files: FileInfo[]): string {
 			const connector = isRoot ? "" : (last ? "└── " : "├── ");
 			const newPrefix = isRoot ? "" : prefix + (last ? "    " : "│   ");
 
-			if (typeof value === "object" && "tokens" in value) {
+			if (typeof value === "object" && value !== null && "tokens" in value) {
 				const f = value as FileInfo;
 				const tokenStr = f.tokens >= 1000 ? `${(f.tokens / 1000).toFixed(1)}K` : String(f.tokens);
 				lines.push(`${prefix}${connector}${name} (${tokenStr} tokens)`);
@@ -244,6 +244,7 @@ export function createBundleTools(cwd: string): ToolDefinition[] {
 	return [
 		{
 			name: "scan_files",
+			label: "Scan Files",
 			description: "Scan codebase and return file tree with token estimates. Use this first to understand the codebase structure before bundling.",
 			parameters: ScanFilesParams,
 			execute: async (_toolCallId, params, _signal, _onUpdate, _ctx) => {
@@ -278,6 +279,7 @@ export function createBundleTools(cwd: string): ToolDefinition[] {
 		},
 		{
 			name: "bundle_files",
+			label: "Bundle Files",
 			description: "Bundle specified files into a single output with their contents. Returns file contents in <file_contents> format.",
 			parameters: BundleFilesParams,
 			execute: async (_toolCallId, params, _signal, _onUpdate, _ctx) => {

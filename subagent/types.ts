@@ -57,6 +57,8 @@ export interface SingleResult {
 	recentTools?: Array<{ tool: string; args: string; endMs: number }>;
 	providerSelection?: ProviderSelectionMeta;
 	failureCategory?: string;
+	/** Model chosen by the routing table (absent when explicit agent.model overrides routing). */
+	routedModel?: string;
 }
 
 export interface SubagentDetails {
