@@ -1378,7 +1378,7 @@ See: pi-coordination README for spec format documentation.`,
 				} catch { return []; }
 			})();
 			recapPath = await generateCoordinationRecap(
-				{ coordDir, planPath, costLimit: params.costLimit },
+				{ coordDir, planPath, costLimit: params.costLimit, sessionId: coordSessionId },
 				{
 					status: isError ? "failed" : "complete",
 					startedAt: initialState.startedAt,
@@ -1831,3 +1831,9 @@ export function createCoordinateTool(events: EventBus): ToolDefinition<typeof Co
 
 	return tool;
 }
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Audit log verification helper — for `pi audit verify` command path
+// ─────────────────────────────────────────────────────────────────────────────
+
+export { verifyAuditLog } from "./audit-log.js";

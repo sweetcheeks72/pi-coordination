@@ -8,6 +8,7 @@ import * as fsSync from "node:fs";
 import * as path from "node:path";
 import { exec } from "node:child_process";
 import { promisify } from "node:util";
+import { AuditLog } from "./audit-log.js";
 import type { CoordinationEvent, WorkerStateFile, Task, PipelinePhase } from "./types.js";
 import { getQALoopSummary } from "./qa-feedback.js";
 
@@ -478,11 +479,108 @@ function renderTranscriptSection(coordDir: string): string {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
+// QA Feedback Loop section
+// ─────────────────────────────────────────────────────────────────────────────
+
+async function renderQALoopSection(
+	workers: WorkerStateFile[],
+	qaResolvedIds: string[],
+): Promise<string> {
+	try {
+		const allModifiedFiles = [...new Set(workers.flatMap(w => w.filesModified || []))];
+		const summary = await getQALoopSummary(allModifiedFiles, qaResolvedIds);
+
+		const criticalCount = summary.activeFailures.filter(f => f.severity === "critical").length;
+		const majorCount = summary.activeFailures.filter(f => f.severity === "major").length;
+		const minorCount = summary.activeFailures.filter(f => f.severity === "minor").length;
+
+		const activeFailuresSummary = summary.activeFailures.length === 0
+			? `<span style="color:${COLORS.success}; font-family:monospace;">None ✓</span>`
+			: (() => {
+				const parts: string[] = [];
+				if (criticalCount > 0) parts.push(`<span style="color:${COLORS.error};">${criticalCount} critical</span>`);
+				if (majorCount > 0) parts.push(`<span style="color:${COLORS.warning};">${majorCount} major</span>`);
+				if (minorCount > 0) parts.push(`<span style="color:${COLORS.textMuted};">${minorCount} minor</span>`);
+				return parts.join(", ");
+			})();
+
+		const resolvedSummary = summary.resolvedThisSession.length === 0
+			? `<span style="color:${COLORS.textMuted}; font-family:monospace;">0</span>`
+			: `<span style="color:${COLORS.success}; font-family:monospace;">${summary.resolvedThisSession.length} (${summary.resolvedThisSession.map(f => f.title).join(", ")})</span>`;
+
+		const openFailuresNote = summary.activeFailures.length > 0
+			? `<p style="font-family:monospace; color:${COLORS.textMuted}; margin:8px 0 0; font-size:0.85em;">Open failures recorded in <code style="background:${COLORS.bgTertiary}; padding:2px 6px; border-radius:3px;">~/.pi/qa-failures.json</code></p>`
+			: "";
+
+		const rows = [
+			["Known issues checked", `<span style="font-family:monospace; color:${COLORS.text};">${summary.checkedFiles} file${summary.checkedFiles !== 1 ? "s" : ""}</span>`],
+			["Active failures in scope", activeFailuresSummary],
+			["Auto-resolved this session", resolvedSummary],
+		];
+
+		const tableRows = rows.map(([k, v]) => `
+		<tr>
+			<td style="color:${COLORS.textMuted}; padding:6px 12px 6px 0; font-family:monospace; white-space:nowrap;">${k}</td>
+			<td style="padding:6px 0;">${v}</td>
+		</tr>`).join("");
+
+		return sectionHeader("🔁 QA Feedback Loop") +
+			card(`<table style="border-collapse:collapse; width:100%;">${tableRows}</table>${openFailuresNote}`);
+	} catch {
+		// Non-fatal: skip QA section if store is unavailable
+		return "";
+	}
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
 // Main export
 // ─────────────────────────────────────────────────────────────────────────────
 
+// ─────────────────────────────────────────────────────────────────────────────
+// Audit log section
+// ─────────────────────────────────────────────────────────────────────────────
+
+function renderAuditLogSection(coordDir: string, sessionId: string): string {
+	const auditLog = new AuditLog(coordDir, sessionId);
+	const logPath = auditLog.getLogPath();
+
+	if (!fsSync.existsSync(logPath)) {
+		return ""; // No audit log exists yet — skip section
+	}
+
+	const verification = auditLog.verify();
+	const count = auditLog.count();
+	const integrityIcon = verification.valid ? "✅" : "⚠️";
+	const integrityText = verification.valid
+		? "verified"
+		: `TAMPER DETECTED at seq ${verification.invalidAt}`;
+	const fileUrl = `file://${logPath}`;
+
+	return sectionHeader("📋 Audit Log") + card(`
+		<div style="font-family:monospace; color:${COLORS.text};">
+			<p style="margin:0 0 12px; color:${COLORS.textMuted}; font-size:0.85em;">Tamper-evident hash chain (SHA-256) · EU AI Act / SOC2 compliance</p>
+			<table style="border-collapse:collapse; width:100%;">
+				<tr>
+					<td style="color:${COLORS.textMuted}; padding:6px 16px 6px 0; white-space:nowrap;">Log file</td>
+					<td style="padding:6px 0;"><a href="${esc(fileUrl)}" style="color:${COLORS.accent}; word-break:break-all;">${esc(logPath)}</a></td>
+				</tr>
+				<tr>
+					<td style="color:${COLORS.textMuted}; padding:6px 16px 6px 0; white-space:nowrap;">Chain integrity</td>
+					<td style="padding:6px 0; color:${verification.valid ? COLORS.success : COLORS.error};">${integrityIcon} ${esc(integrityText)}</td>
+				</tr>
+				<tr>
+					<td style="color:${COLORS.textMuted}; padding:6px 16px 6px 0; white-space:nowrap;">Events</td>
+					<td style="padding:6px 0;">${count}</td>
+				</tr>
+			</table>
+			<p style="margin:12px 0 0; color:${COLORS.textMuted}; font-size:0.85em;">
+				Inspect: <code style="background:${COLORS.bgTertiary}; padding:2px 6px; border-radius:3px;">cat ${esc(logPath)} | jq .</code>
+			</p>
+		</div>`);
+}
+
 export async function generateCoordinationRecap(
-	config: CoordinationConfig,
+	config: CoordinationConfig & { sessionId?: string },
 	state: CoordinationSessionState,
 	workers: WorkerStateFile[],
 	tasks: Task[],
@@ -499,6 +597,14 @@ export async function generateCoordinationRecap(
 	const planName = config.planPath ? path.basename(config.planPath, path.extname(config.planPath)) : "coordination";
 	const timestamp = new Date().toISOString().replace(/[:.]/g, "-").slice(0, 19);
 	const outPath = path.join(config.coordDir, `recap-${timestamp}.html`);
+
+	// QA Loop section (async, non-fatal)
+	const qaSection = await renderQALoopSection(workers, qaResolvedIds ?? []);
+
+	// Audit log section (sync, non-fatal)
+	const auditSection = config.sessionId
+		? renderAuditLogSection(config.coordDir, config.sessionId)
+		: "";
 
 	const html = `<!DOCTYPE html>
 <html lang="en">
@@ -550,6 +656,8 @@ export async function generateCoordinationRecap(
 	${renderTestsSection(events)}
 	${renderAgentsSection(activities)}
 	${renderCostSection(workers, costByPhase, totalCost)}
+	${qaSection}
+	${auditSection}
 	${renderTranscriptSection(config.coordDir)}
 </body>
 </html>`;
