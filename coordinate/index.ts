@@ -386,6 +386,12 @@ DISPATCH PATTERN (significant I/O):
 
 You are managing a coordination session. Your job is to spawn worker agents and summarize results.
 
+### ⛔ CRITICAL: Tool Restrictions
+- **NEVER use \`subagent()\`** — it bypasses the coordination pipeline. Workers spawned via subagent are invisible to the pipeline (no task tracking, no worker state). The session will be marked FAILED.
+- **ALWAYS use \`spawn_from_queue()\`** (preferred) or \`spawn_workers()\` to dispatch workers.
+- **ALWAYS call \`done()\`** as your final action. A text-only response without a tool call terminates the session with an error.
+- **Every response must include a tool call.** Never just narrate what you plan to do — execute it.
+
 ${sharedContextNote}${filePolicy}${scoutContext ? `
 ### Scout Context
 ${scoutContext}
@@ -1218,6 +1224,12 @@ See: pi-coordination README for spec format documentation.`,
 				coordOnUpdate as any,
 				makeDetails,
 				{
+					// CRITICAL: Force subprocess mode to prevent SDK tool inheritance.
+					// In SDK mode, globally registered tools (e.g. subagent) leak into
+					// the coordinator session, causing it to call subagent() instead of
+					// spawn_workers(), which spawns workers outside the pipeline and
+					// results in "0 workers completed 0 tasks" failures.
+					useSubprocess: true,
 					outputLimits: pipelineConfig.maxOutput,
 					artifactsDir: path.join(coordDir, "artifacts"),
 					artifactLabel: "coordinator",
@@ -1289,6 +1301,15 @@ See: pi-coordination README for spec format documentation.`,
 				// Non-fatal: compaction is a best-effort anti-drift measure
 				console.warn(`[context] Session compaction failed (non-fatal): ${compactionErr}`);
 			}
+		}
+
+		// Gate: skip review if no workers completed any tasks
+		const hasWorkerOutput = workerStatesAfterCoord.length > 0 && 
+			workerStatesAfterCoord.some(w => w.status === "complete");
+		if (!hasWorkerOutput && !coordExitError) {
+			console.warn(`[coordination] ⚠️ Skipping review — 0 workers completed tasks. Nothing to review.`);
+			coordExitError = true; // Treat as error to skip review phase
+			pipelineState.exitReason = "stuck";
 		}
 
 		if (!coordExitError && shouldRunPhase("review")) {

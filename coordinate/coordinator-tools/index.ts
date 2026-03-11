@@ -1378,7 +1378,7 @@ ${planContent ? `### Full Plan\n\`\`\`markdown\n${planContent}\n\`\`\`` : ""}
 
 				// eslint-disable-next-line @typescript-eslint/no-explicit-any
 				let supervisor: any = null;
-				const runtimeConfig = loadRuntimeConfig(coordDir);
+				// Reuse runtimeConfig from worktree setup above (same coordDir, no file changes between)
 				if (params.enableSupervisor !== false && runtimeConfig.supervisor?.enabled !== false) {
 					supervisor = new SupervisorLoop(coordDir, storage, taskQueue, runtimeConfig.supervisor);
 					supervisor.start(handles.map(h => ({ ...h, taskId: h.taskId })));
