@@ -865,12 +865,30 @@ async function getModelRegistry(): Promise<any> {
 
 	modelRegistryInitPromise = (async () => {
 		try {
-			const { discoverModels, discoverAuthStorage } = await import("@mariozechner/pi-coding-agent");
+			const sdk = await import("@mariozechner/pi-coding-agent");
 
-			// Both functions use getDefaultAgentDir() internally as default parameter
-			// Guard: discoverAuthStorage may not exist in all Pi versions — non-fatal if missing
-			const authStorage = typeof discoverAuthStorage === 'function' ? discoverAuthStorage() : undefined;
-			cachedModelRegistry = discoverModels(authStorage);
+			// SDK API v2: ModelRegistry + AuthStorage classes replaced discoverModels/discoverAuthStorage
+			let authStorage: any;
+			if (typeof sdk.discoverAuthStorage === "function") {
+				// Legacy API (pre-0.57)
+				authStorage = sdk.discoverAuthStorage();
+			} else if ((sdk as any).AuthStorage?.create) {
+				// New API: AuthStorage.create() uses getAgentDir() + auth.json defaults
+				authStorage = (sdk as any).AuthStorage.create();
+			} else {
+				throw new Error("Cannot initialize auth storage — SDK exports neither discoverAuthStorage nor AuthStorage.create");
+			}
+
+			if (typeof (sdk as any).discoverModels === "function") {
+				// Legacy API
+				cachedModelRegistry = (sdk as any).discoverModels(authStorage);
+			} else if ((sdk as any).ModelRegistry) {
+				// New API: ModelRegistry constructor takes authStorage
+				cachedModelRegistry = new (sdk as any).ModelRegistry(authStorage);
+			} else {
+				throw new Error("Cannot initialize model registry — SDK exports neither discoverModels nor ModelRegistry");
+			}
+
 			return cachedModelRegistry;
 		} catch (err) {
 			// Clear the promise so future calls can retry
