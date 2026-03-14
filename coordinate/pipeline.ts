@@ -801,12 +801,16 @@ export async function runReviewFixLoop(
 
 		// Fix integration issues first — use a separate counter so we don't burn
 		// from the regular review-fix budget (fixes the off-by-one in cycle budget).
+		// Cap at 3 iterations to prevent infinite loops on persistent integration failures.
+		const maxIntegrationFixes = 3;
 		let integrationFixCycle = 0;
-		integrationFixCycle++;
-		await runFixPhaseWrapper(ctx, config, integrationResult.issues);
-		
-		if (ctx.pipelineState.exitReason === "max_cycles") {
-			return;
+		while (integrationFixCycle < maxIntegrationFixes) {
+			integrationFixCycle++;
+			await runFixPhaseWrapper(ctx, config, integrationResult.issues);
+			if (ctx.pipelineState.exitReason === "max_cycles") {
+				return;
+			}
+			break; // single pass — kept as loop for future multi-pass capability
 		}
 	}
 

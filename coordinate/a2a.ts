@@ -186,10 +186,18 @@ export class A2AManager {
 	}
 
 	async markRead(messageIds: string[]): Promise<void> {
-		for (const id of messageIds) {
-			this.readMessages.add(id);
-		}
-		await this.persistReadMessages();
+		await this.withLock(async () => {
+			// Re-read on-disk state inside the lock to avoid clobbering concurrent writers
+			const onDiskRead = this.loadReadMessagesFromDisk();
+			for (const id of messageIds) {
+				this.readMessages.add(id);
+				onDiskRead.add(id);
+			}
+			await fs.writeFile(
+				this.readMessagesPath,
+				JSON.stringify([...onDiskRead]),
+			);
+		});
 	}
 
 	async getUnreadCount(agentId: string): Promise<number> {
