@@ -904,7 +904,7 @@ async function main() {
 		for (const line of lines) {
 			const len = visibleLen(line);
 			// Mesh lines contain from/to padding — allow slight overflow for alignment
-			assert(len <= 100, `MESH view line should not excessively overflow, got ${len}: "${line}"`);
+			assert(len <= 80, `MESH view line should not excessively overflow, got ${len}: "${line}"`);
 		}
 	});
 

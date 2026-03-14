@@ -483,7 +483,7 @@ function escHtml(str: string): string {
 
 /** Escape for JS string literal (no quotes added) */
 function escJsStr(str: string): string {
-	return String(str).replace(/\\/g, "\\\\").replace(/'/g, "\\'").replace(/"/g, '\\"');
+	return String(str).replace(/\\/g, "\\\\").replace(/'/g, "\\'").replace(/"/g, '\\"').replace(/\n/g, '\\n').replace(/\r/g, '\\r');
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
