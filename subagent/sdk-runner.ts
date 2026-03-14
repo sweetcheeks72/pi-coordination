@@ -390,15 +390,12 @@ export async function runAgentSDK(config: SDKRunnerConfig): Promise<SingleResult
 
 	let rawOutput = "";
 
-	// Hoist outside try so finally block can access them for env restore
-	const previousIdentity = process.env.PI_AGENT_IDENTITY;
-	const previousModel = process.env.PI_MODEL;
+	// Build a per-worker env snapshot — no global process.env mutation to avoid races
+	// when multiple SDK workers run concurrently.
+	const workerEnv: NodeJS.ProcessEnv = { ...process.env, PI_AGENT_IDENTITY: agent.name };
+	if (resolvedParentModel) workerEnv.PI_MODEL = resolvedParentModel;
 
 	try {
-		// Set agent identity for extensions to check
-		process.env.PI_AGENT_IDENTITY = agent.name;
-		if (resolvedParentModel) process.env.PI_MODEL = resolvedParentModel;
-
 		// Log agent configuration
 		const hasTools = agent.tools && agent.tools.length > 0;
 		const toolsList = hasTools
@@ -439,7 +436,7 @@ export async function runAgentSDK(config: SDKRunnerConfig): Promise<SingleResult
 
 		// Pre-resolve built-in tools once (shared across retry attempts)
 		const resolvedBuiltinTools =
-			builtinTools.length > 0 ? await resolveBuiltinTools(builtinTools, cwd) : undefined;
+			builtinTools.length > 0 ? await resolveBuiltinTools(builtinTools, cwd, workerEnv) : undefined;
 
 		// ─────────────────────────────────────────────────────────────────────
 		// Prompt Caching (KV Cache) — Feature 2
@@ -771,17 +768,6 @@ export async function runAgentSDK(config: SDKRunnerConfig): Promise<SingleResult
 			}
 		}
 	} finally {
-		// Restore previous agent identity
-		if (previousIdentity !== undefined) {
-			process.env.PI_AGENT_IDENTITY = previousIdentity;
-		} else {
-			delete process.env.PI_AGENT_IDENTITY;
-		}
-		if (previousModel !== undefined) {
-			process.env.PI_MODEL = previousModel;
-		} else {
-			delete process.env.PI_MODEL;
-		}
 
 		// Close JSONL stream
 		try {
@@ -956,14 +942,19 @@ async function resolveModel(modelString: string): Promise<any> {
 /**
  * Resolve built-in tool names to Tool objects.
  */
-async function resolveBuiltinTools(toolNames: string[], cwd: string): Promise<any[]> {
+async function resolveBuiltinTools(toolNames: string[], cwd: string, env?: NodeJS.ProcessEnv): Promise<any[]> {
 	// Import tool creators from SDK
 	const { createReadTool, createBashTool, createEditTool, createWriteTool, createGrepTool, createFindTool, createLsTool } =
 		await import("@mariozechner/pi-coding-agent");
 
 	const toolMap: Record<string, () => any> = {
 		read: () => createReadTool(cwd, {}),
-		bash: () => createBashTool(cwd),
+		// Pass per-worker env via spawnHook so bash subprocesses see the correct identity
+		// without mutating the global process.env.
+		bash: () =>
+			env
+				? createBashTool(cwd, { spawnHook: (ctx) => ({ ...ctx, env }) })
+				: createBashTool(cwd),
 		edit: () => createEditTool(cwd),
 		write: () => createWriteTool(cwd),
 		grep: () => createGrepTool(cwd),
