@@ -15,7 +15,13 @@ import type {
 	TaskQueue,
 	PhaseResult,
 	Checkpoint,
+	MeshMessage,
 } from "./types.js";
+import {
+	renderTaskNavigator,
+	type TaskNavView,
+	type TaskNavState,
+} from "./render-utils.js";
 
 interface DashboardState {
 	pipelineState: PipelineState | null;
@@ -24,6 +30,7 @@ interface DashboardState {
 	events: CoordinationEvent[];
 	tasks: Task[];
 	startedAt: number;
+	meshMessages: MeshMessage[];
 }
 
 const POLL_INTERVAL_MS = 1000;
@@ -137,6 +144,11 @@ export class CoordinationDashboard implements Component {
 	private selectedWorkerIndex = 0;
 	private overlay: "worker" | "tasks" | null = null;
 
+	// Task navigator state
+	private selectedTaskIndex = 0;
+	private activeView: TaskNavView = "tasks";
+	private expandedTaskId: string | null = null;
+
 	private state: DashboardState | null = null;
 	private lastPollError: string | null = null;
 
@@ -233,9 +245,30 @@ export class CoordinationDashboard implements Component {
 		} else if (matchesKey(data, "k") || matchesKey(data, "up")) {
 			this.selectPrev();
 			this.tui.requestRender();
+		} else if (matchesKey(data, "tab")) {
+			// Cycle view: tasks → agent → mesh → tasks
+			const views: TaskNavView[] = ["tasks", "agent", "mesh"];
+			const idx = views.indexOf(this.activeView);
+			this.activeView = views[(idx + 1) % views.length];
+			this.tui.requestRender();
 		} else if (matchesKey(data, "enter")) {
-			if (this.state && this.state.workers.length > 0) {
+			// Toggle expand for selected task
+			const task = this.state?.tasks[this.selectedTaskIndex];
+			if (task) {
+				this.expandedTaskId = this.expandedTaskId === task.id ? null : task.id;
+				this.tui.requestRender();
+			} else if (this.state && this.state.workers.length > 0) {
+				// Fallback: open worker overlay for selected worker
 				this.overlay = "worker";
+				this.tui.requestRender();
+			}
+		} else if (data === "1" || data === "2" || data === "3") {
+			// Answer open question for expanded task
+			const task = this.state?.tasks.find((t) => t.id === this.expandedTaskId);
+			if (task) {
+				// Stub: question-answering would send answer via nudge
+				// For now just close expanded view
+				this.expandedTaskId = null;
 				this.tui.requestRender();
 			}
 		} else if (data === "t") {
@@ -290,20 +323,26 @@ export class CoordinationDashboard implements Component {
 			lines.push(th.fg("error", `Error: ${this.lastPollError}`));
 		}
 
-		const innerWidth = width - 4;
+		const state = this.state;
 
-		lines.push(this.renderBorder("top", innerWidth, "Coordination"));
-		lines.push(...this.renderPipelineSection(innerWidth));
-		lines.push(...this.renderHeaderInBox(innerWidth));
-		lines.push(this.renderBorder("middle", innerWidth, `Task Queue (${this.state.tasks.length})`));
-		lines.push(...this.renderTaskQueueSection(innerWidth));
-		lines.push(this.renderBorder("middle", innerWidth, `Workers (${this.state.workers.length})`));
-		lines.push(...this.renderWorkerGrid(innerWidth));
-		lines.push(this.renderBorder("middle", innerWidth, "Events"));
-		lines.push(...this.renderEventStream(innerWidth));
-		lines.push(this.renderBorder("middle", innerWidth, "Cost Breakdown"));
-		lines.push(...this.renderCostSection(innerWidth));
-		lines.push(this.renderBorder("bottom", innerWidth, ""));
+		// Build TaskNavState for the navigator
+		const pipelineState = state.pipelineState;
+		const navState: TaskNavState = {
+			tasks: state.tasks,
+			workers: state.workers,
+			meshMessages: state.meshMessages,
+			selectedTaskIndex: this.selectedTaskIndex,
+			activeView: this.activeView,
+			expandedTaskId: this.expandedTaskId,
+			planName: pipelineState?.planPath ? path.basename(pipelineState.planPath, ".md") : undefined,
+			cost: state.costState.total,
+			costLimit: state.costState.limit,
+			elapsedMs: Date.now() - state.startedAt,
+			currentPhase: pipelineState?.currentPhase,
+			phases: pipelineState?.phases as Partial<Record<PipelinePhase, PhaseResult | undefined>> | undefined,
+		};
+
+		lines.push(...renderTaskNavigator(navState, th, width));
 		lines.push(...this.renderHelpLine(width));
 
 		return lines;
@@ -672,8 +711,9 @@ export class CoordinationDashboard implements Component {
 	private renderHelpLine(width: number): string[] {
 		const th = this.theme;
 		const help = [
-			`${th.fg("accent", "[j/k]")} select`,
-			`${th.fg("accent", "[Enter]")} details`,
+			`${th.fg("accent", "[↑↓]")} select`,
+			`${th.fg("accent", "[Enter]")} expand`,
+			`${th.fg("accent", "[Tab]")} view`,
 			`${th.fg("accent", "[w]")}rap up`,
 			`${th.fg("accent", "[R]")}estart`,
 			`${th.fg("accent", "[A]")}bort`,
@@ -976,12 +1016,19 @@ export class CoordinationDashboard implements Component {
 				events,
 				tasks,
 				startedAt,
+				meshMessages: readJsonlSync<MeshMessage>(path.join(this.coordDir, "mesh.jsonl")),
 			};
 
 			if (workers.length === 0) {
 				this.selectedWorkerIndex = 0;
 			} else if (this.selectedWorkerIndex >= workers.length) {
 				this.selectedWorkerIndex = workers.length - 1;
+			}
+
+			if (tasks.length === 0) {
+				this.selectedTaskIndex = 0;
+			} else if (this.selectedTaskIndex >= tasks.length) {
+				this.selectedTaskIndex = tasks.length - 1;
 			}
 
 			this.lastPollError = null;
@@ -991,12 +1038,18 @@ export class CoordinationDashboard implements Component {
 	}
 
 	private selectNext(): void {
+		if (this.state && this.state.tasks.length > 0) {
+			this.selectedTaskIndex = (this.selectedTaskIndex + 1) % this.state.tasks.length;
+		}
 		if (this.state && this.state.workers.length > 0) {
 			this.selectedWorkerIndex = (this.selectedWorkerIndex + 1) % this.state.workers.length;
 		}
 	}
 
 	private selectPrev(): void {
+		if (this.state && this.state.tasks.length > 0) {
+			this.selectedTaskIndex = (this.selectedTaskIndex - 1 + this.state.tasks.length) % this.state.tasks.length;
+		}
 		if (this.state && this.state.workers.length > 0) {
 			this.selectedWorkerIndex = (this.selectedWorkerIndex - 1 + this.state.workers.length) % this.state.workers.length;
 		}
