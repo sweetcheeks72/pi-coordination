@@ -31,6 +31,12 @@ import {
 	type CoordinatorContext,
 } from "../coordinator-context.js";
 import { spawnWorkerSDK, type SDKWorkerHandle } from "./sdk-worker.js";
+import {
+	parseAssumptions,
+	extractThinkingSnippet,
+	detectToolFailure,
+	buildDeviationEntry,
+} from "../worker-state-utils.js";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
@@ -93,6 +99,8 @@ export interface WorkerConfig {
 	logicalName: string;
 	workerId: string;
 	identity: string;
+	/** Human-readable description of what this task should do (from tasks.json). */
+	planIntent?: string;
 }
 
 export function spawnWorkerProcess(
@@ -227,6 +235,7 @@ export function spawnWorkerProcess(
 		blockers: [],
 		errorType: null,
 		errorMessage: null,
+		...(config.planIntent ? { planIntent: config.planIntent } : {}),
 	};
 
 	try {
@@ -264,6 +273,10 @@ export function spawnWorkerProcess(
 	let lastOutput = "";
 	let rawOutput = "";
 	let stdoutBuffer = "";
+	// Enriched state tracking
+	let currentProblem: string | null = null;
+	let failedToolName: string | null = null;
+	let localAssumptions: Array<{ text: string; status: "verified" | "unverified"; confidence: "high" | "med" | "low" }> = [];
 
 	const extractFileFromArgs = (toolName: string, args: any): string | null => {
 		if (!args) return null;
@@ -350,6 +363,56 @@ export function spawnWorkerProcess(
 						errorMessage: event.error || event.errorMessage,
 					});
 				}
+
+				// --- currentProblem tracking ---
+				const toolFailure = detectToolFailure({
+					toolName: currentTool,
+					isError: event.isError,
+					success: event.success,
+					error: event.error,
+					errorMessage: event.errorMessage,
+					exitCode: event.exitCode,
+					output: event.output,
+					result: event.result,
+				});
+
+				if (toolFailure) {
+					currentProblem = toolFailure;
+					failedToolName = currentTool;
+					storage.updateWorkerState(workerId, (s) => ({
+						...s,
+						currentProblem: toolFailure,
+					})).catch(() => {});
+				} else if (currentProblem) {
+					// Success after a failure: clear problem, log deviation on associated task
+					const prevProblem = currentProblem;
+					const prevFailedTool = failedToolName;
+					currentProblem = null;
+					failedToolName = null;
+					storage.updateWorkerState(workerId, (s) => {
+						const { currentProblem: _cp, ...rest } = s as WorkerStateFile & { currentProblem?: string };
+						return rest as WorkerStateFile;
+					}).catch(() => {});
+					// Append deviation entry to task queue asynchronously
+					if (taskId) {
+						(async () => {
+							try {
+								const { TaskQueueManager } = await import("../task-queue.js");
+								const tq = new TaskQueueManager(coordDir);
+								const queue = await tq.getQueue();
+								const queueTask = queue.tasks.find((t) => t.id === taskId);
+								if (queueTask) {
+									const entry = buildDeviationEntry(prevProblem, prevFailedTool);
+									const existing = queueTask.deviationLog ?? [];
+									await tq.updateTask(taskId, { deviationLog: [...existing, entry] });
+								}
+							} catch {
+								// Non-fatal: deviation logging is best-effort
+							}
+						})();
+					}
+				}
+				// --- end currentProblem tracking ---
 			}
 			currentTool = null;
 			currentToolArgs = null;
@@ -386,8 +449,31 @@ export function spawnWorkerProcess(
 					tokens = tokenTotals.input + tokenTotals.output + tokenTotals.cacheRead + tokenTotals.cacheWrite;
 					costTotal += usage.cost?.total || 0;
 				}
-				for (const block of msg.content || []) {
+				const contentBlocks: Array<{ type: string; text?: string }> = msg.content || [];
+				for (const block of contentBlocks) {
 					if (block.type === "text" && block.text) rawOutput += block.text;
+				}
+
+				// --- Thinking stream (last 200 chars of this message's text) ---
+				const snippet = extractThinkingSnippet(contentBlocks, 200);
+				if (snippet) {
+					storage.updateWorkerThinking(workerId, snippet).catch(() => {});
+				}
+
+				// --- Assumption parsing ---
+				const fullText = contentBlocks
+					.filter((b) => b.type === "text" && b.text)
+					.map((b) => b.text!)
+					.join("\n");
+				if (fullText) {
+					const newAssumptions = parseAssumptions(fullText, localAssumptions);
+					if (newAssumptions.length > 0) {
+						localAssumptions.push(...newAssumptions);
+						storage.updateWorkerState(workerId, (s) => ({
+							...s,
+							assumptions: [...(s.assumptions ?? []), ...newAssumptions],
+						})).catch(() => {});
+					}
 				}
 			}
 			updateWorkerProgress(true);
@@ -1151,6 +1237,7 @@ ${planContent ? `### Full Plan\n\`\`\`markdown\n${planContent}\n\`\`\`` : ""}
 							logicalName: task.id,
 							workerId,
 							identity: workerIdentity,
+							planIntent: task.description,
 						},
 						coordDir,
 						ctx.cwd,
@@ -1253,6 +1340,7 @@ ${planContent ? `### Full Plan\n\`\`\`markdown\n${planContent}\n\`\`\`` : ""}
 												logicalName: task.id,
 												workerId: newWorkerId,
 												identity: workerIdentity,
+												planIntent: task.description,
 											},
 											coordDir,
 											ctx.cwd,
@@ -1366,6 +1454,7 @@ ${planContent ? `### Full Plan\n\`\`\`markdown\n${planContent}\n\`\`\`` : ""}
 								logicalName: task.id,
 								workerId: newWorkerId,
 								identity: workerIdentity,
+								planIntent: task.description,
 							},
 							coordDir,
 							ctx.cwd,
