@@ -203,11 +203,11 @@ export async function runAgentSDK(config: SDKRunnerConfig): Promise<SingleResult
 
 	let rawOutput = "";
 
-	try {
-		// Set agent identity for extensions to check
-		const previousIdentity = process.env.PI_AGENT_IDENTITY;
-		process.env.PI_AGENT_IDENTITY = agent.name;
+	// Build a per-worker env snapshot — no global process.env mutation to avoid races
+	// when multiple SDK workers run concurrently.
+	const workerEnv: NodeJS.ProcessEnv = { ...process.env, PI_AGENT_IDENTITY: agent.name };
 
+	try {
 		// Log agent configuration
 		const hasTools = agent.tools && agent.tools.length > 0;
 		const toolsList = hasTools
@@ -259,7 +259,7 @@ export async function runAgentSDK(config: SDKRunnerConfig): Promise<SingleResult
 					: (defaultPrompt: string) => `${defaultPrompt}\n\n${systemPrompt}`
 				: undefined,
 			// Tool configuration - empty array means no discovery, but we need built-in tools
-			...(builtinTools.length > 0 ? { tools: await resolveBuiltinTools(builtinTools, cwd) } : {}),
+			...(builtinTools.length > 0 ? { tools: await resolveBuiltinTools(builtinTools, cwd, workerEnv) } : {}),
 			// Extension paths (skip discovery if explicitly configured)
 			...(extensionPaths.length > 0 ? { additionalExtensionPaths: extensionPaths } : {}),
 			// Inline extension factories (passed directly, no file loading)
@@ -476,13 +476,6 @@ export async function runAgentSDK(config: SDKRunnerConfig): Promise<SingleResult
 			}
 		}
 	} finally {
-		// Restore previous agent identity
-		if (previousIdentity !== undefined) {
-			process.env.PI_AGENT_IDENTITY = previousIdentity;
-		} else {
-			delete process.env.PI_AGENT_IDENTITY;
-		}
-
 		// Close JSONL stream
 		try {
 			jsonlStream.end();
@@ -654,14 +647,19 @@ async function resolveModel(modelString: string): Promise<any> {
 /**
  * Resolve built-in tool names to Tool objects.
  */
-async function resolveBuiltinTools(toolNames: string[], cwd: string): Promise<any[]> {
+async function resolveBuiltinTools(toolNames: string[], cwd: string, env?: NodeJS.ProcessEnv): Promise<any[]> {
 	// Import tool creators from SDK
 	const { createReadTool, createBashTool, createEditTool, createWriteTool, createGrepTool, createFindTool, createLsTool } =
 		await import("@mariozechner/pi-coding-agent");
 
 	const toolMap: Record<string, () => any> = {
 		read: () => createReadTool(cwd, {}),
-		bash: () => createBashTool(cwd),
+		// Pass per-worker env via spawnHook so bash subprocesses see the correct identity
+		// without mutating the global process.env.
+		bash: () =>
+			env
+				? createBashTool(cwd, { spawnHook: (ctx) => ({ ...ctx, env }) })
+				: createBashTool(cwd),
 		edit: () => createEditTool(cwd),
 		write: () => createWriteTool(cwd),
 		grep: () => createGrepTool(cwd),
