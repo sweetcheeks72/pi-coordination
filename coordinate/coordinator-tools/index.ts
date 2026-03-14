@@ -11,6 +11,15 @@ import { discoverAgents } from "../../subagent/agents.js";
 import { FileBasedStorage } from "../state.js";
 import type { WorkerStateFile, IdentityMapping, PreAssignment } from "../types.js";
 import { createWorkerObservability, type ObservabilityContext } from "../observability/index.js";
+import {
+	writeEscalationHTML,
+	writeEscalationResponseFile,
+	startEscalationServer,
+	openInBrowser,
+	logAutoResolutionDeviation,
+	DEFAULT_ESCALATION_TIMEOUT_SECS,
+	DEFAULT_ESCALATION_PORT,
+} from "../escalation.js";
 import { createArtifactPaths } from "../../subagent/artifacts.js";
 import {
 	createContextUpdater,
@@ -968,36 +977,70 @@ ${planContent ? `## Full Plan\n\`\`\`markdown\n${planContent}\n\`\`\`` : ""}
 		{
 			name: "escalate_to_user",
 			label: "Escalate to User",
-			description: "Ask the user a question with timed auto-decision",
+			description: "Ask the user a question with timed auto-decision. Opens HTML interview in browser and shows in TUI QUESTION panel. Both surfaces write to the same response file.",
 			parameters: Type.Object({
-				question: Type.String({ description: "Question to ask" }),
-				options: Type.Array(Type.String(), { description: "Available options" }),
-				timeout: Type.Optional(Type.Number({ description: "Timeout in seconds (default: 60)" })),
-				defaultOption: Type.Optional(Type.Number({ description: "Index of default option (0-based)" })),
+				question: Type.String({ description: "Question to ask the user" }),
+				options: Type.Array(
+					Type.Object({
+						label: Type.String({ description: "Short option label (shown as button text)" }),
+						description: Type.Optional(Type.String({ description: "Tradeoffs / explanation for this option" })),
+					}),
+					{ description: "Available options with optional tradeoff descriptions" },
+				),
+				context: Type.Optional(Type.String({ description: "Additional context shown in HTML interview context card (plan intent, current state, assumptions)" })),
+				agentAssumption: Type.Optional(Type.String({ description: "What the agent will do if no answer is received before timeout" })),
+				confidence: Type.Optional(Type.Number({ description: "Agent's confidence in its assumption (0–1)" })),
+				timeout: Type.Optional(Type.Number({ description: `Timeout in seconds before auto-proceeding (default: ${DEFAULT_ESCALATION_TIMEOUT_SECS})` })),
+				defaultOption: Type.Optional(Type.Number({ description: "Index of default option to use on timeout (0-based)" })),
 			}),
 			async execute(_toolCallId, params, _onUpdate, ctx) {
 				const obs = getObs(ctx);
 				const id = randomUUID();
-				const timeout = params.timeout || 60;
+				const timeout = params.timeout ?? DEFAULT_ESCALATION_TIMEOUT_SECS;
 
-				await storage.appendEscalation({
+				// Build rich escalation request
+				const richOptions = params.options;
+				const plainOptions = richOptions.map((o) => o.label);
+				const agentAssumption =
+					params.agentAssumption ||
+					(plainOptions[params.defaultOption ?? 0] ?? plainOptions[0] ?? "proceed with default");
+
+				const req = {
 					id,
 					from: identity,
 					question: params.question,
-					options: params.options,
+					options: plainOptions,
+					richOptions,
+					context: params.context,
+					agentAssumption,
+					confidence: params.confidence,
 					timeout,
 					defaultOption: params.defaultOption,
 					createdAt: Date.now(),
-				});
+				};
+
+				// Persist to escalations.jsonl
+				await storage.appendEscalation(req);
+
+				// Generate HTML interview and open in browser
+				let htmlPath: string | null = null;
+				try {
+					const serverState = startEscalationServer(coordDir, DEFAULT_ESCALATION_PORT);
+					htmlPath = writeEscalationHTML(coordDir, req, serverState.port);
+					openInBrowser(htmlPath);
+				} catch {
+					// best-effort — TUI still works
+				}
 
 				await obs?.events.emit({
 					type: "escalation_created",
 					escalationId: id,
 					question: params.question,
-					options: params.options,
+					options: plainOptions,
 					timeout,
 				});
 
+				// Poll for response
 				const deadline = Date.now() + timeout * 1000;
 				while (Date.now() < deadline) {
 					const response = await storage.getEscalationResponse(id);
@@ -1008,22 +1051,24 @@ ${planContent ? `## Full Plan\n\`\`\`markdown\n${planContent}\n\`\`\`` : ""}
 							choice: response.choice,
 							wasTimeout: false,
 						});
-
 						return {
-							content: [{ type: "text", text: `User chose: ${response.choice}${response.wasTimeout ? " (auto-selected)" : ""}` }],
+							content: [{ type: "text", text: `User chose: ${response.choice}` }],
 							details: response,
 						};
 					}
 					await sleep(1000);
 				}
 
-				const choice = params.options[params.defaultOption || 0];
-				await storage.writeEscalationResponse({
+				// Timeout — auto-proceed with assumption
+				const choice = agentAssumption;
+				const timeoutResponse = {
 					id,
 					choice,
 					wasTimeout: true,
 					respondedAt: Date.now(),
-				});
+				};
+				await storage.writeEscalationResponse(timeoutResponse);
+				logAutoResolutionDeviation(coordDir, req, choice);
 
 				await obs?.events.emit({
 					type: "escalation_responded",
@@ -1033,8 +1078,8 @@ ${planContent ? `## Full Plan\n\`\`\`markdown\n${planContent}\n\`\`\`` : ""}
 				});
 
 				return {
-					content: [{ type: "text", text: `Timeout - using default: ${choice}` }],
-					details: { id, choice, wasTimeout: true, respondedAt: Date.now() },
+					content: [{ type: "text", text: `Timeout — auto-proceeding with assumption: ${choice}` }],
+					details: { id, choice, wasTimeout: true, respondedAt: Date.now(), htmlPath },
 				};
 			},
 		},
