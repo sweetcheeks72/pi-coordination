@@ -4,7 +4,7 @@
 
 import type { Theme } from "@mariozechner/pi-coding-agent";
 import { visibleWidth } from "@mariozechner/pi-tui";
-import type { PipelinePhase, PhaseResult, WorkerStateFile, Task, CoordinationEvent, FileReservation } from "./types.js";
+import type { PipelinePhase, PhaseResult, WorkerStateFile, Task, CoordinationEvent, FileReservation, MeshMessage } from "./types.js";
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Memorable Names (Docker-style adjective_noun)
@@ -691,4 +691,397 @@ export function drawBoxLine(content: string, width: number, theme: Theme): strin
 	const contentWidth = visibleWidth(content);
 	const padding = Math.max(0, width - contentWidth - 2);
 	return theme.fg("borderMuted", "│") + content + " ".repeat(padding) + theme.fg("borderMuted", "│");
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Task Navigator TUI
+// ─────────────────────────────────────────────────────────────────────────────
+
+export type TaskNavView = "tasks" | "agent" | "mesh";
+
+export interface TaskNavState {
+	tasks: Task[];
+	workers: WorkerStateFile[];
+	meshMessages: MeshMessage[];
+	selectedTaskIndex: number;
+	activeView: TaskNavView;
+	expandedTaskId: string | null;
+	planName?: string;
+	cost: number;
+	costLimit: number;
+	elapsedMs: number;
+	currentPhase?: PipelinePhase;
+	phases?: Partial<Record<PipelinePhase, PhaseResult | undefined>>;
+}
+
+/**
+ * Split text into chunks that fit within maxW visible characters.
+ */
+function splitToWidth(text: string, maxW: number): string[] {
+	if (maxW <= 0) return [text];
+	const chunks: string[] = [];
+	let remaining = text.trim();
+	while (remaining.length > 0) {
+		if (remaining.length <= maxW) {
+			chunks.push(remaining);
+			break;
+		}
+		// Try to split at word boundary
+		let cut = maxW;
+		const spaceIdx = remaining.lastIndexOf(" ", maxW);
+		if (spaceIdx > maxW / 2) cut = spaceIdx + 1;
+		chunks.push(remaining.slice(0, cut).trimEnd());
+		remaining = remaining.slice(cut).trimStart();
+	}
+	return chunks;
+}
+
+/**
+ * Render the top progress summary lines:
+ *   plan-name
+ *   ▰▰▰▱ 3/4 done · $3.21/$25 · 13m29s
+ */
+export function renderPlanProgress(
+	tasks: Task[],
+	cost: number,
+	costLimit: number,
+	elapsedMs: number,
+	planName: string,
+	theme: Theme,
+	width: number,
+): string[] {
+	const done = tasks.filter((t) => t.status === "complete").length;
+	const total = tasks.length;
+
+	// Block-style progress bar (▰ filled, ▱ empty), 4 blocks
+	const BAR_LEN = 4;
+	const filled = total > 0 ? Math.round((done / total) * BAR_LEN) : 0;
+	const empty = BAR_LEN - filled;
+	const bar = theme.fg("success", "▰".repeat(filled)) + theme.fg("dim", "▱".repeat(empty));
+
+	const countStr = `${done}/${total} done`;
+	const costStr = `$${cost.toFixed(2)}/$${costLimit.toFixed(0)}`;
+	const timeStr = formatDuration(elapsedMs);
+
+	const summary = `${bar} ${countStr} · ${costStr} · ${timeStr}`;
+
+	const lines: string[] = [];
+	if (planName) {
+		lines.push(theme.fg("accent", truncateText(planName, width)));
+	}
+	lines.push(summary);
+	return lines;
+}
+
+/**
+ * Render the view tab bar:
+ *   [TASKS]  AGENT  MESH ─────── ↑↓:select  Tab:view
+ */
+export function renderViewTabs(
+	activeView: TaskNavView,
+	theme: Theme,
+	width: number,
+): string {
+	const tabs = ["tasks", "agent", "mesh"] as const;
+	const labels = tabs.map((t) => {
+		const label = t.toUpperCase();
+		if (t === activeView) return `[${label}]`;
+		return ` ${label} `;
+	});
+	const tabStrs = tabs.map((t, i) => {
+		if (t === activeView) return theme.fg("accent", labels[i]);
+		return theme.fg("dim", labels[i]);
+	});
+	const tabStr = tabStrs.join(" ");
+	const hints = "↑↓:select  Tab:view";
+	const hintsW = visibleWidth(hints);
+	const tabW = visibleWidth(tabStr);
+	const sepLen = Math.max(1, width - tabW - hintsW - 3);
+	const sep = theme.fg("dim", " " + "─".repeat(sepLen) + " ");
+	return tabStr + sep + theme.fg("dim", hints);
+}
+
+/**
+ * Render a single collapsed task row.
+ *   ` ● T-01 sync-git-context ·········· done 2m14s`
+ * Selected task gets `▸` prefix.
+ */
+export function renderCollapsedTask(
+	task: Task,
+	worker: WorkerStateFile | undefined,
+	isSelected: boolean,
+	_isExpanded: boolean,
+	theme: Theme,
+	width: number,
+): string {
+	// Status icon + color
+	let icon: string;
+	let iconColor: "success" | "warning" | "error" | "muted" | "dim" | "accent";
+	switch (task.status) {
+		case "complete":
+			icon = "●";
+			iconColor = "success";
+			break;
+		case "claimed":
+			icon = "⯈";
+			iconColor = "accent";
+			break;
+		case "blocked":
+		case "failed":
+			icon = "⚠";
+			iconColor = "error";
+			break;
+		default:
+			icon = "○";
+			iconColor = "dim";
+	}
+
+	const prefix = isSelected ? theme.fg("accent", "▸") : " ";
+	const styledIcon = theme.fg(iconColor, icon);
+
+	// Right side: status + duration
+	let rightStr: string;
+	if (task.status === "complete" && task.completedAt && task.claimedAt) {
+		const dur = formatDuration(task.completedAt - task.claimedAt);
+		rightStr = `done ${dur}`;
+	} else if (task.status === "claimed" && worker) {
+		const workerName = generateMemorableName(worker.identity);
+		const dur = worker.startedAt ? formatDuration(Date.now() - worker.startedAt) : "";
+		rightStr = `${workerName} ${dur}`.trim();
+	} else {
+		rightStr = task.status;
+	}
+
+	// Build: [prefix][icon] [taskId] [desc]·····[rightStr]
+	const leftFixed = `${prefix}${styledIcon} ${task.id} `;
+	const leftFixedW = visibleWidth(leftFixed);
+	const rightStrW = visibleWidth(rightStr);
+
+	const rawDesc = task.planDescription || task.description;
+	const descMaxW = width - leftFixedW - rightStrW - 2;
+	const desc = truncateText(rawDesc, Math.max(4, descMaxW));
+	const descW = visibleWidth(desc);
+
+	// Dot fill
+	const dotFill = Math.max(1, width - leftFixedW - descW - rightStrW);
+	const dots = theme.fg("dim", "·".repeat(dotFill));
+	const styledDesc = iconColor === "dim" ? theme.fg("muted", desc) : theme.fg(iconColor === "accent" ? "muted" : iconColor, desc);
+
+	return `${leftFixed}${styledDesc}${dots}${theme.fg("dim", rightStr)}`;
+}
+
+/**
+ * Render the expanded task panel with box-drawing.
+ * Max ~12 lines. Sections hide when content is empty.
+ */
+export function renderExpandedTask(
+	task: Task,
+	worker: WorkerStateFile | undefined,
+	theme: Theme,
+	width: number,
+): string[] {
+	const lines: string[] = [];
+	// Inner width = width - 4 (│ content │, each side has "│ " = 2 chars)
+	const innerW = width - 4;
+
+	const boxLine = (content: string): string => {
+		const contentW = visibleWidth(content);
+		const pad = Math.max(0, innerW - contentW);
+		return theme.fg("dim", "│") + " " + content + " ".repeat(pad) + " " + theme.fg("dim", "│");
+	};
+
+	const divider = (): string =>
+		theme.fg("dim", "├" + "─".repeat(width - 2) + "┤");
+
+	let sectionCount = 0;
+	const addDivider = () => {
+		if (sectionCount > 0) lines.push(divider());
+		sectionCount++;
+	};
+
+	lines.push(theme.fg("dim", "┌" + "─".repeat(width - 2) + "┐"));
+
+	// PLAN + NOW + deviation section
+	const planText = worker?.planIntent || task.planDescription || task.description;
+	const nowText = worker?.currentProblem || "";
+
+	addDivider();
+	if (planText) {
+		const planLabel = theme.fg("dim", "PLAN ");
+		const planContent = theme.fg("muted", truncateText(planText, innerW - 6));
+		lines.push(boxLine(`${planLabel} ${planContent}`));
+	}
+	if (nowText) {
+		const nowLabel = theme.fg("dim", "NOW  ");
+		const nowContent = theme.fg("muted", truncateText(nowText, innerW - 6));
+		lines.push(boxLine(`${nowLabel} ${nowContent}`));
+	}
+
+	// Deviations
+	if (task.deviationLog && task.deviationLog.length > 0) {
+		const lastDev = task.deviationLog[task.deviationLog.length - 1];
+		const devText = `${lastDev.what}`;
+		lines.push(boxLine(`${theme.fg("warning", "⚠")}      ${theme.fg("dim", truncateText(devText, innerW - 8))}`));
+	}
+
+	// THINK section
+	const thinkText = worker?.thinkingStream || "";
+	if (thinkText) {
+		addDivider();
+		const thinkLabel = "THINK";
+		const thinkSpace = innerW - thinkLabel.length - 2;
+		const chunks = splitToWidth(thinkText, Math.max(10, thinkSpace));
+		if (chunks.length > 0) {
+			lines.push(boxLine(`${theme.fg("dim", thinkLabel)}  ${theme.fg("muted", chunks[0])}`));
+			// Show second chunk with cursor indicator, indent matches label
+			if (chunks.length > 1) {
+				const indent = " ".repeat(thinkLabel.length + 2);
+				lines.push(boxLine(`${indent}${theme.fg("dim", chunks[1])}▊`));
+			}
+		}
+	}
+
+	// ASSUME + questions section
+	const assumptions = worker?.assumptions || [];
+	if (assumptions.length > 0) {
+		addDivider();
+		const assumeStrs = assumptions.slice(0, 2).map((a) => {
+			const statusMark = a.status === "verified" ? theme.fg("success", "✓") : theme.fg("dim", "?");
+			return `${a.text} ${statusMark}`;
+		});
+		const assumeContent = truncateText(assumeStrs.join("  "), innerW - 8);
+		lines.push(boxLine(`${theme.fg("dim", "ASSUME")} ${theme.fg("muted", assumeContent)}`));
+
+		// Unverified assumption as question
+		const unverified = assumptions.find((a) => a.status === "unverified");
+		if (unverified) {
+			lines.push(boxLine(`${theme.fg("warning", "❓")} ${theme.fg("dim", truncateText(unverified.text, innerW - 4))}`));
+			lines.push(boxLine(theme.fg("dim", "   [1]Yes  [2]No  [3]Skip")));
+		}
+	}
+
+	// INTERVENE commands
+	addDivider();
+	lines.push(boxLine(theme.fg("dim", ":send :retry :skip :pause :logs")));
+
+	lines.push(theme.fg("dim", "└" + "─".repeat(width - 2) + "┘"));
+
+	return lines;
+}
+
+/**
+ * Render the MESH view tab content (last N messages).
+ */
+export function renderMeshView(
+	messages: MeshMessage[],
+	theme: Theme,
+	width: number,
+): string[] {
+	const lines: string[] = [];
+
+	const header = `MESH (${messages.length} recent)`;
+	lines.push(theme.fg("accent", header));
+	lines.push(theme.fg("dim", "─".repeat(Math.min(width, 49))));
+
+	if (messages.length === 0) {
+		lines.push(theme.fg("dim", "  No mesh messages"));
+		return lines;
+	}
+
+	for (const msg of messages.slice(-20)) {
+		const from = msg.from;
+		const to = msg.to;
+		const maxMsgW = Math.max(10, width - from.length - to.length - 5);
+		const msgText = truncateText(msg.message, maxMsgW);
+		const arrow = theme.fg("dim", "→");
+		const fromStr = theme.fg("accent", from.padEnd(12));
+		const toStr = theme.fg("muted", to.padEnd(10));
+		lines.push(`${fromStr}${arrow}${toStr}  ${theme.fg("dim", msgText)}`);
+	}
+
+	return lines;
+}
+
+/**
+ * Full task navigator rendering (TASKS / AGENT / MESH views).
+ *
+ * Returns an array of rendered lines for the given state.
+ */
+export function renderTaskNavigator(
+	state: TaskNavState,
+	theme: Theme,
+	width: number,
+): string[] {
+	const lines: string[] = [];
+
+	// Progress bar + plan name
+	lines.push(...renderPlanProgress(
+		state.tasks,
+		state.cost,
+		state.costLimit,
+		state.elapsedMs,
+		state.planName || "",
+		theme,
+		width,
+	));
+
+	// Pipeline phase row (secondary, below progress bar)
+	if (state.currentPhase && state.phases) {
+		const pipelineState: PipelineDisplayState = {
+			currentPhase: state.currentPhase,
+			phases: state.phases as Record<PipelinePhase, PhaseResult | undefined>,
+			cost: state.cost,
+			elapsed: state.elapsedMs,
+		};
+		lines.push(renderPipelineRow(pipelineState, theme, width));
+	}
+
+	// View tabs
+	lines.push(renderViewTabs(state.activeView, theme, width));
+
+	const sep = theme.fg("dim", "─".repeat(width));
+
+	if (state.activeView === "mesh") {
+		lines.push(sep);
+		lines.push(...renderMeshView(state.meshMessages.slice(-20), theme, width));
+		return lines;
+	}
+
+	if (state.activeView === "agent") {
+		// Full-screen expanded panel for selected task
+		const task = state.tasks[state.selectedTaskIndex];
+		if (task) {
+			const worker = state.workers.find((w) => w.id === task.claimedBy);
+			lines.push(sep);
+			lines.push(...renderExpandedTask(task, worker, theme, width));
+		} else {
+			lines.push(sep);
+			lines.push(theme.fg("dim", "  No task selected"));
+		}
+		return lines;
+	}
+
+	// TASKS view: list of tasks with optional expanded panel
+	for (let i = 0; i < state.tasks.length; i++) {
+		const task = state.tasks[i];
+		const worker = state.workers.find((w) => w.id === task.claimedBy);
+		const isSelected = i === state.selectedTaskIndex;
+		const isExpanded = task.id === state.expandedTaskId;
+
+		lines.push(sep);
+		lines.push(renderCollapsedTask(task, worker, isSelected, isExpanded, theme, width));
+
+		if (isExpanded) {
+			lines.push(...renderExpandedTask(task, worker, theme, width));
+		}
+	}
+
+	lines.push(sep);
+
+	// MESH preview at bottom (last 3 messages)
+	if (state.meshMessages.length > 0) {
+		lines.push(...renderMeshView(state.meshMessages.slice(-3), theme, width));
+	}
+
+	return lines;
 }
