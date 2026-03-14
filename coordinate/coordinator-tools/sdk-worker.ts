@@ -189,8 +189,8 @@ If any issues are found, proceed to fix them without being asked to do so. If no
 		// Note: For SDK workers, nudge handling for restart/abort is done externally
 		// via session.steer() and session.abort() - we only handle wrap_up here
 		pi.on("turn_start", async () => {
-			const nudge = consumeNudgeSync(coordDir, workerId);
-			if (nudge) {
+			const nudges = consumeNudgeSync(coordDir, workerId);
+			for (const nudge of nudges) {
 				emitEvent("worker_nudged", { nudgeType: nudge.type });
 
 				if (nudge.type === "wrap_up") {
