@@ -514,7 +514,14 @@ export class FileBasedStorage {
 		try {
 			const content = await fs.readFile(meshPath, "utf-8");
 			const lines = content.trim().split("\n").filter(Boolean);
-			const messages: MeshMessage[] = lines.map(line => JSON.parse(line));
+			const messages: MeshMessage[] = [];
+			for (const line of lines) {
+				try {
+					messages.push(JSON.parse(line));
+				} catch {
+					// Skip malformed lines
+				}
+			}
 			if (limit !== undefined && limit > 0) {
 				return messages.slice(-limit);
 			}
