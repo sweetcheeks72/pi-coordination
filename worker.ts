@@ -146,6 +146,11 @@ export default function registerWorkerExtension(pi: ExtensionAPI): void {
 					break;
 
 				case "restart":
+					// Exit code 42 is a magic value recognised by auto-continue.ts:
+					// it signals a *graceful restart* requested by the supervisor nudge system,
+					// as opposed to a crash (non-zero) or a successful completion (0).
+					// The coordinator will requeue the task with fresh context rather than
+					// treating this as a failure.  Must remain 42 — callers pattern-match it.
 					process.exit(42);
 
 				case "abort":

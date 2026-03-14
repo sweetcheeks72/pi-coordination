@@ -27,6 +27,24 @@ export interface WorkerContext {
 }
 
 /**
+ * Semantic match for "no issues found" responses from self-review.
+ * Accepts natural language variations so the review loop doesn't get stuck
+ * when the reviewer paraphrases the pass signal instead of using the exact phrase.
+ */
+function isNoIssuesResponse(text: string): boolean {
+	const noIssuePatterns = [
+		/no\s+(issues?|problems?|bugs?|concerns?|errors?)\s+(found|detected|identified|discovered|to\s+report|to\s+fix)/i,
+		/found\s+no\s+(issues?|problems?|bugs?|concerns?)/i,
+		/everything\s+(looks?|appears?|seems?)\s+(good|correct|fine|clean)/i,
+		/all\s+(looks?|appears?|seems?)\s+(good|correct|fine|clean)/i,
+		/code\s+(is|looks)\s+(clean|correct|good)/i,
+		/nothing\s+to\s+(fix|report|change)/i,
+		/lgtm/i,
+	];
+	return noIssuePatterns.some(p => p.test(text));
+}
+
+/**
  * Create an inline extension factory that captures worker context in a closure.
  * This avoids the race condition with process.env when multiple workers spawn concurrently.
  */
@@ -123,7 +141,7 @@ If any issues are found, proceed to fix them without being asked to do so. If no
 			const lastMessage = messages[messages.length - 1];
 			const text = extractTextFromMessage(lastMessage);
 
-			if (text.includes("No issues found.")) {
+			if (isNoIssuesResponse(text)) {
 				selfReview.passed = true;
 				emitEvent("self_review_passed", { cycleNumber: selfReview.count });
 				selfReview.count = 0;
