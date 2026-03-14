@@ -12,10 +12,14 @@ import type {
 	CostState,
 	PipelinePhase,
 	ReviewIssue,
+	MeshMessage,
 } from "./types.js";
 
 export class FileBasedStorage {
 	constructor(private _coordDir: string) {}
+
+	/** Throttle map for updateWorkerThinking: workerId → last update timestamp (ms) */
+	private _thinkingLastUpdate: Map<string, number> = new Map();
 
 	get coordDir(): string {
 		return this._coordDir;
@@ -489,6 +493,55 @@ export class FileBasedStorage {
 		} catch {
 			return false;
 		}
+	}
+
+	/**
+	 * Append a mesh message as a JSON line to coordDir/mesh.jsonl.
+	 */
+	async appendMeshMessage(msg: MeshMessage): Promise<void> {
+		await fs.appendFile(
+			path.join(this._coordDir, "mesh.jsonl"),
+			JSON.stringify(msg) + "\n"
+		);
+	}
+
+	/**
+	 * Read the last `limit` mesh messages from coordDir/mesh.jsonl.
+	 * Returns an empty array if the file does not exist.
+	 */
+	async readMeshMessages(limit?: number): Promise<MeshMessage[]> {
+		const meshPath = path.join(this._coordDir, "mesh.jsonl");
+		try {
+			const content = await fs.readFile(meshPath, "utf-8");
+			const lines = content.trim().split("\n").filter(Boolean);
+			const messages: MeshMessage[] = lines.map(line => JSON.parse(line));
+			if (limit !== undefined && limit > 0) {
+				return messages.slice(-limit);
+			}
+			return messages;
+		} catch (err: unknown) {
+			if ((err as NodeJS.ErrnoException).code === "ENOENT") {
+				return [];
+			}
+			throw err;
+		}
+	}
+
+	/**
+	 * Update the thinkingStream field for a worker's state file.
+	 * Throttled to max once per 500ms per worker.
+	 */
+	async updateWorkerThinking(workerId: string, text: string): Promise<void> {
+		const now = Date.now();
+		const last = this._thinkingLastUpdate.get(workerId) ?? 0;
+		if (now - last < 500) {
+			return; // throttled
+		}
+		this._thinkingLastUpdate.set(workerId, now);
+		await this.updateWorkerState(workerId, (state) => ({
+			...state,
+			thinkingStream: text,
+		}));
 	}
 
 	private patternsOverlap(a: string[], b: string[]): boolean {
