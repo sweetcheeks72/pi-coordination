@@ -178,8 +178,7 @@ export function spawnWorkerProcess(
 	}).catch(() => {});
 
 	const traceId = obs?.getTraceId() || process.env.PI_TRACE_ID;
-	const runtimeConfigForEnv = loadRuntimeConfig(coordDir);
-
+	const spawnRuntimeConfig = loadRuntimeConfig(coordDir);
 	const proc = spawn("pi", args, {
 		cwd,
 		env: {
@@ -188,8 +187,8 @@ export function spawnWorkerProcess(
 			PI_AGENT_IDENTITY: identity,
 			PI_WORKER_ID: workerId,
 			...(traceId ? { PI_TRACE_ID: traceId } : {}),
-			...(runtimeConfigForEnv.selfReview?.enabled !== undefined ? { PI_SELF_REVIEW_ENABLED: String(runtimeConfigForEnv.selfReview.enabled) } : {}),
-			...(runtimeConfigForEnv.selfReview?.maxCycles !== undefined ? { PI_MAX_SELF_REVIEW_CYCLES: String(runtimeConfigForEnv.selfReview.maxCycles) } : {}),
+			...(spawnRuntimeConfig.selfReview?.enabled !== undefined ? { PI_SELF_REVIEW_ENABLED: String(spawnRuntimeConfig.selfReview.enabled) } : {}),
+			...(spawnRuntimeConfig.selfReview?.maxCycles !== undefined ? { PI_MAX_SELF_REVIEW_CYCLES: String(spawnRuntimeConfig.selfReview.maxCycles) } : {}),
 		},
 		stdio: ["ignore", "pipe", "pipe"],
 	});
