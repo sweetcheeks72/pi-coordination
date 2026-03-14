@@ -20,7 +20,21 @@ export async function sendNudge(
 	await fs.mkdir(nudgeDir, { recursive: true });
 
 	const nudgePath = getNudgePath(coordDir, workerId);
-	await fs.writeFile(nudgePath, JSON.stringify(payload, null, 2));
+
+	// Append to existing queue instead of overwriting, so unread nudges are not lost
+	let queue: NudgePayload[] = [];
+	try {
+		const existing = await fs.readFile(nudgePath, "utf-8");
+		const parsed: unknown = JSON.parse(existing);
+		// Handle both legacy single-nudge format and new array format
+		queue = Array.isArray(parsed) ? parsed : [parsed as NudgePayload];
+	} catch {
+		// File doesn't exist or is invalid — start with empty queue
+		queue = [];
+	}
+
+	queue.push(payload);
+	await fs.writeFile(nudgePath, JSON.stringify(queue, null, 2));
 }
 
 export async function checkNudge(
@@ -40,16 +54,19 @@ export async function checkNudge(
 export async function consumeNudge(
 	coordDir: string,
 	workerId: string,
-): Promise<NudgePayload | null> {
+): Promise<NudgePayload[]> {
 	const nudgePath = getNudgePath(coordDir, workerId);
 
 	try {
 		const content = await fs.readFile(nudgePath, "utf-8");
-		const payload: NudgePayload = JSON.parse(content);
+		const parsed: unknown = JSON.parse(content);
+		// Handle both legacy single-nudge format and new array format;
+		// return all queued nudges so none are silently dropped
+		const queue: NudgePayload[] = Array.isArray(parsed) ? parsed : [parsed as NudgePayload];
 		await fs.unlink(nudgePath);
-		return payload;
+		return queue;
 	} catch {
-		return null;
+		return [];
 	}
 }
 
@@ -70,15 +87,18 @@ export function checkNudgeSync(
 export function consumeNudgeSync(
 	coordDir: string,
 	workerId: string,
-): NudgePayload | null {
+): NudgePayload[] {
 	const nudgePath = getNudgePath(coordDir, workerId);
 
 	try {
 		const content = fsSync.readFileSync(nudgePath, "utf-8");
-		const payload: NudgePayload = JSON.parse(content);
+		const parsed: unknown = JSON.parse(content);
+		// Handle both legacy single-nudge format and new array format;
+		// return all queued nudges so none are silently dropped
+		const queue: NudgePayload[] = Array.isArray(parsed) ? parsed : [parsed as NudgePayload];
 		fsSync.unlinkSync(nudgePath);
-		return payload;
+		return queue;
 	} catch {
-		return null;
+		return [];
 	}
 }
