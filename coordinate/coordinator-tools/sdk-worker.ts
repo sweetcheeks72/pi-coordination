@@ -2,7 +2,7 @@ import * as path from "node:path";
 import * as fsSync from "node:fs";
 import { randomUUID } from "node:crypto";
 import { runAgentSDK } from "../../subagent/sdk-runner.js";
-import { registerControls, unregisterControls } from "../worker-control-registry.js";
+import { registerControls, unregisterControls, getAbort } from "../worker-control-registry.js";
 import { discoverAgents } from "../../subagent/agents.js";
 import { createContextUpdater, type ContextUpdater } from "../worker-context.js";
 import { createArtifactPaths } from "../../subagent/artifacts.js";
@@ -202,9 +202,12 @@ If any issues are found, proceed to fix them without being asked to do so. If no
 						},
 						{ triggerTurn: false },
 					);
+				} else if (nudge.type === "abort") {
+					// Signal abort via the control registry
+					emitEvent("worker_abort_nudge", { message: nudge.message });
+					const abortFn = getAbort(workerId);
+					if (abortFn) abortFn();
 				}
-				// Note: restart and abort are handled externally for SDK workers
-				// They cannot use process.exit() as that would kill the entire coordinator
 			}
 
 			const now = Date.now();
