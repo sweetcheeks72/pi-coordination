@@ -133,7 +133,7 @@ export function updatePhaseStatus(
 		phaseResult.attempt++;
 
 		ctx.obs?.events.setPhase(phase);
-		ctx.obs?.events.emit({ type: "phase_started", phase }).catch(() => {});
+		ctx.obs?.events.emit({ type: "phase_started", phase }).catch(e => console.debug('[coord:obs]', e?.message ?? 'unknown error'));
 	}
 
 	if (status === "complete" || status === "failed") {
@@ -161,14 +161,14 @@ export function updatePhaseStatus(
 			duration,
 			cost,
 			timestamp: now,
-		}).catch(() => {});
+		}).catch(e => console.debug('[coord:obs]', e?.message ?? 'unknown error'));
 
 		ctx.obs?.events.emit({
 			type: "phase_completed",
 			phase,
 			duration,
 			cost,
-		}).catch(() => {});
+		}).catch(e => console.debug('[coord:obs]', e?.message ?? 'unknown error'));
 	}
 }
 
@@ -205,27 +205,48 @@ export async function checkCostLimit(ctx: PipelineContext): Promise<boolean> {
 	return false;
 }
 
+function countMatchingIssues(
+	currentDescriptions: Set<string>,
+	candidateIssues: ReviewIssue[],
+): number {
+	const candidateDescriptions = new Set(candidateIssues.map(i => `${i.file}:${i.description}`));
+	let count = 0;
+	for (const desc of currentDescriptions) {
+		if (candidateDescriptions.has(desc)) {
+			count++;
+		}
+	}
+	return count;
+}
+
 function detectStuckIssues(
 	currentIssues: ReviewIssue[],
 	reviewHistory: ReviewResult[],
 	sameIssueLimit: number,
 ): boolean {
 	if (reviewHistory.length < 2) return false;
-
-	const previousIssues = reviewHistory[reviewHistory.length - 2]?.issues || [];
-	if (previousIssues.length === 0) return false;
+	if (currentIssues.length === 0) return false;
 
 	const currentDescriptions = new Set(currentIssues.map(i => `${i.file}:${i.description}`));
-	const previousDescriptions = new Set(previousIssues.map(i => `${i.file}:${i.description}`));
+	const threshold = Math.min(sameIssueLimit, currentIssues.length);
 
-	let sameCount = 0;
-	for (const desc of currentDescriptions) {
-		if (previousDescriptions.has(desc)) {
-			sameCount++;
+	// Check N vs N-1: same issues persist in consecutive reviews
+	const previousIssues = reviewHistory[reviewHistory.length - 2]?.issues || [];
+	if (previousIssues.length > 0) {
+		const sameCount = countMatchingIssues(currentDescriptions, previousIssues);
+		if (sameCount >= threshold) return true;
+	}
+
+	// Check N vs N-2: A→B→A oscillation — same issues recur after one intermediate cycle
+	if (reviewHistory.length >= 3) {
+		const twoBackIssues = reviewHistory[reviewHistory.length - 3]?.issues || [];
+		if (twoBackIssues.length > 0) {
+			const oscillationCount = countMatchingIssues(currentDescriptions, twoBackIssues);
+			if (oscillationCount >= threshold) return true;
 		}
 	}
 
-	return sameCount >= Math.min(sameIssueLimit, currentIssues.length);
+	return false;
 }
 
 export async function runScoutPhaseWrapper(
@@ -281,7 +302,7 @@ export async function runScoutPhaseWrapper(
 									actor: "scout",
 									phase: "scout",
 									recoverable: true,
-								}).catch(() => {});
+								}).catch(e => console.debug('[coord:obs]', e?.message ?? 'unknown error'));
 							});
 						}
 					}
@@ -303,7 +324,7 @@ export async function runScoutPhaseWrapper(
 							phase: "scout",
 							contextTokens,
 							timestamp: now,
-						}).catch(() => {});
+						}).catch(e => console.debug('[coord:obs]', e?.message ?? 'unknown error'));
 					}
 				};
 			})(),
@@ -401,7 +422,7 @@ export async function runPlannerPhaseWrapper(
 									actor: "planner",
 									phase: "planner",
 									recoverable: true,
-								}).catch(() => {});
+								}).catch(e => console.debug('[coord:obs]', e?.message ?? 'unknown error'));
 							});
 						}
 					}
@@ -449,7 +470,7 @@ export async function runPlannerPhaseWrapper(
 			config.coordDir,
 			plannerConfig,
 			ctx.plannerBackgroundAbort.signal,
-		).catch(() => {});
+		).catch(e => console.debug('[coord:obs]', e?.message ?? 'unknown error'));
 
 		await saveProgressDoc(ctx);
 		await ctx.obs?.snapshots.capture("phase_end", "planner");
@@ -511,7 +532,7 @@ export async function runReviewPhaseWrapper(
 								workerId: "review",
 								contextTokens: result?.usage?.contextTokens,
 								timestamp: Date.now(),
-							}).catch(() => {});
+							}).catch(e => console.debug('[coord:obs]', e?.message ?? 'unknown error'));
 						}
 					}
 				};
@@ -778,8 +799,10 @@ export async function runReviewFixLoop(
 			cost: integrationResult.cost,
 		});
 
-		// Fix integration issues first
-		ctx.pipelineState.fixCycle++;
+		// Fix integration issues first — use a separate counter so we don't burn
+		// from the regular review-fix budget (fixes the off-by-one in cycle budget).
+		let integrationFixCycle = 0;
+		integrationFixCycle++;
 		await runFixPhaseWrapper(ctx, config, integrationResult.issues);
 		
 		if (ctx.pipelineState.exitReason === "max_cycles") {
