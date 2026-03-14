@@ -6,8 +6,9 @@ import type { FileBasedStorage } from "./state.js";
 import { sendNudge } from "./nudge.js";
 import { TaskQueueManager } from "./task-queue.js";
 import type { WorkerHandle } from "./coordinator-tools/index.js";
+import type { SDKWorkerHandle } from "./coordinator-tools/sdk-worker.js";
 
-export type SupervisedWorkerHandle = WorkerHandle & { taskId: string };
+export type SupervisedWorkerHandle = (WorkerHandle | SDKWorkerHandle) & { taskId: string };
 
 interface WorkerTracker {
 	handle: SupervisedWorkerHandle;
@@ -24,6 +25,16 @@ const DEFAULT_CONFIG: SupervisorConfig = {
 	dynamicSpawnTimeoutMs: 30000,
 	staleTaskTimeoutMs: 1800000, // 30 minutes
 };
+
+/** Type guard: handle is a process-based worker (has `proc: ChildProcess`). */
+function isProcHandle(handle: SupervisedWorkerHandle): handle is WorkerHandle & { taskId: string } {
+	return "proc" in handle && (handle as WorkerHandle).proc != null;
+}
+
+/** Type guard: handle is an SDK-based worker (has `abort` function, no `proc`). */
+function isSDKHandle(handle: SupervisedWorkerHandle): handle is SDKWorkerHandle & { taskId: string } {
+	return "abort" in handle && typeof (handle as SDKWorkerHandle).abort === "function";
+}
 
 export class SupervisorLoop {
 	private workers = new Map<string, WorkerTracker>();
@@ -50,6 +61,9 @@ export class SupervisorLoop {
 		}
 
 		signal?.addEventListener("abort", () => this.stop());
+
+		// Run cleanup once before the interval loop starts
+		void this.cleanupOnStartup();
 
 		this.intervalId = setInterval(() => this.checkAllWorkers(), this.config.checkIntervalMs);
 	}
@@ -81,6 +95,16 @@ export class SupervisorLoop {
 		this.workers.delete(workerId);
 	}
 
+	/**
+	 * Run startup stale-task cleanup once — releases any `claimed` tasks that have
+	 * no corresponding active worker handle (e.g. orphaned after a crash).
+	 * Called automatically from `start()` and can be called externally during
+	 * coordinate/index.ts initialization.
+	 */
+	async cleanupOnStartup(): Promise<void> {
+		await this.cleanupStaleTasks(Date.now());
+	}
+
 	private getWorkerStateModTime(workerId: string): number | null {
 		try {
 			const statePath = path.join(this.coordDir, `worker-${workerId}.json`);
@@ -91,8 +115,19 @@ export class SupervisorLoop {
 		}
 	}
 
-	private isProcessAlive(proc: ChildProcess): boolean {
+	/**
+	 * Check whether a process-based worker handle is still alive via PID signal.
+	 * SDK workers (no `proc`) are skipped — their lifecycle is managed by the
+	 * coordinator's promise/abort mechanism.
+	 */
+	private isHandleAlive(handle: SupervisedWorkerHandle): boolean {
+		if (!isProcHandle(handle)) {
+			// SDK worker: no proc to check. The coordinator calls removeWorker() when
+			// the promise resolves, so the handle still being present means it's alive.
+			return true;
+		}
 		try {
+			const { proc } = handle;
 			if (proc.exitCode !== null) return false;
 			if (proc.killed) return false;
 			process.kill(proc.pid!, 0);
@@ -108,7 +143,9 @@ export class SupervisorLoop {
 		const now = Date.now();
 
 		for (const [workerId, tracker] of this.workers.entries()) {
-			if (!this.isProcessAlive(tracker.handle.proc)) {
+			// SDK workers always return true from isHandleAlive; only proc handles can
+			// be detected as dead here. SDK worker exits are signalled via removeWorker().
+			if (!this.isHandleAlive(tracker.handle)) {
 				this.workers.delete(workerId);
 				continue;
 			}
@@ -191,7 +228,7 @@ export class SupervisorLoop {
 	}
 
 	private async handleStuckWorker(tracker: WorkerTracker): Promise<void> {
-		const { workerId, identity, taskId, proc } = tracker.handle;
+		const { workerId, identity, taskId } = tracker.handle;
 
 		tracker.restartCount++;
 
@@ -212,15 +249,17 @@ export class SupervisorLoop {
 			timestamp: Date.now(),
 		});
 
-		try {
-			proc.kill("SIGTERM");
-		} catch {}
+		if (isProcHandle(tracker.handle)) {
+			try { tracker.handle.proc.kill("SIGTERM"); } catch {}
+		} else if (isSDKHandle(tracker.handle)) {
+			try { tracker.handle.abort(); } catch {}
+		}
 
 		await this.taskQueue.releaseTask(taskId);
 	}
 
 	private async abandonWorker(tracker: WorkerTracker): Promise<void> {
-		const { workerId, identity, taskId, proc } = tracker.handle;
+		const { workerId, identity, taskId } = tracker.handle;
 
 		await sendNudge(this.coordDir, workerId, {
 			type: "abort",
@@ -235,9 +274,11 @@ export class SupervisorLoop {
 			timestamp: Date.now(),
 		});
 
-		try {
-			proc.kill("SIGKILL");
-		} catch {}
+		if (isProcHandle(tracker.handle)) {
+			try { tracker.handle.proc.kill("SIGKILL"); } catch {}
+		} else if (isSDKHandle(tracker.handle)) {
+			try { tracker.handle.abort(); } catch {}
+		}
 
 		await this.taskQueue.markTaskFailed(
 			taskId,
