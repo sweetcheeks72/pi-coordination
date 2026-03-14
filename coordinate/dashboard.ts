@@ -155,6 +155,8 @@ export class CoordinationDashboard implements Component {
 	private selectedTaskIndex = 0;
 	private activeView: TaskNavView = "tasks";
 	private expandedTaskId: string | null = null;
+	private deviationExpanded = false;
+	private rawLogsExpanded = false;
 
 	// Escalation answer mode
 	private escalationInputMode = false;
@@ -285,11 +287,30 @@ export class CoordinationDashboard implements Component {
 			// Toggle expand for selected task
 			const task = this.state?.tasks[this.selectedTaskIndex];
 			if (task) {
-				this.expandedTaskId = this.expandedTaskId === task.id ? null : task.id;
+				const wasExpanded = this.expandedTaskId === task.id;
+				this.expandedTaskId = wasExpanded ? null : task.id;
+				if (!this.expandedTaskId) {
+					// Collapsing: reset deviation state
+					this.deviationExpanded = false;
+					this.rawLogsExpanded = false;
+				} else if (this.deviationExpanded) {
+					// Task is expanded and deviation is open: Enter toggles raw logs
+					this.rawLogsExpanded = !this.rawLogsExpanded;
+				}
 				this.tui.requestRender();
 			} else if (this.state && this.state.workers.length > 0) {
 				// Fallback: open worker overlay for selected worker
 				this.overlay = "worker";
+				this.tui.requestRender();
+			}
+		} else if (data === "d") {
+			// Toggle deviation accordion for expanded task
+			const expandedTask = this.state?.tasks.find((t) => t.id === this.expandedTaskId);
+			if (expandedTask && (expandedTask.deviationLog?.length ?? 0) > 0) {
+				this.deviationExpanded = !this.deviationExpanded;
+				if (!this.deviationExpanded) {
+					this.rawLogsExpanded = false;
+				}
 				this.tui.requestRender();
 			}
 		} else if (data === "1" || data === "2" || data === "3") {
@@ -404,6 +425,8 @@ export class CoordinationDashboard implements Component {
 			escalationInputMode: this.escalationInputMode,
 			escalationInput: this.escalationInput,
 			escalationStatus: this.escalationStatus,
+			deviationExpanded: this.deviationExpanded,
+			rawLogsExpanded: this.rawLogsExpanded,
 		};
 
 		lines.push(...renderTaskNavigator(navState, th, width));
@@ -1241,6 +1264,17 @@ export class CoordinationDashboard implements Component {
 	private async handleEscalationAnswerSubmit(value: string): Promise<void> {
 		this.escalationInputMode = false;
 		const trimmed = value.trim();
+
+		// :logs command — toggle raw logs for current expanded task
+		if (trimmed === "logs" || trimmed === ":logs") {
+			this.rawLogsExpanded = !this.rawLogsExpanded;
+			if (this.rawLogsExpanded) {
+				this.deviationExpanded = true; // auto-expand deviation section
+			}
+			this.tui.requestRender();
+			return;
+		}
+
 		const choice = trimmed.startsWith("answer ")
 			? trimmed.slice("answer ".length).trim()
 			: trimmed;

@@ -4,7 +4,8 @@
 
 import type { Theme } from "@mariozechner/pi-coding-agent";
 import { visibleWidth } from "@mariozechner/pi-tui";
-import type { PipelinePhase, PhaseResult, WorkerStateFile, Task, CoordinationEvent, FileReservation, MeshMessage } from "./types.js";
+import type { Input } from "@mariozechner/pi-tui";
+import type { PipelinePhase, PhaseResult, WorkerStateFile, Task, CoordinationEvent, FileReservation, MeshMessage, EscalationRequest } from "./types.js";
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Memorable Names (Docker-style adjective_noun)
@@ -1185,6 +1186,20 @@ export interface TaskNavState {
 	elapsedMs: number;
 	currentPhase?: PipelinePhase;
 	phases?: Partial<Record<PipelinePhase, PhaseResult | undefined>>;
+	/** Pending escalation requests shown in QUESTION section */
+	escalations?: EscalationRequest[];
+	/** Live countdown (seconds remaining) per escalation id */
+	escalationCountdowns?: Map<string, number>;
+	/** Whether the user is typing a free-form :answer */
+	escalationInputMode?: boolean;
+	/** The Input component for :answer (rendered inline) */
+	escalationInput?: Input;
+	/** Status message after answering */
+	escalationStatus?: string | null;
+	/** Whether the DEVIATION accordion is open for the currently expanded task */
+	deviationExpanded?: boolean;
+	/** Whether raw logs are expanded inside the deviation accordion */
+	rawLogsExpanded?: boolean;
 }
 
 /**
@@ -1312,7 +1327,12 @@ export function renderCollapsedTask(
 	const prefix = isSelected ? theme.fg("accent", "▸") : " ";
 	const styledIcon = theme.fg(iconColor, icon);
 
-	// Right side: status + duration
+	// Deviation badge: ⚠N (shown on right side when deviations exist)
+	const devCount = task.deviationLog?.length ?? 0;
+	const devBadge = devCount > 0 ? `  ${theme.fg("warning", `⚠${devCount}`)}` : "";
+	const devBadgeW = devCount > 0 ? 2 + 1 + String(devCount).length : 0; // "  ⚠" + digits
+
+	// Right side: status + duration + badge
 	let rightStr: string;
 	if (task.status === "complete" && task.completedAt && task.claimedAt) {
 		const dur = formatDuration(task.completedAt - task.claimedAt);
@@ -1325,22 +1345,22 @@ export function renderCollapsedTask(
 		rightStr = task.status;
 	}
 
-	// Build: [prefix][icon] [taskId] [desc]·····[rightStr]
+	// Build: [prefix][icon] [taskId] [desc]·····[rightStr][devBadge]
 	const leftFixed = `${prefix}${styledIcon} ${task.id} `;
 	const leftFixedW = visibleWidth(leftFixed);
 	const rightStrW = visibleWidth(rightStr);
 
 	const rawDesc = task.planDescription || task.description;
-	const descMaxW = width - leftFixedW - rightStrW - 2;
+	const descMaxW = width - leftFixedW - rightStrW - devBadgeW - 2;
 	const desc = truncateText(rawDesc, Math.max(4, descMaxW));
 	const descW = visibleWidth(desc);
 
 	// Dot fill
-	const dotFill = Math.max(1, width - leftFixedW - descW - rightStrW);
+	const dotFill = Math.max(1, width - leftFixedW - descW - rightStrW - devBadgeW);
 	const dots = theme.fg("dim", "·".repeat(dotFill));
 	const styledDesc = iconColor === "dim" ? theme.fg("muted", desc) : theme.fg(iconColor === "accent" ? "muted" : iconColor, desc);
 
-	return `${leftFixed}${styledDesc}${dots}${theme.fg("dim", rightStr)}`;
+	return `${leftFixed}${styledDesc}${dots}${theme.fg("dim", rightStr)}${devBadge}`;
 }
 
 /**
@@ -1352,6 +1372,13 @@ export function renderExpandedTask(
 	worker: WorkerStateFile | undefined,
 	theme: Theme,
 	width: number,
+	deviationExpanded?: boolean,
+	rawLogsExpanded?: boolean,
+	escalation?: EscalationRequest | null,
+	escalationCountdownSecs?: number | null,
+	escalationInputMode?: boolean,
+	escalationInput?: Input | null,
+	escalationStatus?: string | null,
 ): string[] {
 	const lines: string[] = [];
 	// Inner width = width - 4 (│ content │, each side has "│ " = 2 chars)
@@ -1390,11 +1417,87 @@ export function renderExpandedTask(
 		lines.push(boxLine(`${nowLabel} ${nowContent}`));
 	}
 
-	// Deviations
+	// Deviations — accordion (Tier 1 hint + Tier 2 detail)
 	if (task.deviationLog && task.deviationLog.length > 0) {
-		const lastDev = task.deviationLog[task.deviationLog.length - 1];
-		const devText = `${lastDev.what}`;
-		lines.push(boxLine(`${theme.fg("warning", "⚠")}      ${theme.fg("dim", truncateText(devText, innerW - 8))}`));
+		if (deviationExpanded) {
+			// ── Tier 2: Full DEVIATION section ─────────────────────────────────
+			addDivider();
+			// Section header divider: ├ DEVIATION ────────┤
+			const devTitle = " DEVIATION ";
+			const devLineLen = Math.max(0, width - 2 - devTitle.length - 1);
+			lines.push(
+				theme.fg("dim", "├") +
+				theme.fg("dim", " ") +
+				theme.fg("warning", "DEVIATION") +
+				theme.fg("dim", " " + "─".repeat(devLineLen)) +
+				theme.fg("dim", "┤"),
+			);
+
+			// Render deviations newest-first
+			const devsNewestFirst = [...task.deviationLog].reverse();
+			for (const dev of devsNewestFirst) {
+				const elapsed = `+${Math.round((Date.now() - dev.timestamp) / 1000)}s`;
+				const elapsedStr = theme.fg("dim", elapsed);
+				// Summary line: ⚠ +802s what-text
+				const summaryText = truncateText(dev.what, innerW - elapsed.length - 4);
+				lines.push(boxLine(`${theme.fg("warning", "⚠")} ${elapsedStr} ${theme.fg("muted", summaryText)}`));
+				lines.push(boxLine(""));
+
+				// WHAT/WHY/DECIDED/IMPACT
+				const fieldW = innerW - 9; // "WHAT  " = 6 + 1 padding + 2 for box sides already
+				const whatLabel = theme.fg("accent", "WHAT");
+				lines.push(boxLine(`  ${whatLabel}  ${theme.fg("muted", truncateText(dev.what, fieldW))}`));
+
+				const whyLines = splitToWidth(dev.why, Math.max(10, fieldW));
+				const whyLabel = theme.fg("accent", "WHY");
+				lines.push(boxLine(`  ${whyLabel}   ${theme.fg("muted", truncateText(whyLines[0] || "", fieldW))}`));
+				for (const chunk of whyLines.slice(1, 2)) {
+					lines.push(boxLine(`        ${theme.fg("dim", chunk)}`));
+				}
+
+				const decidedLabel = theme.fg("accent", "DECIDED");
+				lines.push(boxLine(`  ${decidedLabel}  ${theme.fg("muted", truncateText(dev.decision, fieldW))}`));
+
+				const impactLabel = theme.fg("accent", "IMPACT");
+				lines.push(boxLine(`  ${impactLabel}   ${theme.fg("muted", truncateText(dev.impact, fieldW))}`));
+
+				lines.push(boxLine(""));
+			}
+
+			// Raw logs toggle line
+			const rawLogCount = worker?.recentTools?.length ?? 0;
+			const rawLogsLabel = rawLogsExpanded
+				? theme.fg("dim", "▾ Raw logs")
+				: theme.fg("dim", "▸ Raw logs");
+			const rawLogsCountStr = rawLogCount > 0 ? theme.fg("dim", ` (${rawLogCount} lines)`) : "";
+			lines.push(boxLine(`${rawLogsLabel}${rawLogsCountStr}`));
+
+			// ── Tier 3: Raw logs (if expanded) ─────────────────────────────────
+			if (rawLogsExpanded && worker?.recentTools && worker.recentTools.length > 0) {
+				const logTools = worker.recentTools.slice(-20);
+				for (const entry of logTools) {
+					const toolName = theme.fg("dim", entry.tool.padEnd(8));
+					const argStr = theme.fg("muted", truncateText(entry.args || "", innerW - 10));
+					lines.push(boxLine(`  ${toolName} ${argStr}`));
+				}
+			} else if (rawLogsExpanded) {
+				// Fallback: show deviation details as pseudo-logs
+				for (const dev of devsNewestFirst.slice(0, 20)) {
+					const ts = new Date(dev.timestamp).toISOString().slice(11, 19);
+					lines.push(boxLine(theme.fg("dim", `  [${ts}] ${truncateText(dev.what, innerW - 14)}`)));
+				}
+			}
+		} else {
+			// ── Tier 1 hint (collapsed): single ⚠ summary line + press d hint ──
+			const lastDev = task.deviationLog[task.deviationLog.length - 1];
+			const devCount = task.deviationLog.length;
+			const countLabel = devCount > 1 ? theme.fg("dim", ` +${devCount - 1} more`) : "";
+			const hintStr = theme.fg("dim", " [d]");
+			const maxDevW = innerW - 2 - visibleWidth(countLabel) - visibleWidth(hintStr) - 1;
+			lines.push(boxLine(
+				`${theme.fg("warning", "⚠")} ${theme.fg("dim", truncateText(lastDev.what, maxDevW))}${countLabel}${hintStr}`,
+			));
+		}
 	}
 
 	// THINK section
@@ -1431,6 +1534,54 @@ export function renderExpandedTask(
 			lines.push(boxLine(`${theme.fg("warning", "❓")} ${theme.fg("dim", truncateText(unverified.text, innerW - 4))}`));
 			lines.push(boxLine(theme.fg("dim", "   [1]Yes  [2]No  [3]Skip")));
 		}
+	}
+
+	// QUESTION section — active escalation
+	if (escalation) {
+		addDivider();
+
+		const options = escalation.richOptions?.length
+			? escalation.richOptions
+			: escalation.options.map((o) => ({ label: o, description: undefined as string | undefined }));
+
+		const secs = escalationCountdownSecs ?? 0;
+		const timeStr = secs > 0 ? `${secs}s` : "now";
+
+		// Question text
+		const qLabel = theme.fg("warning", "❓ QUESTION");
+		const qText = truncateText(escalation.question, innerW - 14);
+		lines.push(boxLine(`${qLabel}  ${theme.fg("muted", qText)}`));
+
+		// Number-key options
+		const optStrs = options
+			.slice(0, 3)
+			.map((o, i) => {
+				const key = theme.fg("accent", `[${i + 1}]`);
+				const label = truncateText(o.label, 20);
+				return `${key} ${theme.fg("muted", label)}`;
+			})
+			.join("  ");
+		lines.push(boxLine(`  ${optStrs}`));
+
+		// :answer free-form or input field
+		if (escalationInputMode && escalationInput) {
+			const inputLines = escalationInput.render(innerW - 4);
+			for (const line of inputLines) {
+				lines.push(boxLine(`  ${line}`));
+			}
+		} else if (escalationStatus) {
+			lines.push(boxLine(`  ${theme.fg("success", escalationStatus)}`));
+		} else {
+			lines.push(boxLine(`  ${theme.fg("dim", ":answer <text>  or  press [1][2][3]")}`));
+		}
+
+		// Agent assumption + countdown
+		const assumption = escalation.agentAssumption
+			? truncateText(escalation.agentAssumption, innerW - 30)
+			: truncateText(options[escalation.defaultOption ?? 0]?.label ?? "", innerW - 30);
+		const countdownColor: "error" | "warning" | "muted" = secs < 30 ? "error" : secs < 60 ? "warning" : "muted";
+		const countdownStr = theme.fg(countdownColor, `auto-proceed in ${timeStr}`);
+		lines.push(boxLine(`  ${theme.fg("dim", `assumes: ${assumption}`)}  ${countdownStr}`));
 	}
 
 	// INTERVENE commands
@@ -1525,8 +1676,15 @@ export function renderTaskNavigator(
 		const task = state.tasks[state.selectedTaskIndex];
 		if (task) {
 			const worker = state.workers.find((w) => w.id === task.claimedBy);
+			const escalation = state.escalations?.[0] ?? null;
+			const countdown = escalation ? (state.escalationCountdowns?.get(escalation.id) ?? null) : null;
 			lines.push(sep);
-			lines.push(...renderExpandedTask(task, worker, theme, width));
+			lines.push(...renderExpandedTask(
+				task, worker, theme, width,
+				state.deviationExpanded, state.rawLogsExpanded,
+				escalation, countdown,
+				state.escalationInputMode, state.escalationInput, state.escalationStatus,
+			));
 		} else {
 			lines.push(sep);
 			lines.push(theme.fg("dim", "  No task selected"));
@@ -1545,7 +1703,17 @@ export function renderTaskNavigator(
 		lines.push(renderCollapsedTask(task, worker, isSelected, isExpanded, theme, width));
 
 		if (isExpanded) {
-			lines.push(...renderExpandedTask(task, worker, theme, width));
+			// Only show escalation in the expanded panel for the selected task
+			const escalation = state.escalations?.[0] ?? null;
+			const countdown = escalation ? (state.escalationCountdowns?.get(escalation.id) ?? null) : null;
+			lines.push(...renderExpandedTask(
+				task, worker, theme, width,
+				state.deviationExpanded, state.rawLogsExpanded,
+				isSelected ? escalation : null, isSelected ? countdown : null,
+				isSelected ? state.escalationInputMode : undefined,
+				isSelected ? state.escalationInput : undefined,
+				isSelected ? state.escalationStatus : undefined,
+			));
 		}
 	}
 

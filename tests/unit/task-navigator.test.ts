@@ -449,6 +449,187 @@ async function main() {
 		assert(t02Line!.includes("▸"), "T-02 should be marked as selected");
 	});
 
+	// ─────────────────────────────────────────────────────────────────────────
+	// TASK-05: Accordion Deviation Stream
+	// ─────────────────────────────────────────────────────────────────────────
+
+	runner.section("TASK-05: Tier 1 — Deviation badge on collapsed row");
+
+	await runner.test("⚠N badge visible when task has deviations", () => {
+		const task = makeTask({
+			status: "claimed",
+			deviationLog: [
+				{ timestamp: Date.now(), what: "timeout", why: "cold start", decision: "extend", impact: "minimal" },
+			],
+		});
+		const result = renderCollapsedTask(task, undefined, false, false, theme, 80);
+		assert(result.includes("⚠1"), "collapsed row should show ⚠1 badge for one deviation");
+	});
+
+	await runner.test("⚠N badge shows correct count for multiple deviations", () => {
+		const task = makeTask({
+			status: "claimed",
+			deviationLog: [
+				{ timestamp: Date.now(), what: "timeout", why: "cold start", decision: "extend", impact: "minimal" },
+				{ timestamp: Date.now(), what: "memory oom", why: "large payload", decision: "chunk", impact: "+2s" },
+				{ timestamp: Date.now(), what: "retry", why: "transient err", decision: "retried", impact: "none" },
+			],
+		});
+		const result = renderCollapsedTask(task, undefined, false, false, theme, 80);
+		assert(result.includes("⚠3"), "collapsed row should show ⚠3 badge for three deviations");
+	});
+
+	await runner.test("no ⚠N badge when task has no deviations", () => {
+		const task = makeTask({ status: "claimed" });
+		const result = renderCollapsedTask(task, undefined, false, false, theme, 80);
+		assert(!result.includes("⚠1"), "collapsed row should not show badge when no deviations");
+	});
+
+	runner.section("TASK-05: Tier 2 — DEVIATION section in expanded panel");
+
+	await runner.test("DEVIATION section renders with WHAT/WHY/DECIDED/IMPACT labels when expanded", () => {
+		const task = makeTask({
+			deviationLog: [{
+				timestamp: Date.now() - 802000,
+				what: "Endpoint validation timed out at 30s",
+				why: "Cold start adds ~15s to startup",
+				decision: "Extended timeout 30→60s, retried",
+				impact: "+45s duration. T-04 unblocked.",
+			}],
+		});
+		const lines = renderExpandedTask(task, undefined, theme, 60, true, false);
+		const combined = lines.join("\n");
+		assert(combined.includes("DEVIATION"), "should include DEVIATION section header");
+		assert(combined.includes("WHAT"), "should include WHAT label");
+		assert(combined.includes("WHY"), "should include WHY label");
+		assert(combined.includes("DECIDED"), "should include DECIDED label");
+		assert(combined.includes("IMPACT"), "should include IMPACT label");
+	});
+
+	await runner.test("DEVIATION section shows deviation what text", () => {
+		const task = makeTask({
+			deviationLog: [{
+				timestamp: Date.now(),
+				what: "Contract test timeout",
+				why: "Cold start latency",
+				decision: "Extended timeout",
+				impact: "Minimal",
+			}],
+		});
+		const lines = renderExpandedTask(task, undefined, theme, 60, true, false);
+		const combined = lines.join("\n");
+		assert(combined.includes("Contract test timeout"), "should show deviation what text");
+		assert(combined.includes("Cold start latency"), "should show deviation why text");
+	});
+
+	await runner.test("DEVIATION section stacks multiple deviations newest-first", () => {
+		const task = makeTask({
+			deviationLog: [
+				{ timestamp: 1000, what: "older deviation", why: "reason1", decision: "dec1", impact: "imp1" },
+				{ timestamp: 2000, what: "newer deviation", why: "reason2", decision: "dec2", impact: "imp2" },
+			],
+		});
+		const lines = renderExpandedTask(task, undefined, theme, 60, true, false);
+		const combined = lines.join("\n");
+		const newerIdx = combined.indexOf("newer deviation");
+		const olderIdx = combined.indexOf("older deviation");
+		assert(newerIdx < olderIdx, "newer deviation should appear before older deviation (newest-first)");
+	});
+
+	await runner.test("DEVIATION section shows ▸ Raw logs link", () => {
+		const task = makeTask({
+			deviationLog: [{
+				timestamp: Date.now(),
+				what: "timeout",
+				why: "slow",
+				decision: "retry",
+				impact: "none",
+			}],
+		});
+		const lines = renderExpandedTask(task, undefined, theme, 60, true, false);
+		const combined = lines.join("\n");
+		assert(combined.includes("Raw logs"), "should include Raw logs link");
+	});
+
+	await runner.test("no DEVIATION section when deviationExpanded is false", () => {
+		const task = makeTask({
+			deviationLog: [{
+				timestamp: Date.now(),
+				what: "timeout",
+				why: "slow",
+				decision: "retry",
+				impact: "none",
+			}],
+		});
+		const lines = renderExpandedTask(task, undefined, theme, 60, false, false);
+		const combined = lines.join("\n");
+		// Should show ⚠ hint but not full DEVIATION panel with WHAT/WHY labels
+		assert(!combined.includes("WHAT"), "should NOT show WHAT label when deviation not expanded");
+		assert(!combined.includes("WHY"), "should NOT show WHY label when deviation not expanded");
+	});
+
+	runner.section("TASK-05: Tier 3 — Raw logs");
+
+	await runner.test("raw logs shown when rawLogsExpanded is true", () => {
+		const worker = makeWorker({
+			recentTools: [
+				{ tool: "bash", args: "npm test", endMs: Date.now() },
+				{ tool: "read", args: "src/index.ts", endMs: Date.now() },
+			],
+		});
+		const task = makeTask({
+			status: "claimed",
+			claimedBy: worker.id,
+			deviationLog: [{
+				timestamp: Date.now(),
+				what: "timeout",
+				why: "slow",
+				decision: "retry",
+				impact: "none",
+			}],
+		});
+		const lines = renderExpandedTask(task, worker, theme, 60, true, true);
+		const combined = lines.join("\n");
+		// Should show raw log lines
+		assert(combined.includes("bash") || combined.includes("read") || combined.includes("LOG") || combined.includes("log"), "should show raw log content");
+	});
+
+	await runner.test("raw logs capped at 20 lines", () => {
+		const worker = makeWorker({
+			recentTools: Array.from({ length: 30 }, (_, i) => ({
+				tool: "bash",
+				args: `cmd-${i}`,
+				endMs: Date.now() - i * 1000,
+			})),
+		});
+		const task = makeTask({ status: "claimed", claimedBy: worker.id });
+		const lines = renderExpandedTask(task, worker, theme, 60, false, true);
+		// Count tool lines: each cmd should appear at most 20 times
+		const logLines = lines.filter((l) => l.includes("cmd-"));
+		assert(logLines.length <= 20, `raw logs should be capped at 20 lines, got ${logLines.length}`);
+	});
+
+	runner.section("TASK-05: TaskNavState with deviation fields");
+
+	await runner.test("TaskNavState accepts deviationExpanded and rawLogsExpanded", () => {
+		const state: TaskNavState = {
+			tasks: [makeTask({ id: "T-01", deviationLog: [{ timestamp: Date.now(), what: "x", why: "y", decision: "z", impact: "w" }] })],
+			workers: [],
+			meshMessages: [],
+			selectedTaskIndex: 0,
+			activeView: "tasks",
+			expandedTaskId: "T-01",
+			cost: 0,
+			costLimit: 25,
+			elapsedMs: 0,
+			deviationExpanded: true,
+			rawLogsExpanded: false,
+		};
+		const lines = renderTaskNavigator(state, theme, 80);
+		const combined = lines.join("\n");
+		assert(combined.includes("DEVIATION"), "navigator should propagate deviationExpanded to expanded panel");
+	});
+
 	runner.summary();
 }
 
