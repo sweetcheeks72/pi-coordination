@@ -869,7 +869,7 @@ See: pi-coordination README for spec format documentation.`,
 						workerId: "coordinator",
 						contextTokens: result.usage?.contextTokens,
 						timestamp: Date.now(),
-					}).catch(() => {});
+					}).catch(e => console.debug('[coord:obs]', e?.message ?? 'unknown'));
 				}
 			}
 			
@@ -964,7 +964,7 @@ See: pi-coordination README for spec format documentation.`,
 			}
 			emitProgress(state, workerStates);
 		} catch {}
-	}, 200);
+	}, 2000);
 
 	try {
 		let coordExitError = false;
@@ -988,6 +988,7 @@ See: pi-coordination README for spec format documentation.`,
 
 		const scoutContext = pipelineState.scoutContext || "";
 		let sharedContextReady = false;
+		let workerStatesAfterCoord: WorkerStateFile[] = [];
 		try {
 			await writeSharedContextFile(sharedContextPath, planContent, scoutContext);
 			sharedContextReady = true;
@@ -1028,7 +1029,7 @@ See: pi-coordination README for spec format documentation.`,
 			);
 			lastCoordResult = coordinatorResult;
 
-			const workerStatesAfterCoord = await storage.listWorkerStates();
+			workerStatesAfterCoord = await storage.listWorkerStates();
 			const workerCost = workerStatesAfterCoord.reduce((sum, w) => sum + w.usage.cost, 0);
 			costState.byPhase.coordinator = coordinatorResult.usage.cost;
 			costState.byPhase.workers = workerCost;
