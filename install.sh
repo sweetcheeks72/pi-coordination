@@ -82,7 +82,7 @@ if [ -e "$PI_AGENT_DIR/extensions/coordination" ]; then
         error "extensions/coordination exists and is not a symlink. Please remove it first."
     fi
 fi
-ln -s "$SCRIPT_DIR/extensions/coordination" "$PI_AGENT_DIR/extensions/coordination"
+ln -s "$SCRIPT_DIR" "$PI_AGENT_DIR/extensions/coordination"
 log "Linked extensions/coordination"
 
 # Update worker.md if it exists (merge coordination section)
@@ -109,6 +109,8 @@ for agent_file in "$SCRIPT_DIR/agents"/*.md; do
     target_path="$PI_AGENT_DIR/agents/coordination/$agent_name"
     if [ -L "$target_path" ]; then
         rm "$target_path"
+    elif [ -e "$target_path" ]; then
+        error "agents/coordination/$agent_name exists and is not a symlink. Please remove it manually first: rm '$target_path'"
     fi
     ln -s "$agent_file" "$target_path"
     log "Linked agents/coordination/$agent_name"
