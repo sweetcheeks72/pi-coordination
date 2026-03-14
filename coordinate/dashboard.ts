@@ -16,6 +16,7 @@ import type {
 	CostState,
 	PipelineState,
 	Task,
+	TaskStatus,
 	PipelinePhase,
 	TaskQueue,
 	PhaseResult,
@@ -167,6 +168,12 @@ export class CoordinationDashboard implements Component {
 	private escalationCountdowns = new Map<string, number>();
 	private countdownInterval: NodeJS.Timeout | null = null;
 
+	// Intervention command mode (:send :retry :skip :pause :logs)
+	private commandInputMode = false;
+	private commandInput: Input;
+	private commandStatus: string | null = null;
+	private commandStatusTimeout: NodeJS.Timeout | null = null;
+
 	private state: DashboardState | null = null;
 	private lastPollError: string | null = null;
 
@@ -197,6 +204,12 @@ export class CoordinationDashboard implements Component {
 			this.escalationInputMode = false;
 			this.tui.requestRender();
 		};
+		this.commandInput = new Input();
+		this.commandInput.onSubmit = (value) => this.handleCommandSubmit(value);
+		this.commandInput.onEscape = () => {
+			this.commandInputMode = false;
+			this.tui.requestRender();
+		};
 		this.poll();
 		this.startPolling();
 		this.startCountdownInterval();
@@ -209,7 +222,14 @@ export class CoordinationDashboard implements Component {
 	}
 
 	handleInput(data: string): void {
-		// Handle escalation input mode first
+		// Handle command input mode first (intervention commands)
+		if (this.commandInputMode) {
+			this.commandInput.handleInput(data);
+			this.tui.requestRender();
+			return;
+		}
+
+		// Handle escalation input mode
 		if (this.escalationInputMode) {
 			this.escalationInput.handleInput(data);
 			this.tui.requestRender();
@@ -335,11 +355,23 @@ export class CoordinationDashboard implements Component {
 				this.tui.requestRender();
 			}
 		} else if (data === ":" && !this.inputMode) {
-			// Enter escalation :answer mode
+			// Enter escalation :answer mode if escalation is active
 			const activeEscalation = this.getActiveEscalationForContext();
 			if (activeEscalation) {
 				this.escalationInputMode = true;
 				this.escalationInput.setValue("answer ");
+				this.tui.requestRender();
+				return;
+			}
+			// Enter intervention command mode if a task is selected
+			const selectedTask = this.state?.tasks[this.selectedTaskIndex];
+			if (selectedTask) {
+				// Expand the task if not already expanded
+				if (this.expandedTaskId !== selectedTask.id) {
+					this.expandedTaskId = selectedTask.id;
+				}
+				this.commandInputMode = true;
+				this.commandInput.setValue("");
 				this.tui.requestRender();
 				return;
 			}
@@ -384,6 +416,10 @@ export class CoordinationDashboard implements Component {
 			clearTimeout(this.escalationStatusTimeout);
 			this.escalationStatusTimeout = null;
 		}
+		if (this.commandStatusTimeout) {
+			clearTimeout(this.commandStatusTimeout);
+			this.commandStatusTimeout = null;
+		}
 		if (this.countdownInterval) {
 			clearInterval(this.countdownInterval);
 			this.countdownInterval = null;
@@ -427,6 +463,9 @@ export class CoordinationDashboard implements Component {
 			escalationStatus: this.escalationStatus,
 			deviationExpanded: this.deviationExpanded,
 			rawLogsExpanded: this.rawLogsExpanded,
+			commandInputMode: this.commandInputMode,
+			commandInput: this.commandInput,
+			commandStatus: this.commandStatus,
 		};
 
 		lines.push(...renderTaskNavigator(navState, th, width));
@@ -1291,6 +1330,170 @@ export class CoordinationDashboard implements Component {
 		}
 
 		this.answerEscalation(escalation.id, choice);
+	}
+
+	// ─── Intervention Command Handlers ────────────────────────────────────────
+
+	private showCommandStatus(status: string): void {
+		this.commandStatus = status;
+		if (this.commandStatusTimeout) clearTimeout(this.commandStatusTimeout);
+		this.commandStatusTimeout = setTimeout(() => {
+			this.commandStatus = null;
+			this.tui.requestRender();
+		}, 3000);
+		this.tui.requestRender();
+	}
+
+	private async handleCommandSubmit(value: string): Promise<void> {
+		this.commandInputMode = false;
+		const trimmed = value.trim();
+
+		if (!trimmed) {
+			this.tui.requestRender();
+			return;
+		}
+
+		const selectedTask = this.state?.tasks[this.selectedTaskIndex];
+		if (!selectedTask) {
+			this.showCommandStatus("[no task selected]");
+			return;
+		}
+
+		// Parse command
+		const spaceIdx = trimmed.indexOf(" ");
+		const cmd = spaceIdx === -1 ? trimmed.toLowerCase() : trimmed.slice(0, spaceIdx).toLowerCase();
+		const arg = spaceIdx === -1 ? "" : trimmed.slice(spaceIdx + 1).trim();
+
+		switch (cmd) {
+			case "send": {
+				if (!arg) {
+					this.showCommandStatus("[send requires a message: :send <message>]");
+					return;
+				}
+				const worker = this.state?.workers.find(w => w.id === selectedTask.claimedBy);
+				if (!worker) {
+					this.showCommandStatus("[no active worker for this task]");
+					return;
+				}
+				// Try SDK steer first
+				const steer = getSteer(worker.id);
+				if (steer) {
+					try {
+						await steer(arg);
+						this.showCommandStatus(`[sent ✓]`);
+					} catch (err) {
+						this.showCommandStatus(`[steer error: ${err instanceof Error ? err.message : "unknown"}]`);
+					}
+				} else {
+					// Fallback: write nudge file with user_message type
+					try {
+						await sendNudge(this.coordDir, worker.id, {
+							type: "user_message",
+							message: arg,
+							timestamp: Date.now(),
+						});
+						this.showCommandStatus("[message sent ✓]");
+					} catch (err) {
+						this.showCommandStatus(`[nudge error: ${err instanceof Error ? err.message : "unknown"}]`);
+					}
+				}
+				break;
+			}
+
+			case "retry": {
+				const worker = this.state?.workers.find(w => w.id === selectedTask.claimedBy);
+				if (!worker) {
+					this.showCommandStatus("[no active worker for this task]");
+					return;
+				}
+				try {
+					await sendNudge(this.coordDir, worker.id, {
+						type: "restart",
+						message: "User requested retry from dashboard",
+						timestamp: Date.now(),
+					});
+					this.showCommandStatus("[retry nudge sent ✓]");
+				} catch (err) {
+					this.showCommandStatus(`[retry error: ${err instanceof Error ? err.message : "unknown"}]`);
+				}
+				break;
+			}
+
+			case "skip": {
+				try {
+					const queuePath = path.join(this.coordDir, "tasks.json");
+					const queue = JSON.parse(fs.readFileSync(queuePath, "utf-8")) as { tasks: Task[] };
+					const taskObj = queue.tasks.find(t => t.id === selectedTask.id);
+					if (!taskObj) {
+						this.showCommandStatus("[task not found in queue]");
+						return;
+					}
+					taskObj.status = "skipped";
+					taskObj.deviationLog = [
+						...(taskObj.deviationLog ?? []),
+						{
+							timestamp: Date.now(),
+							what: `Task skipped by user intervention`,
+							why: "User executed :skip command from dashboard",
+							decision: "skip",
+							impact: "Dependents unblocked if deps satisfied",
+						},
+					];
+					// Unblock dependents: if a task depends on this one and all its deps are now satisfied
+					const completedOrSkipped = new Set(
+						queue.tasks
+							.filter(t => t.status === "complete" || t.status === "skipped")
+							.map(t => t.id),
+					);
+					completedOrSkipped.add(selectedTask.id);
+					for (const t of queue.tasks) {
+						if (t.status !== "blocked") continue;
+						const deps = t.dependsOn ?? [];
+						if (deps.every(dep => completedOrSkipped.has(dep))) {
+							t.status = "pending";
+						}
+					}
+					fs.writeFileSync(queuePath, JSON.stringify(queue, null, 2));
+					this.showCommandStatus(`[${selectedTask.id} skipped ✓]`);
+				} catch (err) {
+					this.showCommandStatus(`[skip error: ${err instanceof Error ? err.message : "unknown"}]`);
+				}
+				break;
+			}
+
+			case "pause": {
+				const worker = this.state?.workers.find(w => w.id === selectedTask.claimedBy);
+				if (!worker) {
+					this.showCommandStatus("[no active worker for this task]");
+					return;
+				}
+				try {
+					await sendNudge(this.coordDir, worker.id, {
+						type: "wrap_up",
+						message: "User requested pause from dashboard",
+						timestamp: Date.now(),
+					});
+					this.showCommandStatus("[pause nudge sent ✓]");
+				} catch (err) {
+					this.showCommandStatus(`[pause error: ${err instanceof Error ? err.message : "unknown"}]`);
+				}
+				break;
+			}
+
+			case "logs": {
+				this.rawLogsExpanded = !this.rawLogsExpanded;
+				if (this.rawLogsExpanded) {
+					this.deviationExpanded = true;
+				}
+				this.showCommandStatus(this.rawLogsExpanded ? "[logs expanded]" : "[logs collapsed]");
+				break;
+			}
+
+			default: {
+				this.showCommandStatus(`[unknown command: ${cmd} — use :send :retry :skip :pause :logs]`);
+				break;
+			}
+		}
 	}
 
 	private startCountdownInterval(): void {

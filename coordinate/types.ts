@@ -286,6 +286,7 @@ export type TaskStatus =
 	| "complete"
 	| "failed"
 	| "rejected"
+	| "skipped"
 	| "discovered"; // Runtime discovered task
 
 export type TaskPriority = "P0" | "P1" | "P2" | "P3";
@@ -361,7 +362,7 @@ export type A2APayload =
 	| { type: "status_update"; taskId: string; progress: number; eta?: number }
 	| { type: "completion_notice"; taskId: string; filesModified: string[] };
 
-export type NudgeType = "wrap_up" | "restart" | "abort";
+export type NudgeType = "wrap_up" | "restart" | "abort" | "user_message";
 
 export interface NudgePayload {
 	type: NudgeType;

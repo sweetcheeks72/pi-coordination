@@ -727,6 +727,12 @@ export interface TaskNavState {
 	deviationExpanded?: boolean;
 	/** Whether raw logs are expanded inside the deviation accordion */
 	rawLogsExpanded?: boolean;
+	/** Whether the user is typing an intervention command (:send :retry :skip :pause :logs) */
+	commandInputMode?: boolean;
+	/** The Input component for command entry */
+	commandInput?: Input;
+	/** Status message after executing a command */
+	commandStatus?: string | null;
 }
 
 /**
@@ -906,6 +912,9 @@ export function renderExpandedTask(
 	escalationInputMode?: boolean,
 	escalationInput?: Input | null,
 	escalationStatus?: string | null,
+	commandInputMode?: boolean,
+	commandInput?: Input | null,
+	commandStatus?: string | null,
 ): string[] {
 	const lines: string[] = [];
 	// Inner width = width - 4 (│ content │, each side has "│ " = 2 chars)
@@ -1113,7 +1122,18 @@ export function renderExpandedTask(
 
 	// INTERVENE commands
 	addDivider();
-	lines.push(boxLine(theme.fg("dim", ":send :retry :skip :pause :logs")));
+	if (commandInputMode && commandInput) {
+		// Show command input field
+		const inputLines = commandInput.render(innerW - 4);
+		for (const line of inputLines) {
+			lines.push(boxLine(`  ${line}`));
+		}
+	} else if (commandStatus) {
+		lines.push(boxLine(`  ${theme.fg("success", commandStatus)}`));
+		lines.push(boxLine(theme.fg("dim", "  :send <msg>  :retry  :skip  :pause  :logs")));
+	} else {
+		lines.push(boxLine(theme.fg("dim", "  : to intervene  — :send :retry :skip :pause :logs")));
+	}
 
 	lines.push(theme.fg("dim", "└" + "─".repeat(width - 2) + "┘"));
 
@@ -1211,6 +1231,7 @@ export function renderTaskNavigator(
 				state.deviationExpanded, state.rawLogsExpanded,
 				escalation, countdown,
 				state.escalationInputMode, state.escalationInput, state.escalationStatus,
+				state.commandInputMode, state.commandInput, state.commandStatus,
 			));
 		} else {
 			lines.push(sep);
@@ -1240,6 +1261,9 @@ export function renderTaskNavigator(
 				isSelected ? state.escalationInputMode : undefined,
 				isSelected ? state.escalationInput : undefined,
 				isSelected ? state.escalationStatus : undefined,
+				isSelected ? state.commandInputMode : undefined,
+				isSelected ? state.commandInput : undefined,
+				isSelected ? state.commandStatus : undefined,
 			));
 		}
 	}
