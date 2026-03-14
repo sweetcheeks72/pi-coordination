@@ -775,6 +775,26 @@ ${planContent ? `## Full Plan\n\`\`\`markdown\n${planContent}\n\`\`\`` : ""}
 							},
 						});
 					}
+
+					// Worker output enforcement: auto-capture output if worker didn't write expected file
+					{
+						const outputsDir = path.join(coordDir, "outputs");
+						try { fsSync.mkdirSync(outputsDir, { recursive: true }); } catch {}
+						const outputPath = path.join(outputsDir, `${handle.workerId}.md`);
+						if (!fsSync.existsSync(outputPath)) {
+							try {
+								const fallbackContent = workerState?.lastOutput
+									? `# Worker Output (auto-captured)\n\nWorker: ${handle.identity}\nStatus: ${workerState?.status ?? "unknown"}\n\n## Last Output\n\n${workerState.lastOutput}`
+									: `# Worker Output (auto-captured)\n\nWorker: ${handle.identity}\nStatus: ${workerState?.status ?? "unknown"}\n\n(No output captured)`;
+								fsSync.writeFileSync(outputPath, fallbackContent, { encoding: "utf-8" });
+								await storage.appendEvent({
+									type: "coordinator",
+									message: `[WARNING] Worker ${handle.identity} did not write output file; auto-captured fallback`,
+									timestamp: Date.now(),
+								});
+							} catch {}
+						}
+					}
 				}
 
 				const workerStates = await storage.listWorkerStates();
