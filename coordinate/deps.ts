@@ -392,29 +392,25 @@ export function detectCycles(graph: DependencyGraph): string[][] {
 		}
 	}
 
-	const dfs = (node: string, path: string[]): boolean => {
+	const dfs = (node: string, path: string[]): void => {
 		visited.add(node);
 		recStack.add(node);
 
 		for (const neighbor of adj.get(node) || []) {
 			if (!visited.has(neighbor)) {
-				if (dfs(neighbor, [...path, neighbor])) {
-					return true;
-				}
+				dfs(neighbor, [...path, neighbor]);
 			} else if (recStack.has(neighbor)) {
-				// Found cycle
+				// Found cycle — collect it and continue (do NOT return early)
 				const cycleStart = path.indexOf(neighbor);
 				if (cycleStart >= 0) {
 					cycles.push(path.slice(cycleStart));
 				} else {
 					cycles.push([...path, neighbor]);
 				}
-				return true;
 			}
 		}
 
 		recStack.delete(node);
-		return false;
 	};
 
 	// Get all nodes

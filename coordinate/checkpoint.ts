@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 import * as fs from "node:fs/promises";
 import * as path from "node:path";
 import type { PipelinePhase, PipelineState, Checkpoint, CostState, ReviewIssue } from "./types.js";
@@ -24,6 +25,17 @@ export class CheckpointManager {
 		const coordState = await storage.getState();
 		const workerStates = await storage.listWorkerStates();
 
+		// Hash the spec file content for change detection on resume
+		let specHash: string | undefined;
+		if (coordState.planPath) {
+			try {
+				const specContent = await fs.readFile(coordState.planPath, "utf-8");
+				specHash = createHash("sha256").update(specContent).digest("hex");
+			} catch {
+				// spec file may not be accessible; skip hash
+			}
+		}
+
 		const checkpoint: Checkpoint = {
 			sessionId: pipelineState.sessionId,
 			phase,
@@ -38,14 +50,32 @@ export class CheckpointManager {
 		const checkpointId = `${phase}-${Date.now()}`;
 		const checkpointPath = path.join(this.coordDir, "checkpoints", `${checkpointId}.json`);
 		await fs.mkdir(path.dirname(checkpointPath), { recursive: true });
-		await fs.writeFile(checkpointPath, JSON.stringify(checkpoint, null, 2));
+		await fs.writeFile(checkpointPath, JSON.stringify(specHash ? { ...checkpoint, specHash } : checkpoint, null, 2));
 
 		return checkpointId;
 	}
 
 	async loadCheckpoint(checkpointId: string): Promise<Checkpoint> {
 		const checkpointPath = path.join(this.coordDir, "checkpoints", `${checkpointId}.json`);
-		return JSON.parse(await fs.readFile(checkpointPath, "utf-8"));
+		const data = JSON.parse(await fs.readFile(checkpointPath, "utf-8")) as Checkpoint & { specHash?: string };
+
+		// Verify spec hash if present — log warning on mismatch but allow resume
+		if (data.specHash && data.coordinationState?.planPath) {
+			try {
+				const currentContent = await fs.readFile(data.coordinationState.planPath, "utf-8");
+				const currentHash = createHash("sha256").update(currentContent).digest("hex");
+				if (currentHash !== data.specHash) {
+					console.warn(
+						`[checkpoint] Spec file hash mismatch for checkpoint ${checkpointId}. ` +
+						`The spec may have changed since this checkpoint was saved. Resuming anyway.`
+					);
+				}
+			} catch {
+				// Spec file not readable — skip verification
+			}
+		}
+
+		return data;
 	}
 
 	async listCheckpoints(): Promise<{ id: string; phase: PipelinePhase; timestamp: number }[]> {
