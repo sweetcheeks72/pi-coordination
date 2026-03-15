@@ -93,3 +93,108 @@ export async function requestApproval(opts: HitlGateOptions): Promise<boolean> {
 	);
 	return false;
 }
+
+// ── Compatibility layer for coordinate/index.ts ─────────────────
+// coordinate/index.ts imports checkGate + HITLMode from the old API.
+// This wrapper adapts the old call signature to the new requestApproval API.
+
+export type HITLMode = "strict" | "permissive" | "off";
+
+/**
+ * Compatibility wrapper for the old checkGate API.
+ * Called by coordinate/index.ts to gate high-stakes tasks.
+ *
+ * In 'off' mode: never holds.
+ * In 'permissive' mode: only holds critical-pattern tasks (delete/drop/migrate/deploy/security).
+ * In 'strict' mode: holds all tasks for approval.
+ */
+export async function checkGate(
+  taskId: string,
+  _role: string,
+  description: string,
+  coordDir: string,
+  hitlMode: HITLMode,
+): Promise<{ held: boolean }> {
+  if (hitlMode === "off") {
+    return { held: false };
+  }
+
+  // In permissive mode, only gate tasks with critical patterns
+  if (hitlMode === "permissive") {
+    const isCritical = /\b(delete|drop|migrate|deploy|security|production|database|auth)\b/i.test(description);
+    if (!isCritical) {
+      return { held: false };
+    }
+  }
+
+  // In strict mode (or permissive + critical task), request approval
+  const approved = await requestApproval({
+    coordDir,
+    taskId,
+    summary: description,
+    hitl: "on",
+    timeoutMs: 30_000,
+  });
+
+  return { held: !approved };
+}
+
+// ── Recap compatibility ──────────────────────────────────────────
+
+export interface HITLSummary {
+  gatesTriggered: number;
+  approved: number;
+  rejected: number;
+  pending: number;
+}
+
+/**
+ * Summarize HITL gate activity for recap generation.
+ * Scans the hitl/ directory for request and response files.
+ */
+export async function getHITLSummary(coordDir: string, _mode: HITLMode): Promise<HITLSummary> {
+  const hitlDir = path.join(coordDir, "hitl");
+  const summary: HITLSummary = {
+    gatesTriggered: 0,
+    approved: 0,
+    rejected: 0,
+    pending: 0,
+  };
+
+  try {
+    const files = await fs.readdir(hitlDir);
+    const requests = files.filter(f => f.endsWith("-approval-request.json"));
+    summary.gatesTriggered = requests.length;
+
+    for (const reqFile of requests) {
+      const taskId = reqFile.replace("-approval-request.json", "");
+      const respFile = `${taskId}-approval-response.json`;
+
+      if (files.includes(respFile)) {
+        const respData = await fs.readFile(path.join(hitlDir, respFile), "utf-8");
+        let resp: ApprovalResponse;
+        try {
+          resp = JSON.parse(respData) as ApprovalResponse;
+        } catch {
+          // Malformed response file — count separately or as pending
+          summary.pending++;
+          continue;
+        }
+        if (resp.approved === true) {
+          summary.approved++;
+        } else if (resp.approved === false) {
+          summary.rejected++;
+        } else {
+          // approved field missing or not a boolean
+          summary.pending++;
+        }
+      } else {
+        summary.pending++;
+      }
+    }
+  } catch {
+    // hitl directory doesn't exist — no gates triggered
+  }
+
+  return summary;
+}

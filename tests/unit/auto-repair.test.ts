@@ -1,350 +1,183 @@
 #!/usr/bin/env npx jiti
 /**
- * Unit tests for the compiler feedback loop (auto-repair).
+ * Unit tests for coordinate/auto-repair.ts
  *
- * Tests cover:
- *   1. runAutoRepair — skip when no TS files and no tsconfig/package.json
- *   2. runAutoRepair — returns success on first pass (no repair needed)
- *   3. runAutoRepair — calls spawnRepairWorker on failure, returns success after repair
- *   4. runAutoRepair — exhausts maxRetries, returns failure with finalError
- *   5. runAutoRepair — merges filesModified from repair worker output
- *   6. WorkerDisplayState — repairState field propagated by workerStateToDisplay
- *   7. renderWorkersCompact — shows "⟳" icon and "auto-repair N/M" label
+ * Tests:
+ *   1. detectTestFailures — returns empty for all-passing test output
+ *   2. detectTestFailures — detects Jest FAIL line as definitive
+ *   3. detectTestFailures — detects "Tests: N failed" with correct failureCount
+ *   4. detectTestFailures — detects Mocha "N failing" style
+ *   5. detectTestFailures — detects tap "not ok N" as definitive
+ *   6. detectTestFailures — ignores prose (false positive guard)
+ *   7. shouldAutoRepair — returns true for definitive failure output
+ *   8. shouldAutoRepair — returns true for counted failures only
+ *   9. shouldAutoRepair — returns false for all-passing output
+ *  10. shouldAutoRepair — returns false for empty string
+ *  11. TEST_RESULT_REGEX — matches known Jest/Vitest summary patterns
+ *  12. TEST_RESULT_REGEX — matches Mocha passing/failing patterns
+ *  13. TEST_RESULT_REGEX — matches tap "not ok N" pattern
  *
- * Run with: npx jiti tests/unit/auto-repair.test.ts
- *
- * @module
+ * Run: npx jiti tests/unit/auto-repair.test.ts
  */
 
-import * as fs from "node:fs/promises";
-import * as fsSync from "node:fs";
-import * as path from "node:path";
-import * as os from "node:os";
-import { fileURLToPath } from "node:url";
-
+import { TestRunner, assertEqual, assert, assertExists } from "../test-utils.js";
 import {
-	TestRunner,
-	assertEqual,
-	assert,
-	assertExists,
-} from "../test-utils.js";
-
-import { runAutoRepair, type RepairContext } from "../../coordinate/auto-repair.js";
-import { workerStateToDisplay, renderWorkersCompact } from "../../coordinate/render-utils.js";
-import type { WorkerStateFile } from "../../coordinate/types.js";
-import type { Theme } from "@mariozechner/pi-coding-agent";
+	detectTestFailures,
+	shouldAutoRepair,
+	TEST_RESULT_REGEX,
+	type RepairCandidate,
+} from "../../coordinate/auto-repair.js";
 
 // ─────────────────────────────────────────────────────────────────────────────
-// Helpers
+// Main
 // ─────────────────────────────────────────────────────────────────────────────
 
-async function makeTempDir(): Promise<string> {
-	return fs.mkdtemp(path.join(os.tmpdir(), "auto-repair-test-"));
-}
+async function main() {
+	const runner = new TestRunner();
 
-/** Create a minimal tsconfig.json in a directory to trigger TS verification */
-async function writeTsConfig(dir: string): Promise<void> {
-	await fs.writeFile(
-		path.join(dir, "tsconfig.json"),
-		JSON.stringify({
-			compilerOptions: { strict: false, noEmit: true },
-			include: ["**/*.ts"],
-		}),
-		"utf-8",
-	);
-}
+	// ── detectTestFailures ────────────────────────────────────────────────────
+	runner.section("detectTestFailures");
 
-/** Create a project that passes verification: package.json with a no-op test script */
-async function writePassingProject(dir: string): Promise<void> {
-	await fs.writeFile(
-		path.join(dir, "package.json"),
-		JSON.stringify({ name: "test-project", scripts: { test: "exit 0" } }),
-		"utf-8",
-	);
-}
+	// Test 1 — clean passing output produces no candidates
+	await runner.test("returns empty array for all-passing test output", () => {
+		const output = [
+			"PASS src/auth.test.ts",
+			"PASS src/utils.test.ts",
+			"Tests: 12 passed, 12 total",
+			"Test Suites: 2 passed, 2 total",
+		].join("\n");
 
-/**
- * Patch the runVerification function indirectly by providing a project directory
- * with no tsconfig/package.json (so verification is skipped).
- */
-function makeNullCtx(overrides: Partial<RepairContext> = {}): RepairContext {
-	return {
-		taskId: "TASK-01",
-		workerOutput: "some output",
-		originalHandshakeSpec: "Do the thing",
-		filesModified: [],
-		coordDir: "/tmp/coord",
-		cwd: "/tmp/no-project-here-xyz", // No tsconfig/package.json
-		maxRetries: 3,
-		spawnRepairWorker: async () => ({ exitCode: 0, filesModified: [] }),
-		...overrides,
-	};
-}
-
-/** Minimal theme for render tests */
-const theme: Theme = {
-	fg: (_color: string, text: string) => text,
-	bg: (_color: string, text: string) => text,
-};
-
-/** Build a minimal WorkerStateFile for testing */
-function makeWorkerState(overrides: Partial<WorkerStateFile> = {}): WorkerStateFile {
-	return {
-		id: "abc123",
-		shortId: "abc1",
-		identity: "worker:TASK-01-abc1",
-		agent: "worker",
-		status: "complete",
-		currentFile: null,
-		currentTool: null,
-		waitingFor: null,
-		assignedSteps: [1],
-		completedSteps: [1],
-		currentStep: null,
-		handshakeSpec: "Create src/index.ts",
-		startedAt: Date.now() - 5000,
-		completedAt: Date.now(),
-		usage: { input: 100, output: 200, cost: 0.01, turns: 5 },
-		filesModified: ["src/index.ts"],
-		blockers: [],
-		errorType: null,
-		errorMessage: null,
-		...overrides,
-	};
-}
-
-// ─────────────────────────────────────────────────────────────────────────────
-// Tests
-// ─────────────────────────────────────────────────────────────────────────────
-
-const runner = new TestRunner();
-
-runner.section("runAutoRepair — skip conditions");
-
-runner.test("returns success with 0 attempts when no TS files and no tsconfig/package.json", async () => {
-	const ctx = makeNullCtx({
-		filesModified: [], // no TS files
-		// cwd has no tsconfig/package.json by default in makeNullCtx
+		const candidates = detectTestFailures(output);
+		assertEqual(candidates.length, 0, `Expected 0 candidates, got ${candidates.length}`);
 	});
 
-	const result = await runAutoRepair(ctx);
+	// Test 2 — Jest FAIL line is definitive
+	await runner.test("detects Jest FAIL line as definitive", () => {
+		const output = "FAIL src/auth.test.ts\n  ● Auth › should reject invalid tokens";
 
-	assertEqual(result.success, true, "should succeed");
-	assertEqual(result.attempts, 0, "should use 0 attempts (skipped entirely)");
-	assert(result.finalError === undefined, "should have no finalError");
-});
+		const candidates = detectTestFailures(output);
+		assert(candidates.length >= 1, `Expected ≥1 candidate, got ${candidates.length}`);
 
-runner.test("returns success with 0 attempts when TS files exist but no tsconfig/package.json", async () => {
-	const ctx = makeNullCtx({
-		filesModified: ["src/auth.ts"], // TS file present
-		// cwd still has no tsconfig/package.json → skip verification entirely
+		const fail = candidates.find((c) => c.rawOutput.startsWith("FAIL"));
+		assertExists(fail, "Expected a FAIL candidate");
+		assertEqual(fail!.definitive, true, "FAIL line must be definitive");
 	});
 
-	const result = await runAutoRepair(ctx);
+	// Test 3 — "Tests: N failed" summary line
+	await runner.test("detects 'Tests: 3 failed' summary with correct failureCount", () => {
+		const output = "Tests: 3 failed, 9 passed, 12 total\nTest Suites: 1 failed, 1 total";
 
-	assertEqual(result.success, true, "should succeed");
-	assertEqual(result.attempts, 0, "no verification — no tsconfig/package.json in cwd");
-});
+		const candidates = detectTestFailures(output);
+		assert(candidates.length >= 1, `Expected ≥1 candidate, got ${candidates.length}`);
 
-runner.section("runAutoRepair — success path (no repair needed)");
-
-runner.test("returns success on first pass with no spawnRepairWorker calls", async () => {
-	const cwd = await makeTempDir();
-	try {
-		await writePassingProject(cwd); // tsconfig.json exists but no errors
-
-		let spawnCalled = 0;
-		const ctx = makeNullCtx({
-			cwd,
-			filesModified: ["src/index.ts"],
-			spawnRepairWorker: async () => {
-				spawnCalled++;
-				return { exitCode: 0, filesModified: [] };
-			},
-		});
-
-		const result = await runAutoRepair(ctx);
-
-		assertEqual(result.success, true, "should succeed");
-		assertEqual(spawnCalled, 0, "repair worker should NOT be spawned when verification passes");
-	} finally {
-		await fs.rm(cwd, { recursive: true, force: true });
-	}
-});
-
-runner.section("runAutoRepair — repair loop");
-
-runner.test("calls spawnRepairWorker once and returns success when repair fixes errors", async () => {
-	// Use a mock verifier that fails on first call, passes on second call.
-	// Need a cwd with a package.json so the early-return guard is bypassed.
-	const cwd = await makeTempDir();
-	try {
-		await writePassingProject(cwd); // creates package.json
-
-		let verifyCallCount = 0;
-		let spawnCalled = 0;
-		const ctx = makeNullCtx({
-			cwd,
-			filesModified: ["src/auth.ts"],
-			verify: async () => {
-				verifyCallCount++;
-				if (verifyCallCount === 1) {
-					return { passed: false, output: "error TS2322: Type 'string' is not assignable to type 'number'." };
-				}
-				return { passed: true, output: "" };
-			},
-			spawnRepairWorker: async (_prompt: string) => {
-				spawnCalled++;
-				return { exitCode: 0, filesModified: ["src/auth.ts"] };
-			},
-		});
-
-		const result = await runAutoRepair(ctx);
-
-		assertEqual(result.success, true, "should succeed after repair");
-		assertEqual(spawnCalled, 1, "repair worker should be called exactly once");
-		assertEqual(verifyCallCount, 2, "verify called once for initial check, once after repair");
-		assert(result.attempts >= 1, "should report at least 1 attempt");
-	} finally {
-		await fs.rm(cwd, { recursive: true, force: true });
-	}
-});
-
-runner.test("exhausts maxRetries and returns failure with finalError", async () => {
-	const cwd = await makeTempDir();
-	try {
-		// Persistent error that repair worker never fixes
-		await writeTsConfig(cwd);
-		await fs.writeFile(path.join(cwd, "bad.ts"), 'const x: number = "still broken";\n', "utf-8");
-
-		let spawnCalled = 0;
-		const ctx = makeNullCtx({
-			cwd,
-			filesModified: ["bad.ts"],
-			maxRetries: 3,
-			spawnRepairWorker: async () => {
-				spawnCalled++;
-				// Repair does nothing — error persists
-				return { exitCode: 0, filesModified: [] };
-			},
-		});
-
-		const result = await runAutoRepair(ctx);
-
-		assertEqual(result.success, false, "should fail after exhausting retries");
-		assertEqual(result.attempts, 3, "should report 3 attempts");
-		assert(typeof result.finalError === "string" && result.finalError.length > 0, "should have finalError");
-		// spawnRepairWorker called twice (on attempt 1 and 2, not on last attempt 3)
-		assertEqual(spawnCalled, 2, "spawnRepairWorker called for attempts 1 and 2 only");
-	} finally {
-		await fs.rm(cwd, { recursive: true, force: true });
-	}
-});
-
-runner.test("merges filesModified from repair worker into context", async () => {
-	const cwd = await makeTempDir();
-	try {
-		await writeTsConfig(cwd);
-		await fs.writeFile(path.join(cwd, "bad.ts"), 'const x: number = "broken";\n', "utf-8");
-
-		const ctx = makeNullCtx({
-			cwd,
-			filesModified: ["bad.ts"],
-			maxRetries: 2,
-			spawnRepairWorker: async () => {
-				// Repair touches an additional file
-				await fs.writeFile(path.join(cwd, "bad.ts"), "const x: number = 1;\n", "utf-8");
-				return { exitCode: 0, filesModified: ["bad.ts", "src/extra.ts"] };
-			},
-		});
-
-		await runAutoRepair(ctx);
-
-		assert(ctx.filesModified.includes("src/extra.ts"), "extra.ts should be merged into filesModified");
-	} finally {
-		await fs.rm(cwd, { recursive: true, force: true });
-	}
-});
-
-runner.section("WorkerDisplayState — repairState propagation");
-
-runner.test("workerStateToDisplay propagates repairState when present", () => {
-	const w = makeWorkerState({
-		repairState: { status: "running", attempt: 2, maxAttempts: 3 },
+		const threeFailed = candidates.find((c) => c.failureCount === 3);
+		assertExists(threeFailed, `Expected candidate with failureCount=3, got: ${JSON.stringify(candidates)}`);
 	});
 
-	const display = workerStateToDisplay(w);
+	// Test 4 — Mocha "N failing" style (no leading spaces, no runner prefix)
+	await runner.test("detects Mocha '3 failing' output with correct failureCount", () => {
+		// Mocha summary lines without leading spaces so the anchored regex matches
+		const output = "12 passing (1s)\n3 failing\n\n1) Auth should reject:";
 
-	assertExists(display.repairState, "repairState should be present");
-	assertEqual(display.repairState!.status, "running", "status should match");
-	assertEqual(display.repairState!.attempt, 2, "attempt should match");
-	assertEqual(display.repairState!.maxAttempts, 3, "maxAttempts should match");
+		const candidates = detectTestFailures(output);
+		assert(candidates.length >= 1, `Expected ≥1 Mocha candidate, got ${candidates.length}`);
+
+		const failing = candidates.find((c) => c.failureCount === 3);
+		assertExists(failing, `Expected candidate with failureCount=3, got: ${JSON.stringify(candidates)}`);
+	});
+
+	// Test 5 — tap "not ok N" is definitive
+	await runner.test("detects tap 'not ok N' as definitive", () => {
+		const output = "ok 1 - first test\nnot ok 2 - second test failed\nok 3 - third test";
+
+		const candidates = detectTestFailures(output);
+		assert(candidates.length >= 1, `Expected ≥1 tap candidate, got ${candidates.length}`);
+
+		const notOk = candidates.find((c) => /^not\s+ok\b/i.test(c.rawOutput));
+		assertExists(notOk, "Expected a 'not ok' candidate");
+		assertEqual(notOk!.definitive, true, "not ok must be definitive");
+		assert(notOk!.failureCount >= 1, `failureCount should be ≥1, got ${notOk!.failureCount}`);
+	});
+
+	// Test 6 — prose false-positive guard
+	await runner.test("does not flag prose that mentions 'failing' without a runner prefix", () => {
+		const prose = [
+			"I found that the failing tests in the auth module need attention.",
+			"The worker failed to connect but that is expected behavior.",
+			"Note: some tests might fail if the DB is unreachable.",
+			"The 3 failing scenarios are documented in the README.",
+		].join("\n");
+
+		const candidates = detectTestFailures(prose);
+		assertEqual(
+			candidates.length,
+			0,
+			`Prose should produce 0 candidates, got ${candidates.length}: ${JSON.stringify(candidates)}`,
+		);
+	});
+
+	// ── shouldAutoRepair ──────────────────────────────────────────────────────
+	runner.section("shouldAutoRepair");
+
+	// Test 7 — definitive FAIL triggers repair
+	await runner.test("returns true for output containing a definitive FAIL line", () => {
+		const output = "FAIL src/auth.test.ts\nTests: 2 failed, 8 passed";
+		assertEqual(shouldAutoRepair(output), true, "Should return true for FAIL output");
+	});
+
+	// Test 8 — counted failures (non-definitive) also trigger repair
+	await runner.test("returns true for output with a failure count (no FAIL prefix)", () => {
+		const output = "Tests: 1 failed, 5 passed, 6 total";
+		assertEqual(shouldAutoRepair(output), true, "Should return true when failureCount > 0");
+	});
+
+	// Test 9 — all-passing output
+	await runner.test("returns false for all-passing test output", () => {
+		const output = "Tests: 12 passed, 12 total\nTest Suites: 3 passed, 3 total";
+		assertEqual(shouldAutoRepair(output), false, "Should return false for passing output");
+	});
+
+	// Test 10 — empty string
+	await runner.test("returns false for empty string", () => {
+		assertEqual(shouldAutoRepair(""), false, "Should return false for empty output");
+	});
+
+	// ── TEST_RESULT_REGEX ────────────────────────────────────────────────────
+	runner.section("TEST_RESULT_REGEX");
+
+	// Test 11 — Jest/Vitest patterns
+	await runner.test("matches known Jest/Vitest summary patterns", () => {
+		const patterns = [
+			"PASS src/foo.test.ts",
+			"FAIL src/bar.test.ts",
+			"Tests: 3 failed, 12 passed",
+			"Test Suites: 1 failed, 1 total",
+			"Suites: 2 passed, 2 total",
+		];
+		for (const p of patterns) {
+			assert(TEST_RESULT_REGEX.test(p), `Expected TEST_RESULT_REGEX to match: "${p}"`);
+		}
+	});
+
+	// Test 12 — Mocha patterns
+	await runner.test("matches Mocha passing/failing summary patterns", () => {
+		const patterns = ["12 passing (1s)", "3 failing"];
+		for (const p of patterns) {
+			assert(TEST_RESULT_REGEX.test(p), `Expected TEST_RESULT_REGEX to match: "${p}"`);
+		}
+	});
+
+	// Test 13 — tap pattern
+	await runner.test("matches tap 'not ok N' pattern", () => {
+		assert(TEST_RESULT_REGEX.test("not ok 1 - test failed"), "Should match 'not ok N'");
+	});
+
+	// ─────────────────────────────────────────────────────────────────────────
+	const { failed } = runner.summary();
+	if (failed > 0) process.exit(1);
+}
+
+main().catch((err) => {
+	console.error("Unexpected error:", err);
+	process.exit(1);
 });
-
-runner.test("workerStateToDisplay repairState is undefined when not set", () => {
-	const w = makeWorkerState(); // no repairState
-	const display = workerStateToDisplay(w);
-	assert(display.repairState === undefined, "repairState should be undefined when absent");
-});
-
-runner.section("renderWorkersCompact — repair status display");
-
-runner.test("shows ⟳ icon and auto-repair label for a worker with running repairState", () => {
-	const workers = [
-		{
-			id: "abc1",
-			shortId: "abc1",
-			name: "swift_fox",
-			status: "complete" as const, // status is complete but repair is running
-			taskId: "TASK-02",
-			taskTitle: "Fix auth middleware",
-			tokens: undefined,
-			contextPct: undefined,
-			cost: 0.09,
-			durationMs: 8 * 60 * 1000, // 8 minutes
-			currentFile: null,
-			currentTool: null,
-			lastOutput: undefined,
-			repairState: { status: "running" as const, attempt: 2, maxAttempts: 3 },
-		},
-	];
-
-	const lines = renderWorkersCompact(workers, theme, 80);
-	const allText = lines.join("\n");
-
-	// The worker row should contain the repair icon and label
-	assert(allText.includes("⟳"), `Expected ⟳ in output, got: ${allText}`);
-	assert(allText.includes("auto-repair 2/3"), `Expected 'auto-repair 2/3', got: ${allText}`);
-	assert(allText.includes("swift_fox"), `Expected worker name, got: ${allText}`);
-});
-
-runner.test("does not show ⟳ for worker without repairState", () => {
-	const workers = [
-		{
-			id: "def2",
-			shortId: "def2",
-			name: "calm_hawk",
-			status: "working" as const,
-			taskId: "TASK-03",
-			taskTitle: "Scout codebase",
-			tokens: undefined,
-			contextPct: undefined,
-			cost: 0.04,
-			durationMs: 4 * 60 * 1000,
-			currentFile: null,
-			currentTool: null,
-			lastOutput: undefined,
-			repairState: undefined,
-		},
-	];
-
-	const lines = renderWorkersCompact(workers, theme, 80);
-	const allText = lines.join("\n");
-
-	assert(!allText.includes("⟳"), `Should not contain ⟳, got: ${allText}`);
-	assert(!allText.includes("auto-repair"), `Should not contain 'auto-repair', got: ${allText}`);
-});
-
-// ─────────────────────────────────────────────────────────────────────────────
-
-runner.summary();

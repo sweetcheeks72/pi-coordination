@@ -2,16 +2,15 @@
 /**
  * Unit tests for coordinate/worktree-manager.ts
  *
- * Tests use the project's standard TestRunner (not vitest) and run via:
- *   npx jiti tests/unit/worktree-manager.test.ts
+ * Tests:
+ *   1. listWorktrees — returns empty array for non-git directory
+ *   2. listWorktrees — returns at least the main repo path for a valid git repo
+ *   3. createWorktree — returns handle with correct worktreePath and branch
+ *   4. createWorktree — worktree directory exists on disk after creation
+ *   5. createWorktree — new worktree appears in listWorktrees
+ *   6. cleanup() — removes worktree and it no longer appears in listWorktrees
  *
- * Six tests:
- *   1. shouldUseWorktrees returns false for single worker
- *   2. shouldUseWorktrees returns false for non-git directory
- *   3. shouldUseWorktrees returns true for valid non-bare git repo
- *   4. allocateWorktree generates correct path and branch name
- *   5. mergeWorktreeBranch success path returns { success: true }
- *   6. mergeWorktreeBranch conflict path returns { success: false, conflicts }
+ * Run: npx jiti tests/unit/worktree-manager.test.ts
  */
 
 import * as fs from "node:fs/promises";
@@ -20,26 +19,34 @@ import * as path from "node:path";
 import * as os from "node:os";
 import { execSync } from "node:child_process";
 
-import { TestRunner, assert, assertEqual } from "../test-utils.js";
+import { TestRunner, assert, assertEqual, assertExists } from "../test-utils.js";
+import { createWorktree, listWorktrees } from "../../coordinate/worktree-manager.js";
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Helpers
 // ─────────────────────────────────────────────────────────────────────────────
 
-/** Create a real temporary git repo for integration-style tests */
-async function makeTempGitRepo(): Promise<string> {
-	const dir = await fs.mkdtemp(path.join(os.tmpdir(), "pi-wt-test-"));
+/** Canonical temp dir (resolves macOS /var → /private/var symlink). */
+async function realTmpDir(): Promise<string> {
+	return fs.realpath(os.tmpdir());
+}
+
+/** Create a real temporary git repo with an initial commit. Returns dir and active branch name. */
+async function makeTempGitRepo(): Promise<{ dir: string; mainBranch: string }> {
+	const dir = await fs.mkdtemp(path.join(await realTmpDir(), "pi-wt-test-"));
 	execSync("git init", { cwd: dir, stdio: "pipe" });
 	execSync('git config user.email "test@example.com"', { cwd: dir, stdio: "pipe" });
 	execSync('git config user.name "Test"', { cwd: dir, stdio: "pipe" });
-	// Create an initial commit so we have a branch to work on
 	await fs.writeFile(path.join(dir, "README.md"), "test repo");
 	execSync("git add .", { cwd: dir, stdio: "pipe" });
 	execSync('git commit -m "init"', { cwd: dir, stdio: "pipe" });
-	return dir;
+	const mainBranch = execSync("git rev-parse --abbrev-ref HEAD", { cwd: dir, stdio: "pipe" })
+		.toString()
+		.trim();
+	return { dir, mainBranch };
 }
 
-async function cleanup(dir: string): Promise<void> {
+async function cleanupRepo(dir: string): Promise<void> {
 	try {
 		try {
 			execSync("git worktree prune", { cwd: dir, stdio: "pipe" });
@@ -55,152 +62,158 @@ async function cleanup(dir: string): Promise<void> {
 async function main() {
 	const runner = new TestRunner();
 
-	const {
-		shouldUseWorktrees,
-		allocateWorktree,
-		releaseWorktree,
-		mergeWorktreeBranch,
-		cleanupAllWorktrees,
-	} = await import("../../coordinate/worktree-manager.ts");
+	// ── TEST 1: listWorktrees — non-git directory ────────────────────────────
+	runner.section("listWorktrees");
 
-	// ── TEST 1: shouldUseWorktrees — single worker ────────────────────────────
-	runner.section("shouldUseWorktrees");
-
-	await runner.test("returns false when workerCount is 1 (no git check needed)", async () => {
-		const result = await shouldUseWorktrees(os.tmpdir(), 1);
-		assertEqual(result, false, "Expected false for single worker, got true");
-	});
-
-	// ── TEST 2: shouldUseWorktrees — non-git directory ─────────────────────────
-	await runner.test("returns false for a non-git directory", async () => {
+	await runner.test("returns empty array for a non-git directory", async () => {
 		const tmpDir = await fs.mkdtemp(path.join(os.tmpdir(), "pi-no-git-"));
 		try {
-			const result = await shouldUseWorktrees(tmpDir, 3);
-			assertEqual(result, false, "Expected false for non-git dir, got true");
+			const result = await listWorktrees(tmpDir);
+			assertEqual(result.length, 0, `Expected empty array for non-git dir, got ${JSON.stringify(result)}`);
 		} finally {
-			await cleanup(tmpDir);
+			await fs.rm(tmpDir, { recursive: true, force: true });
 		}
 	});
 
-	// ── TEST 3: shouldUseWorktrees — valid git repo ────────────────────────────
-	await runner.test("returns true for a valid non-bare git repo with 2+ workers", async () => {
-		const repoDir = await makeTempGitRepo();
+	// ── TEST 2: listWorktrees — valid git repo ────────────────────────────────
+	await runner.test("returns at least the main repo path for a valid git repo", async () => {
+		const { dir } = await makeTempGitRepo();
 		try {
-			const result = await shouldUseWorktrees(repoDir, 3);
-			assertEqual(result, true, "Expected true for valid git repo, got false");
+			const worktrees = await listWorktrees(dir);
+			assert(worktrees.length >= 1, `Expected ≥1 worktree, got ${worktrees.length}`);
+			assert(
+				worktrees.some((p) => fsSync.existsSync(p)),
+				`Expected at least one real path, got: ${JSON.stringify(worktrees)}`,
+			);
 		} finally {
-			await cleanup(repoDir);
+			await cleanupRepo(dir);
 		}
 	});
 
-	// ── TEST 4: allocateWorktree — happy path ─────────────────────────────────
-	runner.section("allocateWorktree");
+	// ── TEST 3: createWorktree — handle shape ─────────────────────────────────
+	runner.section("createWorktree");
 
-	await runner.test("creates a worktree with correct path and branch name", async () => {
-		const repoDir = await makeTempGitRepo();
-		let allocation: Awaited<ReturnType<typeof allocateWorktree>> | undefined;
+	await runner.test("returns handle with correct worktreePath and branch", async () => {
+		const { dir } = await makeTempGitRepo();
+		const worktreeDir = path.join(await realTmpDir(), `pi-wt-handle-${Date.now()}`);
 		try {
-			allocation = await allocateWorktree(repoDir, "sess-abc123", "TASK-01");
+			// 'worker/test-1' must exist but not be currently checked out
+			execSync("git branch worker/test-1", { cwd: dir, stdio: "pipe" });
 
-			assert(
-				allocation.worktreePath.startsWith(os.tmpdir()),
-				`Expected worktree path under tmpdir, got: ${allocation.worktreePath}`,
-			);
-			assert(
-				allocation.worktreePath.includes("pi-coord-"),
-				`Expected path to contain 'pi-coord-', got: ${allocation.worktreePath}`,
-			);
-			assert(
-				allocation.branchName.startsWith("agent/"),
-				`Expected branch to start with 'agent/', got: ${allocation.branchName}`,
-			);
-			assert(
-				allocation.branchName.includes("TASK-01"),
-				`Expected branch to contain 'TASK-01', got: ${allocation.branchName}`,
-			);
-			assertEqual(allocation.taskId, "TASK-01");
-			assert(Boolean(new Date(allocation.createdAt).getTime()), "createdAt should be a valid date");
-			assert(
-				fsSync.existsSync(allocation.worktreePath),
-				`Worktree directory should exist at: ${allocation.worktreePath}`,
-			);
-		} finally {
-			if (allocation) {
-				try { await releaseWorktree(allocation, repoDir); } catch {}
+			const handle = await createWorktree({
+				repoDir: dir,
+				branch: "worker/test-1",
+				worktreeDir,
+			});
+
+			try {
+				assertEqual(handle.branch, "worker/test-1", "branch must match");
+				assertEqual(handle.worktreePath, worktreeDir, "worktreePath must match provided dir");
+				assertExists(handle.cleanup, "cleanup function must exist");
+				assertEqual(typeof handle.cleanup, "function", "cleanup must be a function");
+			} finally {
+				await handle.cleanup();
 			}
-			await cleanup(repoDir);
-		}
-	});
-
-	// ── TEST 5: mergeWorktreeBranch — success ─────────────────────────────────
-	runner.section("mergeWorktreeBranch");
-
-	await runner.test("returns { success: true } when there are no conflicts", async () => {
-		const repoDir = await makeTempGitRepo();
-		let allocation: Awaited<ReturnType<typeof allocateWorktree>> | undefined;
-		try {
-			allocation = await allocateWorktree(repoDir, "sess-merge", "TASK-02");
-
-			// Create a commit in the worktree
-			await fs.writeFile(path.join(allocation.worktreePath, "feature.txt"), "feature work");
-			execSync("git add .", { cwd: allocation.worktreePath, stdio: "pipe" });
-			execSync('git commit -m "feat: add feature.txt"', { cwd: allocation.worktreePath, stdio: "pipe" });
-
-			const baseBranch = allocation.baseBranch;
-			execSync(`git checkout "${baseBranch}"`, { cwd: repoDir, stdio: "pipe" });
-
-			const result = await mergeWorktreeBranch(allocation, repoDir, baseBranch);
-			assertEqual(result.success, true, `Expected merge success, got: ${JSON.stringify(result)}`);
-			assert(!result.conflicts, "Expected no conflicts on clean merge");
 		} finally {
-			if (allocation) {
-				try { await releaseWorktree(allocation, repoDir); } catch {}
-			}
-			await cleanup(repoDir);
+			await cleanupRepo(dir);
+			await fs.rm(worktreeDir, { recursive: true, force: true }).catch(() => {});
 		}
 	});
 
-	// ── TEST 6: mergeWorktreeBranch — conflict ────────────────────────────────
-	await runner.test("returns { success: false, conflicts } when merge has conflicts", async () => {
-		const repoDir = await makeTempGitRepo();
-		let allocation: Awaited<ReturnType<typeof allocateWorktree>> | undefined;
+	// ── TEST 4: createWorktree — directory on disk ────────────────────────────
+	await runner.test("worktree directory exists on disk after creation", async () => {
+		const { dir } = await makeTempGitRepo();
+		const worktreeDir = path.join(await realTmpDir(), `pi-wt-disk-${Date.now()}`);
 		try {
-			allocation = await allocateWorktree(repoDir, "sess-conflict", "TASK-03");
+			execSync("git branch worker/disk-test", { cwd: dir, stdio: "pipe" });
 
-			// Write conflicting content in the worktree branch
-			await fs.writeFile(path.join(allocation.worktreePath, "conflict.txt"), "worktree version\n");
-			execSync("git add .", { cwd: allocation.worktreePath, stdio: "pipe" });
-			execSync('git commit -m "worktree: add conflict.txt"', { cwd: allocation.worktreePath, stdio: "pipe" });
+			const handle = await createWorktree({
+				repoDir: dir,
+				branch: "worker/disk-test",
+				worktreeDir,
+			});
 
-			// Write conflicting content in main branch
-			execSync(`git checkout "${allocation.baseBranch}"`, { cwd: repoDir, stdio: "pipe" });
-			await fs.writeFile(path.join(repoDir, "conflict.txt"), "main branch version\n");
-			execSync("git add .", { cwd: repoDir, stdio: "pipe" });
-			execSync('git commit -m "main: add conflict.txt"', { cwd: repoDir, stdio: "pipe" });
+			try {
+				assert(
+					fsSync.existsSync(worktreeDir),
+					`Worktree directory should exist at ${worktreeDir}`,
+				);
+			} finally {
+				await handle.cleanup();
+			}
+		} finally {
+			await cleanupRepo(dir);
+			await fs.rm(worktreeDir, { recursive: true, force: true }).catch(() => {});
+		}
+	});
 
-			const result = await mergeWorktreeBranch(allocation, repoDir, allocation.baseBranch);
-			assertEqual(result.success, false, `Expected merge conflict, got success`);
+	// ── TEST 5: createWorktree — appears in listWorktrees ────────────────────
+	await runner.test("new worktree appears in listWorktrees after creation", async () => {
+		const { dir } = await makeTempGitRepo();
+		const worktreeDir = path.join(await realTmpDir(), `pi-wt-list-${Date.now()}`);
+		try {
+			execSync("git branch worker/list-test", { cwd: dir, stdio: "pipe" });
+
+			const handle = await createWorktree({
+				repoDir: dir,
+				branch: "worker/list-test",
+				worktreeDir,
+			});
+
+			try {
+				const worktrees = await listWorktrees(dir);
+				assert(
+					worktrees.some((p) => p === worktreeDir),
+					`Expected ${worktreeDir} in worktrees, got: ${JSON.stringify(worktrees)}`,
+				);
+			} finally {
+				await handle.cleanup();
+			}
+		} finally {
+			await cleanupRepo(dir);
+			await fs.rm(worktreeDir, { recursive: true, force: true }).catch(() => {});
+		}
+	});
+
+	// ── TEST 6: cleanup() — removes worktree ─────────────────────────────────
+	await runner.test("cleanup() removes the worktree from listWorktrees", async () => {
+		const { dir } = await makeTempGitRepo();
+		const worktreeDir = path.join(await realTmpDir(), `pi-wt-clean-${Date.now()}`);
+		try {
+			execSync("git branch worker/cleanup-test", { cwd: dir, stdio: "pipe" });
+
+			const handle = await createWorktree({
+				repoDir: dir,
+				branch: "worker/cleanup-test",
+				worktreeDir,
+			});
+
+			// Confirm it appears before cleanup
+			const before = await listWorktrees(dir);
 			assert(
-				Array.isArray(result.conflicts) && result.conflicts.length > 0,
-				`Expected non-empty conflicts array, got: ${JSON.stringify(result.conflicts)}`,
+				before.some((p) => p === worktreeDir),
+				"Worktree should appear in listWorktrees before cleanup",
 			);
+
+			await handle.cleanup();
+
+			const after = await listWorktrees(dir);
 			assert(
-				result.conflicts!.some(f => f.includes("conflict")),
-				`Expected 'conflict.txt' in conflicts, got: ${JSON.stringify(result.conflicts)}`,
+				!after.some((p) => p === worktreeDir),
+				`Worktree should be removed after cleanup, got: ${JSON.stringify(after)}`,
 			);
 		} finally {
-			if (allocation) {
-				try { await releaseWorktree(allocation, repoDir); } catch {}
-			}
-			await cleanup(repoDir);
+			await cleanupRepo(dir);
+			await fs.rm(worktreeDir, { recursive: true, force: true }).catch(() => {});
 		}
 	});
 
+	// ─────────────────────────────────────────────────────────────────────────
 	const { failed } = runner.summary();
 	if (failed > 0) process.exit(1);
 }
 
-main().catch(err => {
+main().catch((err) => {
 	console.error("Test runner failed:", err);
 	process.exit(1);
 });
