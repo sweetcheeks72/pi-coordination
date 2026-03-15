@@ -93,3 +93,48 @@ export async function requestApproval(opts: HitlGateOptions): Promise<boolean> {
 	);
 	return false;
 }
+
+// ── Compatibility layer for coordinate/index.ts ─────────────────
+// coordinate/index.ts imports checkGate + HITLMode from the old API.
+// This wrapper adapts the old call signature to the new requestApproval API.
+
+export type HITLMode = "strict" | "permissive" | "off";
+
+/**
+ * Compatibility wrapper for the old checkGate API.
+ * Called by coordinate/index.ts to gate high-stakes tasks.
+ *
+ * In 'off' mode: never holds.
+ * In 'permissive' mode: only holds critical-pattern tasks (delete/drop/migrate/deploy/security).
+ * In 'strict' mode: holds all tasks for approval.
+ */
+export async function checkGate(
+  taskId: string,
+  _role: string,
+  description: string,
+  coordDir: string,
+  hitlMode: HITLMode,
+): Promise<{ held: boolean }> {
+  if (hitlMode === "off") {
+    return { held: false };
+  }
+
+  // In permissive mode, only gate tasks with critical patterns
+  if (hitlMode === "permissive") {
+    const isCritical = /\b(delete|drop|migrate|deploy|security|production|database|auth)\b/i.test(description);
+    if (!isCritical) {
+      return { held: false };
+    }
+  }
+
+  // In strict mode (or permissive + critical task), request approval
+  const approved = await requestApproval({
+    coordDir,
+    taskId,
+    summary: description,
+    hitl: "on",
+    timeoutMs: 30_000,
+  });
+
+  return { held: !approved };
+}
