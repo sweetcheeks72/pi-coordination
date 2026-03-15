@@ -290,7 +290,7 @@ export function generateCoordinationLog(data: LogData): string {
 		if (Object.keys(costState.byPhase).length > 0) {
 			lines.push(`**By Phase:**`);
 			for (const [phase, cost] of Object.entries(costState.byPhase)) {
-				if (cost > 0) {
+				if (cost !== undefined) {
 					lines.push(`- ${phase}: $${(cost ?? 0).toFixed(4)}`);
 				}
 			}
