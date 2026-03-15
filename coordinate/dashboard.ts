@@ -52,8 +52,8 @@ function formatDuration(ms: number): string {
 	return `${minutes}m ${seconds.toString().padStart(2, "0")}s`;
 }
 
-function formatCost(cost: number): string {
-	return `$${cost.toFixed(2)}`;
+function formatCost(cost: number | undefined): string {
+	return `$${(cost ?? 0).toFixed(2)}`;
 }
 
 function padToWidth(str: string, targetWidth: number): string {
@@ -2224,7 +2224,7 @@ export function renderMiniDashboardCompact(
 
 	// ── Line 1: plan name, task count, budget, elapsed ──
 	const taskCount = `${state.completed}/${state.total} tasks`;
-	const budget = `$${state.cost.toFixed(2)}/$${state.costLimit.toFixed(0)}`;
+	const budget = `$${(state.cost ?? 0).toFixed(2)}/$${(state.costLimit ?? 0).toFixed(0)}`;
 	const elapsed = _miniFormatDuration(state.elapsedMs);
 	const headerLine = `${th.fg("muted", titleStr)}  ${th.fg("success", taskCount)}  ${th.fg("muted", budget)}  ${th.fg("dim", elapsed)}`;
 	lines.push(_miniBoxLine(headerLine, innerWidth, th));
@@ -2293,7 +2293,7 @@ export function renderMiniFooterCompact(
 		parts.push(`${th.fg("warning", "❓")}${state.pendingQuestions} ${th.fg("dim", "pending")}`);
 	}
 
-	parts.push(`${th.fg("muted", "$" + state.cost.toFixed(2))}${th.fg("dim", "/$")}${th.fg("muted", state.costLimit.toFixed(0))}`);
+	parts.push(`${th.fg("muted", "$" + (state.cost ?? 0).toFixed(2))}${th.fg("dim", "/$")}${th.fg("muted", (state.costLimit ?? 0).toFixed(0))}`);
 	parts.push(th.fg("dim", "/jobs"));
 
 	const separator = th.fg("dim", " · ");
