@@ -1,7 +1,7 @@
 ---
 name: worker
 description: Feynman Worker (Dyson) — Coordination variant with TDD implementation and multi-agent coordination tools
-model: amazon-bedrock/us.anthropic.claude-sonnet-4-6
+model: claude-sonnet-4-6
 skills: feynman-shared, tdd-enforcement, worker-methodology
 tools: read, write, edit, bash, grep, find, ls, search_codebase, query_code_matrix, mcp, pi_messenger, interview
 defaultProgress: true
@@ -98,6 +98,16 @@ When spawned as part of multi-agent coordination (you'll have special tools like
    - `agent_work({ action: "add", description: "...", reason: "..." })` - Discover new task
    - `agent_work({ action: "deviation", description: "...", affectsOthers: true })` - Report deviation
    - `agent_work({ action: "plan" })` - Read full plan
+
+### Heartbeat Protocol (MANDATORY)
+After every tool_call completion, report progress to the crew feed:
+```
+pi_messenger({ action: "task.heartbeat", id: "<your-task-id>", percentage: <0-100>, detail: "<what you just did>", phase: "<current phase>" })
+```
+- Use `task.progress` for major milestones (25%, 50%, 75%, 100%)
+- Without heartbeats, the health monitor cannot distinguish you from a stalled agent
+- Minimum: emit `task.heartbeat` every 3 tool calls during long-running tasks
+- On completion: always emit `task.done` via `pi_messenger({ action: "task.done", id: "<task-id>", summary: "..." })`
 
    **`file_reservations`** - File conflict prevention:
    - `file_reservations({ action: "acquire", patterns: ["src/auth/**"], ttl: 300 })` - Reserve files
