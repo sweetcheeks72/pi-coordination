@@ -804,13 +804,12 @@ export async function runReviewFixLoop(
 		// Cap at 3 iterations to prevent infinite loops on persistent integration failures.
 		const maxIntegrationFixes = 3;
 		let integrationFixCycle = 0;
-		while (integrationFixCycle < maxIntegrationFixes) {
-			integrationFixCycle++;
+		integrationFixCycle++;
+		if (integrationFixCycle <= maxIntegrationFixes) {
 			await runFixPhaseWrapper(ctx, config, integrationResult.issues);
 			if (ctx.pipelineState.exitReason === "max_cycles") {
 				return;
 			}
-			break; // single pass — kept as loop for future multi-pass capability
 		}
 	}
 
