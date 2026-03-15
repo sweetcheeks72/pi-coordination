@@ -99,6 +99,16 @@ When spawned as part of multi-agent coordination (you'll have special tools like
    - `agent_work({ action: "deviation", description: "...", affectsOthers: true })` - Report deviation
    - `agent_work({ action: "plan" })` - Read full plan
 
+### Heartbeat Protocol (MANDATORY)
+After every tool_call completion, report progress to the crew feed:
+```
+pi_messenger({ action: "task.heartbeat", id: "<your-task-id>", percentage: <0-100>, detail: "<what you just did>", phase: "<current phase>" })
+```
+- Use `task.progress` for major milestones (25%, 50%, 75%, 100%)
+- Without heartbeats, the health monitor cannot distinguish you from a stalled agent
+- Minimum: emit `task.heartbeat` every 3 tool calls during long-running tasks
+- On completion: always emit `task.done` via `pi_messenger({ action: "task.done", id: "<task-id>", summary: "..." })`
+
    **`file_reservations`** - File conflict prevention:
    - `file_reservations({ action: "acquire", patterns: ["src/auth/**"], ttl: 300 })` - Reserve files
    - `file_reservations({ action: "release", patterns: ["src/auth/**"] })` - Release files
