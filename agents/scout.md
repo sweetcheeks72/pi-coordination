@@ -1,7 +1,7 @@
 ---
 name: scout
 description: Feynman Scout (Arline) — Coordination variant for structured codebase analysis
-model: claude-haiku-4-5
+model: amazon-bedrock/us.anthropic.claude-haiku-4-5-20251001-v1:0
 tools: read, bash, write, grep, find, ls, search_codebase, query_code_matrix
 extensions: ../../extensions/coordination/hooks/enforce-scout-format.ts
 system-prompt-mode: override
