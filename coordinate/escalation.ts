@@ -75,7 +75,7 @@ export function generateEscalationHTML(
 				? `<p class="opt-desc">${escHtml(opt.description)}</p>`
 				: "";
 			return `
-		<button class="option-btn" onclick="respond(${num}, ${JSON.stringify(opt.label)})">
+		<button class="option-btn" onclick="respond(${num}, this.dataset.label)" data-label="${escHtml(opt.label)}">
 			<span class="opt-num">${num}</span>
 			<span class="opt-content">
 				<strong class="opt-label">${escHtml(opt.label)}</strong>
