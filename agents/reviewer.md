@@ -1,7 +1,7 @@
 ---
 name: reviewer
 description: Reviews code changes from coordination session, looking for bugs, errors, and issues
-model: amazon-bedrock/us.anthropic.claude-sonnet-4-6
+model: claude-sonnet-4-6
 tools: read, bash
 extensions:
   - ../../extensions/coordination/hooks/enforce-json.ts

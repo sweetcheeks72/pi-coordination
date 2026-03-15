@@ -1,7 +1,7 @@
 ---
 name: planner
 description: Creates task graphs from plans with verification and self-review
-model: amazon-bedrock/us.anthropic.claude-sonnet-4-6
+model: claude-sonnet-4-6
 tools: read, bash
 system-prompt-mode: override
 ---

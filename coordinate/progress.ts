@@ -33,7 +33,7 @@ export function generateProgressDoc(
 	lines.push(`- **Workers:** ${workerStates.filter(w => w.status === "complete").length}/${workerStates.length}`);
 	lines.push(`- **Review Cycles:** ${pipelineState.fixCycle}`);
 
-	const totalCost = workerStates.reduce((sum, w) => sum + w.usage.cost, 0);
+	const totalCost = workerStates.reduce((sum, w) => sum + (w.usage?.cost ?? 0), 0);
 	lines.push(`- **Total Cost:** $${(totalCost ?? 0).toFixed(4)}`);
 	lines.push(``);
 
@@ -102,10 +102,10 @@ export function generateProgressDoc(
 					desc = `Worker ${ev.workerId.slice(0, 4)} failed: ${ev.error}`;
 					break;
 				case "phase_complete":
-					desc = `Phase ${ev.phase} complete ($${(ev.cost ?? 0).toFixed(2)})`;
+					desc = `Phase ${ev.phase} complete ($${(ev.cost ?? 0).toFixed(4)})`;
 					break;
 				case "cost_limit_reached":
-					desc = `Cost limit reached: $${(ev.total ?? 0).toFixed(2)}`;
+					desc = `Cost limit reached: $${(ev.total ?? 0).toFixed(4)}`;
 					break;
 				default:
 					desc = ev.type;
