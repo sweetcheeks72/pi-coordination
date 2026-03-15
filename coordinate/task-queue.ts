@@ -4,6 +4,8 @@ import * as path from "node:path";
 import type { Task, TaskQueue, TaskStatus } from "./types.js";
 import { PROGRESS_FILE } from "./progress-tracker.js";
 
+const STALE_LOCK_THRESHOLD_MS = 30_000;
+
 export class TaskQueueManager {
 	private queuePath: string;
 
@@ -11,10 +13,15 @@ export class TaskQueueManager {
 		this.queuePath = path.join(coordDir, "tasks.json");
 	}
 
+	private async atomicWriteJson(filePath: string, data: unknown): Promise<void> {
+		const tmpPath = `${filePath}.tmp`;
+		await fs.writeFile(tmpPath, JSON.stringify(data, null, 2));
+		await fs.rename(tmpPath, filePath);
+	}
+
 	private async withLock<T>(fn: () => Promise<T>): Promise<T> {
 		const lockPath = path.join(this.coordDir, "tasks.lock");
 		const maxRetries = 50;
-		const retryDelay = 100;
 
 		for (let i = 0; i < maxRetries; i++) {
 			try {
@@ -23,7 +30,15 @@ export class TaskQueueManager {
 				break;
 			} catch (err: unknown) {
 				if ((err as NodeJS.ErrnoException).code === "EEXIST") {
-					await new Promise((r) => setTimeout(r, retryDelay));
+					// Check for stale lock and force-remove if older than threshold
+					try {
+						const stat = fsSync.statSync(lockPath);
+						if (Date.now() - stat.mtimeMs > STALE_LOCK_THRESHOLD_MS) {
+							try { fsSync.unlinkSync(lockPath); } catch {}
+						}
+					} catch {}
+					const delay = Math.min(100 * Math.pow(1.5, i) + Math.random() * 50, 2000);
+					await new Promise((r) => setTimeout(r, delay));
 					if (i === maxRetries - 1) throw new Error("Failed to acquire tasks.json lock");
 				} else {
 					throw err;
@@ -52,7 +67,7 @@ export class TaskQueueManager {
 			})),
 		};
 
-		await fs.writeFile(this.queuePath, JSON.stringify(queue, null, 2));
+		await this.atomicWriteJson(this.queuePath, queue);
 		return queue;
 	}
 
@@ -123,7 +138,7 @@ export class TaskQueueManager {
 			task.claimedBy = claimedBy;
 			task.claimedAt = Date.now();
 
-			await fs.writeFile(this.queuePath, JSON.stringify(queue, null, 2));
+			await this.atomicWriteJson(this.queuePath, queue);
 
 			// Persist the claimed task immediately so a coordinator crash doesn't
 			// silently leave a partially-edited task appearing as not-started.
@@ -164,7 +179,7 @@ export class TaskQueueManager {
 
 			this.updateBlockedTasks(queue);
 
-			await fs.writeFile(this.queuePath, JSON.stringify(queue, null, 2));
+			await this.atomicWriteJson(this.queuePath, queue);
 
 			// Update checkpoint file so a crashed run can be resumed
 			await this.writeProgressCheckpoint(queue).catch(() => {});
@@ -183,7 +198,7 @@ export class TaskQueueManager {
 			if (task.restartCount >= maxRestarts) {
 				task.status = "failed";
 				task.failureReason = reason;
-				await fs.writeFile(this.queuePath, JSON.stringify(queue, null, 2));
+				await this.atomicWriteJson(this.queuePath, queue);
 				// Update checkpoint: record permanent failure
 				await this.writeProgressCheckpoint(queue).catch(() => {});
 				return false;
@@ -193,7 +208,7 @@ export class TaskQueueManager {
 			task.claimedBy = undefined;
 			task.claimedAt = undefined;
 
-			await fs.writeFile(this.queuePath, JSON.stringify(queue, null, 2));
+			await this.atomicWriteJson(this.queuePath, queue);
 			return true;
 		});
 	}
@@ -209,7 +224,7 @@ export class TaskQueueManager {
 			task.claimedBy = undefined;
 			task.claimedAt = undefined;
 
-			await fs.writeFile(this.queuePath, JSON.stringify(queue, null, 2));
+			await this.atomicWriteJson(this.queuePath, queue);
 		});
 	}
 
@@ -251,7 +266,7 @@ export class TaskQueueManager {
 			};
 
 			queue.tasks.push(newTask);
-			await fs.writeFile(this.queuePath, JSON.stringify(queue, null, 2));
+			await this.atomicWriteJson(this.queuePath, queue);
 
 			return newTask;
 		});
@@ -324,7 +339,7 @@ export class TaskQueueManager {
 			parent.status = "blocked";
 			parent.blockedBy = subtaskIds;
 
-			await fs.writeFile(this.queuePath, JSON.stringify(queue, null, 2));
+			await this.atomicWriteJson(this.queuePath, queue);
 
 			return { success: true, subtaskIds };
 		});
@@ -350,7 +365,7 @@ export class TaskQueueManager {
 
 			Object.assign(task, updates);
 
-			await fs.writeFile(this.queuePath, JSON.stringify(queue, null, 2));
+			await this.atomicWriteJson(this.queuePath, queue);
 		});
 	}
 
@@ -372,7 +387,7 @@ export class TaskQueueManager {
 
 			this.updateBlockedTasks(queue);
 
-			await fs.writeFile(this.queuePath, JSON.stringify(queue, null, 2));
+			await this.atomicWriteJson(this.queuePath, queue);
 		});
 	}
 
@@ -389,7 +404,7 @@ export class TaskQueueManager {
 			task.reviewResult = "rejected";
 			task.reviewNotes = reason;
 
-			await fs.writeFile(this.queuePath, JSON.stringify(queue, null, 2));
+			await this.atomicWriteJson(this.queuePath, queue);
 		});
 	}
 

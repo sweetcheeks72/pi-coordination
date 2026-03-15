@@ -12,19 +12,30 @@ import type {
 	CostState,
 	PipelinePhase,
 	ReviewIssue,
+	MeshMessage,
 } from "./types.js";
+
+const STALE_LOCK_THRESHOLD_MS = 30_000;
 
 export class FileBasedStorage {
 	constructor(private _coordDir: string) {}
+
+	/** Throttle map for updateWorkerThinking: workerId → last update timestamp (ms) */
+	private _thinkingLastUpdate: Map<string, number> = new Map();
 
 	get coordDir(): string {
 		return this._coordDir;
 	}
 
+	private async atomicWriteJson(filePath: string, data: unknown): Promise<void> {
+		const tmpPath = `${filePath}.tmp`;
+		await fs.writeFile(tmpPath, JSON.stringify(data, null, 2));
+		await fs.rename(tmpPath, filePath);
+	}
+
 	private async withLock<T>(lockName: string, fn: () => Promise<T>): Promise<T> {
 		const lockPath = path.join(this._coordDir, `${lockName}.lock`);
 		const maxRetries = 50;
-		const retryDelay = 100;
 
 		try {
 			fsSync.mkdirSync(this._coordDir, { recursive: true });
@@ -37,7 +48,15 @@ export class FileBasedStorage {
 				break;
 			} catch (err: unknown) {
 				if ((err as NodeJS.ErrnoException).code === "EEXIST") {
-					await new Promise((r) => setTimeout(r, retryDelay));
+					// Check for stale lock and force-remove if older than threshold
+					try {
+						const stat = fsSync.statSync(lockPath);
+						if (Date.now() - stat.mtimeMs > STALE_LOCK_THRESHOLD_MS) {
+							try { fsSync.unlinkSync(lockPath); } catch {}
+						}
+					} catch {}
+					const delay = Math.min(100 * Math.pow(1.5, i) + Math.random() * 50, 2000);
+					await new Promise((r) => setTimeout(r, delay));
 					if (i === maxRetries - 1) throw new Error(`Failed to acquire lock: ${lockName}`);
 				} else {
 					throw err;
@@ -81,13 +100,13 @@ export class FileBasedStorage {
 	}
 
 	async setState(state: CoordinationState): Promise<void> {
-		await fs.writeFile(path.join(this._coordDir, "state.json"), JSON.stringify(state, null, 2));
+		await this.atomicWriteJson(path.join(this._coordDir, "state.json"), state);
 	}
 
 	async updateState(updates: Partial<CoordinationState>): Promise<void> {
 		await this.withLock("state", async () => {
 			const current = await this.getState();
-			await fs.writeFile(path.join(this._coordDir, "state.json"), JSON.stringify({ ...current, ...updates }, null, 2));
+			await this.atomicWriteJson(path.join(this._coordDir, "state.json"), { ...current, ...updates });
 		});
 	}
 
@@ -103,7 +122,7 @@ export class FileBasedStorage {
 			} else if (current.contracts[itemName]) {
 				delete current.contracts[itemName];
 			}
-			await fs.writeFile(path.join(this._coordDir, "state.json"), JSON.stringify(current, null, 2));
+			await this.atomicWriteJson(path.join(this._coordDir, "state.json"), current);
 			return updated;
 		});
 	}
@@ -279,7 +298,7 @@ export class FileBasedStorage {
 
 	private async saveMessageReadState(state: Record<string, string[]>): Promise<void> {
 		const readPath = path.join(this._coordDir, "message-read.json");
-		await fs.writeFile(readPath, JSON.stringify(state, null, 2));
+		await this.atomicWriteJson(readPath, state);
 	}
 
 	/**
@@ -447,7 +466,7 @@ export class FileBasedStorage {
 			costState.byPhase[phase] = (costState.byPhase[phase] || 0) + amount;
 			costState.total += amount;
 
-			await fs.writeFile(costPath, JSON.stringify(costState, null, 2));
+			await this.atomicWriteJson(costPath, costState);
 		});
 	}
 
@@ -477,7 +496,7 @@ export class FileBasedStorage {
 			history[issue.id] = history[issue.id] || [];
 			history[issue.id].push({ cycle: issue.fixAttempts, status: "found" });
 
-			await fs.writeFile(historyPath, JSON.stringify(history, null, 2));
+			await this.atomicWriteJson(historyPath, history);
 		});
 	}
 
@@ -489,6 +508,55 @@ export class FileBasedStorage {
 		} catch {
 			return false;
 		}
+	}
+
+	/**
+	 * Append a mesh message as a JSON line to coordDir/mesh.jsonl.
+	 */
+	async appendMeshMessage(msg: MeshMessage): Promise<void> {
+		await fs.appendFile(
+			path.join(this._coordDir, "mesh.jsonl"),
+			JSON.stringify(msg) + "\n"
+		);
+	}
+
+	/**
+	 * Read the last `limit` mesh messages from coordDir/mesh.jsonl.
+	 * Returns an empty array if the file does not exist.
+	 */
+	async readMeshMessages(limit?: number): Promise<MeshMessage[]> {
+		const meshPath = path.join(this._coordDir, "mesh.jsonl");
+		try {
+			const content = await fs.readFile(meshPath, "utf-8");
+			const lines = content.trim().split("\n").filter(Boolean);
+			const messages: MeshMessage[] = lines.map(line => JSON.parse(line));
+			if (limit !== undefined && limit > 0) {
+				return messages.slice(-limit);
+			}
+			return messages;
+		} catch (err: unknown) {
+			if ((err as NodeJS.ErrnoException).code === "ENOENT") {
+				return [];
+			}
+			throw err;
+		}
+	}
+
+	/**
+	 * Update the thinkingStream field for a worker's state file.
+	 * Throttled to max once per 500ms per worker.
+	 */
+	async updateWorkerThinking(workerId: string, text: string): Promise<void> {
+		const now = Date.now();
+		const last = this._thinkingLastUpdate.get(workerId) ?? 0;
+		if (now - last < 500) {
+			return; // throttled
+		}
+		this._thinkingLastUpdate.set(workerId, now);
+		await this.updateWorkerState(workerId, (state) => ({
+			...state,
+			thinkingStream: text,
+		}));
 	}
 
 	private patternsOverlap(a: string[], b: string[]): boolean {

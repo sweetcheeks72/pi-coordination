@@ -390,15 +390,12 @@ export async function runAgentSDK(config: SDKRunnerConfig): Promise<SingleResult
 
 	let rawOutput = "";
 
-	// Hoist outside try so finally block can access them for env restore
-	const previousIdentity = process.env.PI_AGENT_IDENTITY;
-	const previousModel = process.env.PI_MODEL;
+	// Build a per-worker env snapshot — no global process.env mutation to avoid races
+	// when multiple SDK workers run concurrently.
+	const workerEnv: NodeJS.ProcessEnv = { ...process.env, PI_AGENT_IDENTITY: agent.name };
+	if (resolvedParentModel) workerEnv.PI_MODEL = resolvedParentModel;
 
 	try {
-		// Set agent identity for extensions to check
-		process.env.PI_AGENT_IDENTITY = agent.name;
-		if (resolvedParentModel) process.env.PI_MODEL = resolvedParentModel;
-
 		// Log agent configuration
 		const hasTools = agent.tools && agent.tools.length > 0;
 		const toolsList = hasTools
@@ -439,7 +436,7 @@ export async function runAgentSDK(config: SDKRunnerConfig): Promise<SingleResult
 
 		// Pre-resolve built-in tools once (shared across retry attempts)
 		const resolvedBuiltinTools =
-			builtinTools.length > 0 ? await resolveBuiltinTools(builtinTools, cwd) : undefined;
+			builtinTools.length > 0 ? await resolveBuiltinTools(builtinTools, cwd, workerEnv) : undefined;
 
 		// ─────────────────────────────────────────────────────────────────────
 		// Prompt Caching (KV Cache) — Feature 2
@@ -771,17 +768,6 @@ export async function runAgentSDK(config: SDKRunnerConfig): Promise<SingleResult
 			}
 		}
 	} finally {
-		// Restore previous agent identity
-		if (previousIdentity !== undefined) {
-			process.env.PI_AGENT_IDENTITY = previousIdentity;
-		} else {
-			delete process.env.PI_AGENT_IDENTITY;
-		}
-		if (previousModel !== undefined) {
-			process.env.PI_MODEL = previousModel;
-		} else {
-			delete process.env.PI_MODEL;
-		}
 
 		// Close JSONL stream
 		try {
@@ -865,12 +851,30 @@ async function getModelRegistry(): Promise<any> {
 
 	modelRegistryInitPromise = (async () => {
 		try {
-			const { discoverModels, discoverAuthStorage } = await import("@mariozechner/pi-coding-agent");
+			const sdk = await import("@mariozechner/pi-coding-agent");
 
-			// Both functions use getDefaultAgentDir() internally as default parameter
-			// Guard: discoverAuthStorage may not exist in all Pi versions — non-fatal if missing
-			const authStorage = typeof discoverAuthStorage === 'function' ? discoverAuthStorage() : undefined;
-			cachedModelRegistry = discoverModels(authStorage);
+			// SDK API v2: ModelRegistry + AuthStorage classes replaced discoverModels/discoverAuthStorage
+			let authStorage: any;
+			if (typeof sdk.discoverAuthStorage === "function") {
+				// Legacy API (pre-0.57)
+				authStorage = sdk.discoverAuthStorage();
+			} else if ((sdk as any).AuthStorage?.create) {
+				// New API: AuthStorage.create() uses getAgentDir() + auth.json defaults
+				authStorage = (sdk as any).AuthStorage.create();
+			} else {
+				throw new Error("Cannot initialize auth storage — SDK exports neither discoverAuthStorage nor AuthStorage.create");
+			}
+
+			if (typeof (sdk as any).discoverModels === "function") {
+				// Legacy API
+				cachedModelRegistry = (sdk as any).discoverModels(authStorage);
+			} else if ((sdk as any).ModelRegistry) {
+				// New API: ModelRegistry constructor takes authStorage
+				cachedModelRegistry = new (sdk as any).ModelRegistry(authStorage);
+			} else {
+				throw new Error("Cannot initialize model registry — SDK exports neither discoverModels nor ModelRegistry");
+			}
+
 			return cachedModelRegistry;
 		} catch (err) {
 			// Clear the promise so future calls can retry
@@ -938,14 +942,19 @@ async function resolveModel(modelString: string): Promise<any> {
 /**
  * Resolve built-in tool names to Tool objects.
  */
-async function resolveBuiltinTools(toolNames: string[], cwd: string): Promise<any[]> {
+async function resolveBuiltinTools(toolNames: string[], cwd: string, env?: NodeJS.ProcessEnv): Promise<any[]> {
 	// Import tool creators from SDK
 	const { createReadTool, createBashTool, createEditTool, createWriteTool, createGrepTool, createFindTool, createLsTool } =
 		await import("@mariozechner/pi-coding-agent");
 
 	const toolMap: Record<string, () => any> = {
 		read: () => createReadTool(cwd, {}),
-		bash: () => createBashTool(cwd),
+		// Pass per-worker env via spawnHook so bash subprocesses see the correct identity
+		// without mutating the global process.env.
+		bash: () =>
+			env
+				? createBashTool(cwd, { spawnHook: (ctx) => ({ ...ctx, env }) })
+				: createBashTool(cwd),
 		edit: () => createEditTool(cwd),
 		write: () => createWriteTool(cwd),
 		grep: () => createGrepTool(cwd),

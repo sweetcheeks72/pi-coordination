@@ -63,8 +63,37 @@ export async function processWorkerExit(
 	restartCounts: Map<string, number>,
 	config: AutoContinueConfig = {},
 	obs?: ObservabilityContext,
+	signal?: string | null,
 ): Promise<WorkerExitResult> {
 	const maxRestarts = config.maxRestarts ?? 2;
+
+	// Guard: non-recoverable exits (SIGKILL / OOM / exit 137) must not be restarted.
+	// Restarting after an OOM kill would immediately OOM again; SIGKILL means
+	// the process was forcibly terminated and state may be corrupt.
+	if (!isRecoverableExit(exitCode, signal)) {
+		const reason =
+			signal === "SIGKILL"
+				? `Non-recoverable: killed by SIGKILL`
+				: `Non-recoverable: OOM kill (exit ${exitCode})`;
+
+		await taskQueue.markTaskFailed(taskId, reason);
+
+		await logDecision(coordDir, {
+			type: "abort",
+			taskId,
+			previousWorker: workerId,
+			attempt: restartCounts.get(taskId) ?? 0,
+			reason,
+		});
+
+		await obs?.events.emit({
+			type: "worker_abandoned",
+			workerId,
+			reason,
+		});
+
+		return { action: "failed", reason };
+	}
 
 	// Success - check if worker actually completed
 	if (exitCode === 0) {
@@ -300,12 +329,18 @@ export function inferFailureReason(
 }
 
 /**
- * Check if an exit code indicates a recoverable failure.
+ * Check if an exit code (or OS signal) indicates a recoverable failure.
+ *
+ * Non-recoverable cases:
+ *  - exitCode 137 → process was killed by SIGKILL (typically OOM)
+ *  - signal "SIGKILL" → killed unconditionally, cannot restart safely
+ *
+ * Everything else (SIGTERM/143, timeout/124, graceful restart/42, …) is
+ * considered recoverable and will be retried per the maxRestarts policy.
  */
-export function isRecoverableExit(exitCode: number): boolean {
+export function isRecoverableExit(exitCode: number, signal?: string | null): boolean {
 	// Non-recoverable: OOM (137), SIGKILL (9)
-	// Recoverable: Everything else including SIGTERM (143), timeout (124), restart (42)
-	return exitCode !== 137 && exitCode !== 9;
+	return exitCode !== 137 && exitCode !== 9 && signal !== "SIGKILL";
 }
 
 // ─────────────────────────────────────────────────────────────────────────────

@@ -115,6 +115,15 @@ export interface WorkerStateFile {
 		attempt: number;
 		maxAttempts: number;
 	};
+	// Task context fields for coordinate UX
+	planIntent?: string;           // What the plan says this task should do
+	currentProblem?: string;       // What challenge/deviation the agent is working on
+	thinkingStream?: string;       // Last N chars of agent reasoning (rolling buffer)
+	assumptions?: Array<{
+		text: string;
+		status: 'verified' | 'unverified';
+		confidence: 'high' | 'med' | 'low';
+	}>;
 }
 
 export type CoordinationEvent =
@@ -316,6 +325,15 @@ export interface Task {
 	// Subtask support
 	parentTaskId?: string; // For subtasks (TASK-XX.Y) - the parent task ID
 	blockedBy?: string[]; // Task IDs blocking this task (e.g., subtasks)
+	// Coordinate UX fields
+	planDescription?: string;  // Human-readable description from spec parsing
+	deviationLog?: Array<{
+		timestamp: number;
+		what: string;
+		why: string;
+		decision: string;
+		impact: string;
+	}>;
 }
 
 export interface TaskQueue {
@@ -388,6 +406,16 @@ export interface PlannerConfig {
 export interface SelfReviewConfig {
 	enabled: boolean;
 	maxCycles: number;
+}
+
+export interface MeshMessage {
+	id: string;
+	from: string;        // worker shortId or 'coordinator'
+	to: string;          // worker shortId, 'coordinator', or 'user'
+	message: string;
+	timestamp: number;
+	taskId?: string;
+	type: 'coordination' | 'handoff' | 'deviation' | 'question';
 }
 
 export interface Discovery {

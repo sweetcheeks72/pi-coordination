@@ -9,7 +9,9 @@ Multi-agent coordination for parallel task execution using the **two-track archi
 - `plan` tool: Create specs from prose/PRDs (interview → scout → elaborate → structure)
 - `coordinate` tool: Execute TASK-XX format specs (validate → dispatch → execute → review)
 
-**YOU HAVE THE `coordinate` AND `plan` TOOLS AVAILABLE.**
+**NOTE: The `coordinate` and `plan` tools are only available if the pi-coordination extension is installed.
+If these tools are not available in your session, run `install.sh` from your pi-coordination clone
+and restart Pi.**
 
 ## Two-Track Architecture
 

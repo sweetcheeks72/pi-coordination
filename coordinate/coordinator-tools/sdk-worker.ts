@@ -2,7 +2,7 @@ import * as path from "node:path";
 import * as fsSync from "node:fs";
 import { randomUUID } from "node:crypto";
 import { runAgentSDK } from "../../subagent/sdk-runner.js";
-import { registerControls, unregisterControls } from "../worker-control-registry.js";
+import { registerControls, unregisterControls, getAbort } from "../worker-control-registry.js";
 import { discoverAgents } from "../../subagent/agents.js";
 import { createContextUpdater, type ContextUpdater } from "../worker-context.js";
 import { createArtifactPaths } from "../../subagent/artifacts.js";
@@ -24,6 +24,24 @@ export interface WorkerContext {
 	coordDir: string;
 	workerId: string;
 	identity: string;
+}
+
+/**
+ * Semantic match for "no issues found" responses from self-review.
+ * Accepts natural language variations so the review loop doesn't get stuck
+ * when the reviewer paraphrases the pass signal instead of using the exact phrase.
+ */
+function isNoIssuesResponse(text: string): boolean {
+	const noIssuePatterns = [
+		/no\s+(issues?|problems?|bugs?|concerns?|errors?)\s+(found|detected|identified|discovered|to\s+report|to\s+fix)/i,
+		/found\s+no\s+(issues?|problems?|bugs?|concerns?)/i,
+		/everything\s+(looks?|appears?|seems?)\s+(good|correct|fine|clean)/i,
+		/all\s+(looks?|appears?|seems?)\s+(good|correct|fine|clean)/i,
+		/code\s+(is|looks)\s+(clean|correct|good)/i,
+		/nothing\s+to\s+(fix|report|change)/i,
+		/lgtm/i,
+	];
+	return noIssuePatterns.some(p => p.test(text));
 }
 
 /**
@@ -123,7 +141,7 @@ If any issues are found, proceed to fix them without being asked to do so. If no
 			const lastMessage = messages[messages.length - 1];
 			const text = extractTextFromMessage(lastMessage);
 
-			if (text.includes("No issues found.")) {
+			if (isNoIssuesResponse(text)) {
 				selfReview.passed = true;
 				emitEvent("self_review_passed", { cycleNumber: selfReview.count });
 				selfReview.count = 0;
@@ -184,9 +202,12 @@ If any issues are found, proceed to fix them without being asked to do so. If no
 						},
 						{ triggerTurn: false },
 					);
+				} else if (nudge.type === "abort") {
+					// Signal abort via the control registry
+					emitEvent("worker_abort_nudge", { message: nudge.message });
+					const abortFn = getAbort(workerId);
+					if (abortFn) abortFn();
 				}
-				// Note: restart and abort are handled externally for SDK workers
-				// They cannot use process.exit() as that would kill the entire coordinator
 			}
 
 			const now = Date.now();
