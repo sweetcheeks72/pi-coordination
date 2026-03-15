@@ -66,7 +66,8 @@ export async function createWorktree(opts: WorktreeOptions): Promise<WorktreeHan
 
 	// H-4: use execFile (async, 5s timeout) instead of execSync in signal handlers.
 	const onSignal = (): void => {
-		// Fire-and-forget async cleanup — do NOT block the signal handler.
+		if (cleanedUp) return;
+		cleanedUp = true;
 		execFile(
 			"git",
 			["worktree", "remove", "--force", worktreePath],
