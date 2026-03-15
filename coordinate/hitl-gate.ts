@@ -89,7 +89,7 @@ export async function requestApproval(opts: HitlGateOptions): Promise<boolean> {
 	// Timed out without a response.
 	console.warn(
 		`[hitl-gate] Approval request for task "${taskId}" timed out after ${timeoutMs / 1000}s. ` +
-		`Proceeding without human approval.`
+		`Denying — no human response received within timeout.`
 	);
 	return false;
 }
