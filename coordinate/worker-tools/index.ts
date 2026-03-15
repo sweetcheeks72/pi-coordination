@@ -368,7 +368,7 @@ export function registerWorkerTools(pi: ExtensionAPI, ctx?: WorkerToolsContext):
 					type: (msgType === "handover" ? "handoff" :
 					       msgType === "status" ? "coordination" :
 					       "coordination") as "coordination" | "handoff" | "deviation" | "question",
-				}).catch(() => {});
+				}).catch((err: unknown) => { console.warn("[worker-tools] appendMeshMessage failed:", err instanceof Error ? err.message : err); });
 
 				await obs?.events.emit({
 					type: "message_sent",
