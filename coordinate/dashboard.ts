@@ -1165,20 +1165,26 @@ export class CoordinationDashboard implements Component {
 	}
 
 	private selectNext(): void {
-		if (this.state && this.state.tasks.length > 0) {
-			this.selectedTaskIndex = (this.selectedTaskIndex + 1) % this.state.tasks.length;
-		}
-		if (this.state && this.state.workers.length > 0) {
-			this.selectedWorkerIndex = (this.selectedWorkerIndex + 1) % this.state.workers.length;
+		if (this.activeView === "tasks" || this.activeView === "mesh") {
+			if (this.state && this.state.tasks.length > 0) {
+				this.selectedTaskIndex = (this.selectedTaskIndex + 1) % this.state.tasks.length;
+			}
+		} else if (this.activeView === "agent") {
+			if (this.state && this.state.workers.length > 0) {
+				this.selectedWorkerIndex = (this.selectedWorkerIndex + 1) % this.state.workers.length;
+			}
 		}
 	}
 
 	private selectPrev(): void {
-		if (this.state && this.state.tasks.length > 0) {
-			this.selectedTaskIndex = (this.selectedTaskIndex - 1 + this.state.tasks.length) % this.state.tasks.length;
-		}
-		if (this.state && this.state.workers.length > 0) {
-			this.selectedWorkerIndex = (this.selectedWorkerIndex - 1 + this.state.workers.length) % this.state.workers.length;
+		if (this.activeView === "tasks" || this.activeView === "mesh") {
+			if (this.state && this.state.tasks.length > 0) {
+				this.selectedTaskIndex = (this.selectedTaskIndex - 1 + this.state.tasks.length) % this.state.tasks.length;
+			}
+		} else if (this.activeView === "agent") {
+			if (this.state && this.state.workers.length > 0) {
+				this.selectedWorkerIndex = (this.selectedWorkerIndex - 1 + this.state.workers.length) % this.state.workers.length;
+			}
 		}
 	}
 
