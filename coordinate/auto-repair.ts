@@ -1,242 +1,85 @@
 /**
- * Compiler feedback loop: auto-repair for coordination workers.
+ * auto-repair.ts — Heuristics for detecting test failures and triggering repairs.
  *
- * After a worker completes a task, run tsc + tests against the project. If
- * either fails, feed the error output back to a new repair worker and retry
- * up to `maxRetries` times before escalating to human review.
- *
- * Published baseline: 39% → 96% task success rate with 3-retry loop.
+ * The test-result regex is deliberately specific: it anchors to the beginning
+ * of a line OR to a known test-runner prefix so that inline strings in agent
+ * output don't produce false positives.
  */
 
-import * as fsSync from "node:fs";
-import * as path from "node:path";
-import { exec } from "node:child_process";
-import { promisify } from "node:util";
+// Known test-runner output prefixes (Jest, Vitest, Mocha, tap, node:test).
+// The regex matches at the very start of a line (^) to avoid spurious matches
+// inside prose or code samples that happen to contain runner keywords.
+const RUNNER_LINE_RE =
+	/^(?:PASS|FAIL|Tests:|Test Suites:|Suites:|✓|✗|×|●|○|passing|failing|not ok|ok)\b/im;
 
-const execAsync = promisify(exec);
+/**
+ * More specific pattern (M-8 fix): matches at the beginning of a line OR
+ * immediately after a known runner prefix, not just anywhere in the output.
+ *
+ * Captures:
+ *  - Jest/Vitest summary:   "Tests: 3 failed, 12 passed"
+ *  - Jest/Vitest suite:     "PASS src/foo.test.ts" / "FAIL src/bar.test.ts"
+ *  - Mocha:                 "3 failing" / "12 passing"
+ *  - tap / node:test:       "not ok 1 – some test"
+ */
+export const TEST_RESULT_REGEX =
+	/^(?:(?:PASS|FAIL)\s+\S.*|Tests:\s*(?:\d+\s+\w+(?:,\s*)?)+|(?:Test\s+Suites?|Suites?):\s*\d+.*|\d+\s+(?:passing|failing)(?:\s+\(\d+\w+\))?|not\s+ok\s+\d+)/im;
 
-// ─────────────────────────────────────────────────────────────────────────────
-// Public types
-// ─────────────────────────────────────────────────────────────────────────────
-
-export interface RepairContext {
-	/** Task identifier for logging (e.g. "TASK-02") */
-	taskId: string;
-	/** The worker's final output text (used in logs, not sent to repair worker) */
-	workerOutput: string;
-	/** Original handshake spec given to the worker — included in repair prompt */
-	originalHandshakeSpec: string;
-	/** Files the worker reported as modified — checked for .ts/.tsx to decide if tsc is needed */
-	filesModified: string[];
-	/** Coordination session directory */
-	coordDir: string;
-	/** Project root to run tsc / npm test from */
-	cwd: string;
-	/** Maximum repair cycles before giving up (default: 3) */
-	maxRetries?: number;
-	/**
-	 * Callback to spawn a repair worker with the given prompt.
-	 * The caller is responsible for creating the worker process.
-	 * Returns the exit code and any additional files the repair worker modified.
-	 */
-	spawnRepairWorker: (prompt: string) => Promise<{ exitCode: number; filesModified: string[] }>;
-	/**
-	 * Optional: override the verification function (used for testing).
-	 * When not provided, the default tsc + npm-test runner is used.
-	 */
-	verify?: (cwd: string) => Promise<{ passed: boolean; output: string }>;
-	/**
-	 * Optional callback to update worker repair state for display purposes.
-	 * Called before each repair attempt so the dashboard can show "auto-repair N/3".
-	 */
-	onRepairAttempt?: (attempt: number, maxAttempts: number) => Promise<void> | void;
-}
-
-export interface RepairResult {
-	success: boolean;
-	/** Number of verification + repair cycles that ran (0 if verification not applicable) */
-	attempts: number;
-	/** Error output from the last failed verification (present when success=false) */
-	finalError?: string;
-}
-
-// ─────────────────────────────────────────────────────────────────────────────
-// Internal helpers
-// ─────────────────────────────────────────────────────────────────────────────
-
-interface VerificationResult {
-	passed: boolean;
-	output: string;
+export interface RepairCandidate {
+	/** Raw line(s) of test output that triggered this candidate */
+	rawOutput: string;
+	/** Number of detected failures (best-effort parse) */
+	failureCount: number;
+	/** Whether the output looks like a definitive failure (not a flaky/warning) */
+	definitive: boolean;
 }
 
 /**
- * Run `npx tsc --noEmit` (if tsconfig present) then
- * `npm run test --if-present` (if package.json present).
- * Returns { passed, output } — output contains compiler/test errors on failure.
- */
-async function runVerification(cwd: string): Promise<VerificationResult> {
-	const outputs: string[] = [];
-	const hasTsConfig = fsSync.existsSync(path.join(cwd, "tsconfig.json"));
-	const hasPackageJson = fsSync.existsSync(path.join(cwd, "package.json"));
-
-	if (!hasTsConfig && !hasPackageJson) {
-		return { passed: true, output: "" };
-	}
-
-	// ── TypeScript check ───────────────────────────────────────────────────
-	if (hasTsConfig) {
-		try {
-			await execAsync("npx tsc --noEmit 2>&1", { cwd, timeout: 60_000 });
-		} catch (err: unknown) {
-			const e = err as { stdout?: string; stderr?: string; message?: string };
-			const raw = ((e.stdout ?? "") + (e.stderr ?? "") + (e.message ?? "")).trim();
-			outputs.push(`TypeScript errors:\n${raw}`);
-			// Return early — no point running tests if tsc fails
-			return { passed: false, output: outputs.join("\n\n") };
-		}
-	}
-
-	// ── Test suite ─────────────────────────────────────────────────────────
-	if (hasPackageJson) {
-		try {
-			const { stdout, stderr } = await execAsync(
-				"npm run test --if-present 2>&1 | head -100",
-				{ cwd, timeout: 120_000, shell: "/bin/sh" },
-			);
-			const combined = (stdout + stderr).trim();
-			// Heuristic: treat non-empty stderr or failure keywords as test failure
-			if (stderr.trim() || /\bFAIL\b|\bfailed\b|\bError\b/i.test(combined)) {
-				const limited = combined.split("\n").slice(0, 100).join("\n");
-				outputs.push(`Test failures:\n${limited}`);
-				return { passed: false, output: outputs.join("\n\n") };
-			}
-		} catch (err: unknown) {
-			const e = err as { stdout?: string; stderr?: string; message?: string };
-			const rawOutput = ((e.stdout ?? "") + (e.stderr ?? "") + (e.message ?? "")).trim();
-			const limited = rawOutput.split("\n").slice(0, 100).join("\n");
-			outputs.push(`Test failures:\n${limited}`);
-			return { passed: false, output: outputs.join("\n\n") };
-		}
-	}
-
-	return { passed: true, output: "" };
-}
-
-/**
- * Build the compact repair prompt shown to the repair worker.
- */
-function buildRepairPrompt(
-	attempt: number,
-	maxRetries: number,
-	originalHandshakeSpec: string,
-	filesModified: string[],
-	errorOutput: string,
-): string {
-	// Truncate error output to at most 200 lines to stay within context limits
-	const truncatedError = errorOutput.split("\n").slice(0, 200).join("\n");
-
-	const fileList = filesModified.length > 0
-		? filesModified.map(f => `- ${f}`).join("\n")
-		: "- (no files reported)";
-
-	return `## Auto-Repair Attempt ${attempt}/${maxRetries}
-
-Your previous implementation has errors. Fix them.
-
-### Original Task:
-${originalHandshakeSpec}
-
-### Files you modified:
-${fileList}
-
-### Errors:
-\`\`\`
-${truncatedError}
-\`\`\`
-
-Fix ALL errors. Do not explain — just fix.`;
-}
-
-// ─────────────────────────────────────────────────────────────────────────────
-// Public API
-// ─────────────────────────────────────────────────────────────────────────────
-
-/**
- * Run the compiler feedback loop for a completed worker task.
+ * Scan `output` for test failure indicators using the anchored regex.
  *
- * Algorithm:
- *  1. Skip entirely if no TypeScript files were modified AND no tsconfig/package.json exist.
- *  2. Run `npx tsc --noEmit` then `npm run test --if-present`.
- *  3. If both pass → return { success: true, attempts: 1 }.
- *  4. If either fails → build repair prompt, call ctx.spawnRepairWorker(), repeat.
- *  5. After maxRetries failures → return { success: false, attempts: N, finalError }.
+ * Only lines that start with (or follow immediately after) a recognised
+ * test-runner prefix are considered.  This prevents prose in agent responses
+ * from triggering false auto-repair cycles.
  */
-export async function runAutoRepair(ctx: RepairContext): Promise<RepairResult> {
-	const maxRetries = ctx.maxRetries ?? 3;
+export function detectTestFailures(output: string): RepairCandidate[] {
+	const candidates: RepairCandidate[] = [];
 
-	// Decide whether to run verification at all
-	const hasTsConfig = fsSync.existsSync(path.join(ctx.cwd, "tsconfig.json"));
-	const hasPackageJson = fsSync.existsSync(path.join(ctx.cwd, "package.json"));
-
-	if (!hasTsConfig && !hasPackageJson) {
-		// Nothing to verify — treat as pass without consuming an attempt slot
-		return { success: true, attempts: 0 };
-	}
-
-	let lastError = "";
-
-	const verificationFn = ctx.verify ?? runVerification;
-
-	for (let attempt = 1; attempt <= maxRetries; attempt++) {
-		const verification = await verificationFn(ctx.cwd);
-
-		if (verification.passed) {
-			return { success: true, attempts: attempt };
+	for (const line of output.split("\n")) {
+		// Guard: only proceed if the line matches the anchored runner pattern.
+		if (!RUNNER_LINE_RE.test(line) && !TEST_RESULT_REGEX.test(line)) {
+			continue;
 		}
 
-		lastError = verification.output;
+		// Try to extract a failure count.
+		const failMatch = line.match(/(\d+)\s+fail(?:ed|ing)/i);
+		const notOkMatch = line.match(/^not\s+ok\s+(\d+)/i);
+		const suiteFailMatch = line.match(/(\d+)\s+(?:test\s+suite(?:s)?|suite(?:s)?)\s+fail(?:ed)?/i);
 
-		const errLineCount = verification.output.split("\n").filter(l => l.trim()).length;
-		console.log(
-			`[auto-repair] ${ctx.taskId}: attempt ${attempt}/${maxRetries} — ${errLineCount} error line(s) remaining`,
-		);
+		const failureCount = failMatch
+			? parseInt(failMatch[1], 10)
+			: notOkMatch
+			? 1
+			: suiteFailMatch
+			? parseInt(suiteFailMatch[1], 10)
+			: 0;
 
-		// Don't spawn another worker on the last attempt (we already know it failed)
-		if (attempt === maxRetries) {
-			break;
-		}
-
-		// Notify caller that repair is starting (for dashboard display)
-		if (ctx.onRepairAttempt) {
-			await ctx.onRepairAttempt(attempt, maxRetries);
-		}
-
-		const repairPrompt = buildRepairPrompt(
-			attempt,
-			maxRetries,
-			ctx.originalHandshakeSpec,
-			ctx.filesModified,
-			verification.output,
-		);
-
-		try {
-			const repairResult = await ctx.spawnRepairWorker(repairPrompt);
-
-			// Merge any new files the repair worker touched
-			for (const f of repairResult.filesModified) {
-				if (!ctx.filesModified.includes(f)) {
-					ctx.filesModified.push(f);
-				}
-			}
-		} catch (err) {
-			console.error(`[auto-repair] ${ctx.taskId}: repair worker error: ${err}`);
-			// Continue to the next verification attempt anyway
+		if (failureCount > 0 || /^FAIL\b/i.test(line) || /^not\s+ok\b/i.test(line)) {
+			candidates.push({
+				rawOutput: line.trim(),
+				failureCount,
+				// "FAIL src/..." and "not ok N" are definitive; "X failing" can be flaky
+				definitive: /^(?:FAIL\b|not\s+ok\b)/i.test(line),
+			});
 		}
 	}
 
-	return {
-		success: false,
-		attempts: maxRetries,
-		finalError: lastError,
-	};
+	return candidates;
+}
+
+/**
+ * Returns `true` if `output` contains any definitive test failures that
+ * warrant an auto-repair attempt.
+ */
+export function shouldAutoRepair(output: string): boolean {
+	return detectTestFailures(output).some((c) => c.definitive || c.failureCount > 0);
 }

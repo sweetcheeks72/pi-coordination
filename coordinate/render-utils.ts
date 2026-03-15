@@ -4,7 +4,8 @@
 
 import type { Theme } from "@mariozechner/pi-coding-agent";
 import { visibleWidth } from "@mariozechner/pi-tui";
-import type { PipelinePhase, PhaseResult, WorkerStateFile, Task, CoordinationEvent, FileReservation } from "./types.js";
+import type { Input } from "@mariozechner/pi-tui";
+import type { PipelinePhase, PhaseResult, WorkerStateFile, Task, CoordinationEvent, FileReservation, MeshMessage, EscalationRequest } from "./types.js";
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Memorable Names (Docker-style adjective_noun)
@@ -1162,6 +1163,589 @@ export function renderCoordinationDashboard(
 
 	if (overflowCount > 0) {
 		lines.push(theme.fg("dim", `  +${overflowCount} more`));
+	}
+
+	return lines;
+}
+
+// Task Navigator TUI
+// ─────────────────────────────────────────────────────────────────────────────
+
+export type TaskNavView = "tasks" | "agent" | "mesh";
+
+export interface TaskNavState {
+	tasks: Task[];
+	workers: WorkerStateFile[];
+	meshMessages: MeshMessage[];
+	selectedTaskIndex: number;
+	activeView: TaskNavView;
+	expandedTaskId: string | null;
+	planName?: string;
+	cost: number;
+	costLimit: number;
+	elapsedMs: number;
+	currentPhase?: PipelinePhase;
+	phases?: Partial<Record<PipelinePhase, PhaseResult | undefined>>;
+	/** Pending escalation requests shown in QUESTION section */
+	escalations?: EscalationRequest[];
+	/** Live countdown (seconds remaining) per escalation id */
+	escalationCountdowns?: Map<string, number>;
+	/** Whether the user is typing a free-form :answer */
+	escalationInputMode?: boolean;
+	/** The Input component for :answer (rendered inline) */
+	escalationInput?: Input;
+	/** Status message after answering */
+	escalationStatus?: string | null;
+	/** Whether the DEVIATION accordion is open for the currently expanded task */
+	deviationExpanded?: boolean;
+	/** Whether raw logs are expanded inside the deviation accordion */
+	rawLogsExpanded?: boolean;
+	/** Whether the user is typing an intervention command (:send :retry :skip :pause :logs) */
+	commandInputMode?: boolean;
+	/** The Input component for command entry */
+	commandInput?: Input;
+	/** Status message after executing a command */
+	commandStatus?: string | null;
+}
+
+/**
+ * Split text into chunks that fit within maxW visible characters.
+ */
+function splitToWidth(text: string, maxW: number): string[] {
+	if (maxW <= 0) return [text];
+	const chunks: string[] = [];
+	let remaining = text.trim();
+	while (remaining.length > 0) {
+		if (remaining.length <= maxW) {
+			chunks.push(remaining);
+			break;
+		}
+		// Try to split at word boundary
+		let cut = maxW;
+		const spaceIdx = remaining.lastIndexOf(" ", maxW);
+		if (spaceIdx > maxW / 2) cut = spaceIdx + 1;
+		chunks.push(remaining.slice(0, cut).trimEnd());
+		remaining = remaining.slice(cut).trimStart();
+	}
+	return chunks;
+}
+
+/**
+ * Render the top progress summary lines:
+ *   plan-name
+ *   ▰▰▰▱ 3/4 done · $3.21/$25 · 13m29s
+ */
+export function renderPlanProgress(
+	tasks: Task[],
+	cost: number,
+	costLimit: number,
+	elapsedMs: number,
+	planName: string,
+	theme: Theme,
+	width: number,
+): string[] {
+	const done = tasks.filter((t) => t.status === "complete").length;
+	const total = tasks.length;
+
+	// Block-style progress bar (▰ filled, ▱ empty), 4 blocks
+	const BAR_LEN = 4;
+	const filled = total > 0 ? Math.round((done / total) * BAR_LEN) : 0;
+	const empty = BAR_LEN - filled;
+	const bar = theme.fg("success", "▰".repeat(filled)) + theme.fg("dim", "▱".repeat(empty));
+
+	const countStr = `${done}/${total} done`;
+	const costStr = `$${cost.toFixed(2)}/$${costLimit.toFixed(0)}`;
+	const timeStr = formatDuration(elapsedMs);
+
+	const summary = `${bar} ${countStr} · ${costStr} · ${timeStr}`;
+
+	const lines: string[] = [];
+	if (planName) {
+		lines.push(theme.fg("accent", truncateText(planName, width)));
+	}
+	lines.push(summary);
+	return lines;
+}
+
+/**
+ * Render the view tab bar:
+ *   [TASKS]  AGENT  MESH ─────── ↑↓:select  Tab:view
+ */
+export function renderViewTabs(
+	activeView: TaskNavView,
+	theme: Theme,
+	width: number,
+): string {
+	const tabs = ["tasks", "agent", "mesh"] as const;
+	const labels = tabs.map((t) => {
+		const label = t.toUpperCase();
+		if (t === activeView) return `[${label}]`;
+		return ` ${label} `;
+	});
+	const tabStrs = tabs.map((t, i) => {
+		if (t === activeView) return theme.fg("accent", labels[i]);
+		return theme.fg("dim", labels[i]);
+	});
+	const tabStr = tabStrs.join(" ");
+	const hints = "↑↓:select  Tab:view";
+	const hintsW = visibleWidth(hints);
+	const tabW = visibleWidth(tabStr);
+	const sepLen = Math.max(1, width - tabW - hintsW - 3);
+	const sep = theme.fg("dim", " " + "─".repeat(sepLen) + " ");
+	return tabStr + sep + theme.fg("dim", hints);
+}
+
+/**
+ * Render a single collapsed task row.
+ *   ` ● T-01 sync-git-context ·········· done 2m14s`
+ * Selected task gets `▸` prefix.
+ */
+export function renderCollapsedTask(
+	task: Task,
+	worker: WorkerStateFile | undefined,
+	isSelected: boolean,
+	_isExpanded: boolean,
+	theme: Theme,
+	width: number,
+): string {
+	// Status icon + color
+	let icon: string;
+	let iconColor: "success" | "warning" | "error" | "muted" | "dim" | "accent";
+	switch (task.status) {
+		case "complete":
+			icon = "●";
+			iconColor = "success";
+			break;
+		case "claimed":
+			icon = "⯈";
+			iconColor = "accent";
+			break;
+		case "blocked":
+		case "failed":
+			icon = "⚠";
+			iconColor = "error";
+			break;
+		default:
+			icon = "○";
+			iconColor = "dim";
+	}
+
+	const prefix = isSelected ? theme.fg("accent", "▸") : " ";
+	const styledIcon = theme.fg(iconColor, icon);
+
+	// Deviation badge: ⚠N (shown on right side when deviations exist)
+	const devCount = task.deviationLog?.length ?? 0;
+	const devBadge = devCount > 0 ? `  ${theme.fg("warning", `⚠${devCount}`)}` : "";
+	const devBadgeW = devCount > 0 ? 2 + 1 + String(devCount).length : 0; // "  ⚠" + digits
+
+	// Right side: status + duration + badge
+	let rightStr: string;
+	if (task.status === "complete" && task.completedAt && task.claimedAt) {
+		const dur = formatDuration(task.completedAt - task.claimedAt);
+		rightStr = `done ${dur}`;
+	} else if (task.status === "claimed" && worker) {
+		const workerName = generateMemorableName(worker.identity);
+		const dur = worker.startedAt ? formatDuration(Date.now() - worker.startedAt) : "";
+		rightStr = `${workerName} ${dur}`.trim();
+	} else {
+		rightStr = task.status;
+	}
+
+	// Build: [prefix][icon] [taskId] [desc]·····[rightStr][devBadge]
+	const leftFixed = `${prefix}${styledIcon} ${task.id} `;
+	const leftFixedW = visibleWidth(leftFixed);
+	const rightStrW = visibleWidth(rightStr);
+
+	const rawDesc = task.planDescription || task.description;
+	const descMaxW = width - leftFixedW - rightStrW - devBadgeW - 2;
+	const desc = truncateText(rawDesc, Math.max(4, descMaxW));
+	const descW = visibleWidth(desc);
+
+	// Dot fill
+	const dotFill = Math.max(1, width - leftFixedW - descW - rightStrW - devBadgeW);
+	const dots = theme.fg("dim", "·".repeat(dotFill));
+	const styledDesc = iconColor === "dim" ? theme.fg("muted", desc) : theme.fg(iconColor === "accent" ? "muted" : iconColor, desc);
+
+	return `${leftFixed}${styledDesc}${dots}${theme.fg("dim", rightStr)}${devBadge}`;
+}
+
+/**
+ * Render the expanded task panel with box-drawing.
+ * Max ~12 lines. Sections hide when content is empty.
+ */
+export function renderExpandedTask(
+	task: Task,
+	worker: WorkerStateFile | undefined,
+	theme: Theme,
+	width: number,
+	deviationExpanded?: boolean,
+	rawLogsExpanded?: boolean,
+	escalation?: EscalationRequest | null,
+	escalationCountdownSecs?: number | null,
+	escalationInputMode?: boolean,
+	escalationInput?: Input | null,
+	escalationStatus?: string | null,
+	commandInputMode?: boolean,
+	commandInput?: Input | null,
+	commandStatus?: string | null,
+): string[] {
+	const lines: string[] = [];
+	// Inner width = width - 4 (│ content │, each side has "│ " = 2 chars)
+	const innerW = width - 4;
+
+	const boxLine = (content: string): string => {
+		const contentW = visibleWidth(content);
+		const pad = Math.max(0, innerW - contentW);
+		return theme.fg("dim", "│") + " " + content + " ".repeat(pad) + " " + theme.fg("dim", "│");
+	};
+
+	const divider = (): string =>
+		theme.fg("dim", "├" + "─".repeat(width - 2) + "┤");
+
+	let sectionCount = 0;
+	const addDivider = () => {
+		if (sectionCount > 0) lines.push(divider());
+		sectionCount++;
+	};
+
+	lines.push(theme.fg("dim", "┌" + "─".repeat(width - 2) + "┐"));
+
+	// PLAN + NOW + deviation section
+	const planText = worker?.planIntent || task.planDescription || task.description;
+	const nowText = worker?.currentProblem || "";
+
+	addDivider();
+	if (planText) {
+		const planLabel = theme.fg("dim", "PLAN ");
+		const planContent = theme.fg("muted", truncateText(planText, innerW - 6));
+		lines.push(boxLine(`${planLabel} ${planContent}`));
+	}
+	if (nowText) {
+		const nowLabel = theme.fg("dim", "NOW  ");
+		const nowContent = theme.fg("muted", truncateText(nowText, innerW - 6));
+		lines.push(boxLine(`${nowLabel} ${nowContent}`));
+	}
+
+	// Deviations — accordion (Tier 1 hint + Tier 2 detail)
+	if (task.deviationLog && task.deviationLog.length > 0) {
+		if (deviationExpanded) {
+			// ── Tier 2: Full DEVIATION section ─────────────────────────────────
+			addDivider();
+			// Section header divider: ├ DEVIATION ────────┤
+			const devTitle = " DEVIATION ";
+			const devLineLen = Math.max(0, width - 2 - devTitle.length - 1);
+			lines.push(
+				theme.fg("dim", "├") +
+				theme.fg("dim", " ") +
+				theme.fg("warning", "DEVIATION") +
+				theme.fg("dim", " " + "─".repeat(devLineLen)) +
+				theme.fg("dim", "┤"),
+			);
+
+			// Render deviations newest-first
+			const devsNewestFirst = [...task.deviationLog].reverse();
+			for (const dev of devsNewestFirst) {
+				const elapsed = `+${Math.round((Date.now() - dev.timestamp) / 1000)}s`;
+				const elapsedStr = theme.fg("dim", elapsed);
+				// Summary line: ⚠ +802s what-text
+				const summaryText = truncateText(dev.what, innerW - elapsed.length - 4);
+				lines.push(boxLine(`${theme.fg("warning", "⚠")} ${elapsedStr} ${theme.fg("muted", summaryText)}`));
+				lines.push(boxLine(""));
+
+				// WHAT/WHY/DECIDED/IMPACT
+				const fieldW = innerW - 9; // "WHAT  " = 6 + 1 padding + 2 for box sides already
+				const whatLabel = theme.fg("accent", "WHAT");
+				lines.push(boxLine(`  ${whatLabel}  ${theme.fg("muted", truncateText(dev.what, fieldW))}`));
+
+				const whyLines = splitToWidth(dev.why, Math.max(10, fieldW));
+				const whyLabel = theme.fg("accent", "WHY");
+				lines.push(boxLine(`  ${whyLabel}   ${theme.fg("muted", truncateText(whyLines[0] || "", fieldW))}`));
+				for (const chunk of whyLines.slice(1, 2)) {
+					lines.push(boxLine(`        ${theme.fg("dim", chunk)}`));
+				}
+
+				const decidedLabel = theme.fg("accent", "DECIDED");
+				lines.push(boxLine(`  ${decidedLabel}  ${theme.fg("muted", truncateText(dev.decision, fieldW))}`));
+
+				const impactLabel = theme.fg("accent", "IMPACT");
+				lines.push(boxLine(`  ${impactLabel}   ${theme.fg("muted", truncateText(dev.impact, fieldW))}`));
+
+				lines.push(boxLine(""));
+			}
+
+			// Raw logs toggle line
+			const rawLogCount = worker?.recentTools?.length ?? 0;
+			const rawLogsLabel = rawLogsExpanded
+				? theme.fg("dim", "▾ Raw logs")
+				: theme.fg("dim", "▸ Raw logs");
+			const rawLogsCountStr = rawLogCount > 0 ? theme.fg("dim", ` (${rawLogCount} lines)`) : "";
+			lines.push(boxLine(`${rawLogsLabel}${rawLogsCountStr}`));
+
+			// ── Tier 3: Raw logs (if expanded) ─────────────────────────────────
+			if (rawLogsExpanded && worker?.recentTools && worker.recentTools.length > 0) {
+				const logTools = worker.recentTools.slice(-20);
+				for (const entry of logTools) {
+					const toolName = theme.fg("dim", entry.tool.padEnd(8));
+					const argStr = theme.fg("muted", truncateText(entry.args || "", innerW - 10));
+					lines.push(boxLine(`  ${toolName} ${argStr}`));
+				}
+			} else if (rawLogsExpanded) {
+				// Fallback: show deviation details as pseudo-logs
+				for (const dev of devsNewestFirst.slice(0, 20)) {
+					const ts = new Date(dev.timestamp).toISOString().slice(11, 19);
+					lines.push(boxLine(theme.fg("dim", `  [${ts}] ${truncateText(dev.what, innerW - 14)}`)));
+				}
+			}
+		} else {
+			// ── Tier 1 hint (collapsed): single ⚠ summary line + press d hint ──
+			const lastDev = task.deviationLog[task.deviationLog.length - 1];
+			const devCount = task.deviationLog.length;
+			const countLabel = devCount > 1 ? theme.fg("dim", ` +${devCount - 1} more`) : "";
+			const hintStr = theme.fg("dim", " [d]");
+			const maxDevW = innerW - 2 - visibleWidth(countLabel) - visibleWidth(hintStr) - 1;
+			lines.push(boxLine(
+				`${theme.fg("warning", "⚠")} ${theme.fg("dim", truncateText(lastDev.what, maxDevW))}${countLabel}${hintStr}`,
+			));
+		}
+	}
+
+	// THINK section
+	const thinkText = worker?.thinkingStream || "";
+	if (thinkText) {
+		addDivider();
+		const thinkLabel = "THINK";
+		const thinkSpace = innerW - thinkLabel.length - 2;
+		const chunks = splitToWidth(thinkText, Math.max(10, thinkSpace));
+		if (chunks.length > 0) {
+			lines.push(boxLine(`${theme.fg("dim", thinkLabel)}  ${theme.fg("muted", chunks[0])}`));
+			// Show second chunk with cursor indicator, indent matches label
+			if (chunks.length > 1) {
+				const indent = " ".repeat(thinkLabel.length + 2);
+				lines.push(boxLine(`${indent}${theme.fg("dim", chunks[1])}▊`));
+			}
+		}
+	}
+
+	// ASSUME + questions section
+	const assumptions = worker?.assumptions || [];
+	if (assumptions.length > 0) {
+		addDivider();
+		const assumeStrs = assumptions.slice(0, 2).map((a) => {
+			const statusMark = a.status === "verified" ? theme.fg("success", "✓") : theme.fg("dim", "?");
+			return `${a.text} ${statusMark}`;
+		});
+		const assumeContent = truncateText(assumeStrs.join("  "), innerW - 8);
+		lines.push(boxLine(`${theme.fg("dim", "ASSUME")} ${theme.fg("muted", assumeContent)}`));
+
+		// Unverified assumption as question
+		const unverified = assumptions.find((a) => a.status === "unverified");
+		if (unverified) {
+			lines.push(boxLine(`${theme.fg("warning", "❓")} ${theme.fg("dim", truncateText(unverified.text, innerW - 4))}`));
+			lines.push(boxLine(theme.fg("dim", "   [1]Yes  [2]No  [3]Skip")));
+		}
+	}
+
+	// QUESTION section — active escalation
+	if (escalation) {
+		addDivider();
+
+		const options = escalation.richOptions?.length
+			? escalation.richOptions
+			: escalation.options.map((o) => ({ label: o, description: undefined as string | undefined }));
+
+		const secs = escalationCountdownSecs ?? 0;
+		const timeStr = secs > 0 ? `${secs}s` : "now";
+
+		// Question text
+		const qLabel = theme.fg("warning", "❓ QUESTION");
+		const qText = truncateText(escalation.question, innerW - 14);
+		lines.push(boxLine(`${qLabel}  ${theme.fg("muted", qText)}`));
+
+		// Number-key options
+		const optStrs = options
+			.slice(0, 3)
+			.map((o, i) => {
+				const key = theme.fg("accent", `[${i + 1}]`);
+				const label = truncateText(o.label, 20);
+				return `${key} ${theme.fg("muted", label)}`;
+			})
+			.join("  ");
+		lines.push(boxLine(`  ${optStrs}`));
+
+		// :answer free-form or input field
+		if (escalationInputMode && escalationInput) {
+			const inputLines = escalationInput.render(innerW - 4);
+			for (const line of inputLines) {
+				lines.push(boxLine(`  ${line}`));
+			}
+		} else if (escalationStatus) {
+			lines.push(boxLine(`  ${theme.fg("success", escalationStatus)}`));
+		} else {
+			lines.push(boxLine(`  ${theme.fg("dim", ":answer <text>  or  press [1][2][3]")}`));
+		}
+
+		// Agent assumption + countdown
+		const assumption = escalation.agentAssumption
+			? truncateText(escalation.agentAssumption, innerW - 30)
+			: truncateText(options[escalation.defaultOption ?? 0]?.label ?? "", innerW - 30);
+		const countdownColor: "error" | "warning" | "muted" = secs < 30 ? "error" : secs < 60 ? "warning" : "muted";
+		const countdownStr = theme.fg(countdownColor, `auto-proceed in ${timeStr}`);
+		lines.push(boxLine(`  ${theme.fg("dim", `assumes: ${assumption}`)}  ${countdownStr}`));
+	}
+
+	// INTERVENE commands
+	addDivider();
+	if (commandInputMode && commandInput) {
+		// Show command input field
+		const inputLines = commandInput.render(innerW - 4);
+		for (const line of inputLines) {
+			lines.push(boxLine(`  ${line}`));
+		}
+	} else if (commandStatus) {
+		lines.push(boxLine(`  ${theme.fg("success", commandStatus)}`));
+		lines.push(boxLine(theme.fg("dim", "  :send <msg>  :retry  :skip  :pause  :logs")));
+	} else {
+		lines.push(boxLine(theme.fg("dim", "  : to intervene  — :send :retry :skip :pause :logs")));
+	}
+
+	lines.push(theme.fg("dim", "└" + "─".repeat(width - 2) + "┘"));
+
+	return lines;
+}
+
+/**
+ * Render the MESH view tab content (last N messages).
+ */
+export function renderMeshView(
+	messages: MeshMessage[],
+	theme: Theme,
+	width: number,
+): string[] {
+	const lines: string[] = [];
+
+	const header = `MESH (${messages.length} recent)`;
+	lines.push(theme.fg("accent", header));
+	lines.push(theme.fg("dim", "─".repeat(Math.min(width, 49))));
+
+	if (messages.length === 0) {
+		lines.push(theme.fg("dim", "  No mesh messages"));
+		return lines;
+	}
+
+	for (const msg of messages.slice(-20)) {
+		const from = msg.from;
+		const to = msg.to;
+		const maxMsgW = Math.max(10, width - from.length - to.length - 5);
+		const msgText = truncateText(msg.message, maxMsgW);
+		const arrow = theme.fg("dim", "→");
+		const fromStr = theme.fg("accent", from.padEnd(12));
+		const toStr = theme.fg("muted", to.padEnd(10));
+		lines.push(`${fromStr}${arrow}${toStr}  ${theme.fg("dim", msgText)}`);
+	}
+
+	return lines;
+}
+
+/**
+ * Full task navigator rendering (TASKS / AGENT / MESH views).
+ *
+ * Returns an array of rendered lines for the given state.
+ */
+export function renderTaskNavigator(
+	state: TaskNavState,
+	theme: Theme,
+	width: number,
+): string[] {
+	const lines: string[] = [];
+
+	// Progress bar + plan name
+	lines.push(...renderPlanProgress(
+		state.tasks,
+		state.cost,
+		state.costLimit,
+		state.elapsedMs,
+		state.planName || "",
+		theme,
+		width,
+	));
+
+	// Pipeline phase row (secondary, below progress bar)
+	if (state.currentPhase && state.phases) {
+		const pipelineState: PipelineDisplayState = {
+			currentPhase: state.currentPhase,
+			phases: state.phases as Record<PipelinePhase, PhaseResult | undefined>,
+			cost: state.cost,
+			elapsed: state.elapsedMs,
+		};
+		lines.push(renderPipelineRow(pipelineState, theme, width));
+	}
+
+	// View tabs
+	lines.push(renderViewTabs(state.activeView, theme, width));
+
+	const sep = theme.fg("dim", "─".repeat(width));
+
+	if (state.activeView === "mesh") {
+		lines.push(sep);
+		lines.push(...renderMeshView(state.meshMessages.slice(-20), theme, width));
+		return lines;
+	}
+
+	if (state.activeView === "agent") {
+		// Full-screen expanded panel for selected task
+		const task = state.tasks[state.selectedTaskIndex];
+		if (task) {
+			const worker = state.workers.find((w) => w.id === task.claimedBy);
+			const escalation = state.escalations?.[0] ?? null;
+			const countdown = escalation ? (state.escalationCountdowns?.get(escalation.id) ?? null) : null;
+			lines.push(sep);
+			lines.push(...renderExpandedTask(
+				task, worker, theme, width,
+				state.deviationExpanded, state.rawLogsExpanded,
+				escalation, countdown,
+				state.escalationInputMode, state.escalationInput, state.escalationStatus,
+				state.commandInputMode, state.commandInput, state.commandStatus,
+			));
+		} else {
+			lines.push(sep);
+			lines.push(theme.fg("dim", "  No task selected"));
+		}
+		return lines;
+	}
+
+	// TASKS view: list of tasks with optional expanded panel
+	for (let i = 0; i < state.tasks.length; i++) {
+		const task = state.tasks[i];
+		const worker = state.workers.find((w) => w.id === task.claimedBy);
+		const isSelected = i === state.selectedTaskIndex;
+		const isExpanded = task.id === state.expandedTaskId;
+
+		lines.push(sep);
+		lines.push(renderCollapsedTask(task, worker, isSelected, isExpanded, theme, width));
+
+		if (isExpanded) {
+			// Only show escalation in the expanded panel for the selected task
+			const escalation = state.escalations?.[0] ?? null;
+			const countdown = escalation ? (state.escalationCountdowns?.get(escalation.id) ?? null) : null;
+			lines.push(...renderExpandedTask(
+				task, worker, theme, width,
+				state.deviationExpanded, state.rawLogsExpanded,
+				isSelected ? escalation : null, isSelected ? countdown : null,
+				isSelected ? state.escalationInputMode : undefined,
+				isSelected ? state.escalationInput : undefined,
+				isSelected ? state.escalationStatus : undefined,
+				isSelected ? state.commandInputMode : undefined,
+				isSelected ? state.commandInput : undefined,
+				isSelected ? state.commandStatus : undefined,
+			));
+		}
+	}
+
+	lines.push(sep);
+
+	// MESH preview at bottom (last 3 messages)
+	if (state.meshMessages.length > 0) {
+		lines.push(...renderMeshView(state.meshMessages.slice(-3), theme, width));
 	}
 
 	return lines;

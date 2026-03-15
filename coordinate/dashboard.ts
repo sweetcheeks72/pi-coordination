@@ -5,17 +5,30 @@ import { Input, matchesKey, truncateToWidth, visibleWidth } from "@mariozechner/
 import type { Theme } from "@mariozechner/pi-coding-agent";
 import { sendNudge } from "./nudge.js";
 import { getControls, hasControls, hasSteer, getSteer, getAbort } from "./worker-control-registry.js";
+import {
+	getPendingEscalations,
+	writeEscalationResponseFile,
+	DEFAULT_ESCALATION_TIMEOUT_SECS,
+} from "./escalation.js";
 import type {
 	WorkerStateFile,
 	CoordinationEvent,
 	CostState,
 	PipelineState,
 	Task,
+	TaskStatus,
 	PipelinePhase,
 	TaskQueue,
 	PhaseResult,
 	Checkpoint,
+	MeshMessage,
+	EscalationRequest,
 } from "./types.js";
+import {
+	renderTaskNavigator,
+	type TaskNavView,
+	type TaskNavState,
+} from "./render-utils.js";
 
 interface DashboardState {
 	pipelineState: PipelineState | null;
@@ -24,6 +37,8 @@ interface DashboardState {
 	events: CoordinationEvent[];
 	tasks: Task[];
 	startedAt: number;
+	meshMessages: MeshMessage[];
+	escalations: EscalationRequest[];
 }
 
 const POLL_INTERVAL_MS = 1000;
@@ -137,6 +152,28 @@ export class CoordinationDashboard implements Component {
 	private selectedWorkerIndex = 0;
 	private overlay: "worker" | "tasks" | null = null;
 
+	// Task navigator state
+	private selectedTaskIndex = 0;
+	private activeView: TaskNavView = "tasks";
+	private expandedTaskId: string | null = null;
+	private deviationExpanded = false;
+	private rawLogsExpanded = false;
+
+	// Escalation answer mode
+	private escalationInputMode = false;
+	private escalationInput: Input;
+	private escalationStatus: string | null = null;
+	private escalationStatusTimeout: NodeJS.Timeout | null = null;
+	// Countdown ticks: escalationId -> secondsRemaining
+	private escalationCountdowns = new Map<string, number>();
+	private countdownInterval: NodeJS.Timeout | null = null;
+
+	// Intervention command mode (:send :retry :skip :pause :logs)
+	private commandInputMode = false;
+	private commandInput: Input;
+	private commandStatus: string | null = null;
+	private commandStatusTimeout: NodeJS.Timeout | null = null;
+
 	private state: DashboardState | null = null;
 	private lastPollError: string | null = null;
 
@@ -161,8 +198,21 @@ export class CoordinationDashboard implements Component {
 			this.inputMode = false;
 			this.tui.requestRender();
 		};
+		this.escalationInput = new Input();
+		this.escalationInput.onSubmit = (value) => this.handleEscalationAnswerSubmit(value);
+		this.escalationInput.onEscape = () => {
+			this.escalationInputMode = false;
+			this.tui.requestRender();
+		};
+		this.commandInput = new Input();
+		this.commandInput.onSubmit = (value) => this.handleCommandSubmit(value);
+		this.commandInput.onEscape = () => {
+			this.commandInputMode = false;
+			this.tui.requestRender();
+		};
 		this.poll();
 		this.startPolling();
+		this.startCountdownInterval();
 	}
 
 	render(width: number): string[] {
@@ -172,6 +222,20 @@ export class CoordinationDashboard implements Component {
 	}
 
 	handleInput(data: string): void {
+		// Handle command input mode first (intervention commands)
+		if (this.commandInputMode) {
+			this.commandInput.handleInput(data);
+			this.tui.requestRender();
+			return;
+		}
+
+		// Handle escalation input mode
+		if (this.escalationInputMode) {
+			this.escalationInput.handleInput(data);
+			this.tui.requestRender();
+			return;
+		}
+
 		// Clear input mode if worker is no longer steering-capable
 		if (this.inputMode) {
 			const w = this.state?.workers[this.selectedWorkerIndex];
@@ -233,10 +297,83 @@ export class CoordinationDashboard implements Component {
 		} else if (matchesKey(data, "k") || matchesKey(data, "up")) {
 			this.selectPrev();
 			this.tui.requestRender();
+		} else if (matchesKey(data, "tab")) {
+			// Cycle view: tasks → agent → mesh → tasks
+			const views: TaskNavView[] = ["tasks", "agent", "mesh"];
+			const idx = views.indexOf(this.activeView);
+			this.activeView = views[(idx + 1) % views.length];
+			this.tui.requestRender();
 		} else if (matchesKey(data, "enter")) {
-			if (this.state && this.state.workers.length > 0) {
+			// Toggle expand for selected task
+			const task = this.state?.tasks[this.selectedTaskIndex];
+			if (task) {
+				const wasExpanded = this.expandedTaskId === task.id;
+				this.expandedTaskId = wasExpanded ? null : task.id;
+				if (!this.expandedTaskId) {
+					// Collapsing: reset deviation state
+					this.deviationExpanded = false;
+					this.rawLogsExpanded = false;
+				} else if (this.deviationExpanded) {
+					// Task is expanded and deviation is open: Enter toggles raw logs
+					this.rawLogsExpanded = !this.rawLogsExpanded;
+				}
+				this.tui.requestRender();
+			} else if (this.state && this.state.workers.length > 0) {
+				// Fallback: open worker overlay for selected worker
 				this.overlay = "worker";
 				this.tui.requestRender();
+			}
+		} else if (data === "d") {
+			// Toggle deviation accordion for expanded task
+			const expandedTask = this.state?.tasks.find((t) => t.id === this.expandedTaskId);
+			if (expandedTask && (expandedTask.deviationLog?.length ?? 0) > 0) {
+				this.deviationExpanded = !this.deviationExpanded;
+				if (!this.deviationExpanded) {
+					this.rawLogsExpanded = false;
+				}
+				this.tui.requestRender();
+			}
+		} else if (data === "1" || data === "2" || data === "3") {
+			// Check if there's an active escalation — answer it
+			const activeEscalation = this.getActiveEscalationForContext();
+			if (activeEscalation) {
+				const optionIndex = parseInt(data, 10) - 1;
+				const options = activeEscalation.richOptions?.length
+					? activeEscalation.richOptions
+					: activeEscalation.options.map((o) => ({ label: o }));
+				if (optionIndex < options.length) {
+					this.answerEscalation(activeEscalation.id, options[optionIndex].label);
+				}
+				return;
+			}
+			// Answer open question for expanded task (legacy behavior)
+			const task = this.state?.tasks.find((t) => t.id === this.expandedTaskId);
+			if (task) {
+				// Stub: question-answering would send answer via nudge
+				// For now just close expanded view
+				this.expandedTaskId = null;
+				this.tui.requestRender();
+			}
+		} else if (data === ":" && !this.inputMode) {
+			// Enter escalation :answer mode if escalation is active
+			const activeEscalation = this.getActiveEscalationForContext();
+			if (activeEscalation) {
+				this.escalationInputMode = true;
+				this.escalationInput.setValue("answer ");
+				this.tui.requestRender();
+				return;
+			}
+			// Enter intervention command mode if a task is selected
+			const selectedTask = this.state?.tasks[this.selectedTaskIndex];
+			if (selectedTask) {
+				// Expand the task if not already expanded
+				if (this.expandedTaskId !== selectedTask.id) {
+					this.expandedTaskId = selectedTask.id;
+				}
+				this.commandInputMode = true;
+				this.commandInput.setValue("");
+				this.tui.requestRender();
+				return;
 			}
 		} else if (data === "t") {
 			if (this.state) {
@@ -275,6 +412,18 @@ export class CoordinationDashboard implements Component {
 			clearTimeout(this.steerStatusTimeout);
 			this.steerStatusTimeout = null;
 		}
+		if (this.escalationStatusTimeout) {
+			clearTimeout(this.escalationStatusTimeout);
+			this.escalationStatusTimeout = null;
+		}
+		if (this.commandStatusTimeout) {
+			clearTimeout(this.commandStatusTimeout);
+			this.commandStatusTimeout = null;
+		}
+		if (this.countdownInterval) {
+			clearInterval(this.countdownInterval);
+			this.countdownInterval = null;
+		}
 	}
 
 	private renderMainDashboard(width: number): string[] {
@@ -290,20 +439,36 @@ export class CoordinationDashboard implements Component {
 			lines.push(th.fg("error", `Error: ${this.lastPollError}`));
 		}
 
-		const innerWidth = width - 4;
+		const state = this.state;
 
-		lines.push(this.renderBorder("top", innerWidth, "Coordination"));
-		lines.push(...this.renderPipelineSection(innerWidth));
-		lines.push(...this.renderHeaderInBox(innerWidth));
-		lines.push(this.renderBorder("middle", innerWidth, `Task Queue (${this.state.tasks.length})`));
-		lines.push(...this.renderTaskQueueSection(innerWidth));
-		lines.push(this.renderBorder("middle", innerWidth, `Workers (${this.state.workers.length})`));
-		lines.push(...this.renderWorkerGrid(innerWidth));
-		lines.push(this.renderBorder("middle", innerWidth, "Events"));
-		lines.push(...this.renderEventStream(innerWidth));
-		lines.push(this.renderBorder("middle", innerWidth, "Cost Breakdown"));
-		lines.push(...this.renderCostSection(innerWidth));
-		lines.push(this.renderBorder("bottom", innerWidth, ""));
+		// Build TaskNavState for the navigator
+		const pipelineState = state.pipelineState;
+		const navState: TaskNavState = {
+			tasks: state.tasks,
+			workers: state.workers,
+			meshMessages: state.meshMessages,
+			selectedTaskIndex: this.selectedTaskIndex,
+			activeView: this.activeView,
+			expandedTaskId: this.expandedTaskId,
+			planName: pipelineState?.planPath ? path.basename(pipelineState.planPath, ".md") : undefined,
+			cost: state.costState.total,
+			costLimit: state.costState.limit,
+			elapsedMs: Date.now() - state.startedAt,
+			currentPhase: pipelineState?.currentPhase,
+			phases: pipelineState?.phases as Partial<Record<PipelinePhase, PhaseResult | undefined>> | undefined,
+			escalations: state.escalations,
+			escalationCountdowns: this.escalationCountdowns,
+			escalationInputMode: this.escalationInputMode,
+			escalationInput: this.escalationInput,
+			escalationStatus: this.escalationStatus,
+			deviationExpanded: this.deviationExpanded,
+			rawLogsExpanded: this.rawLogsExpanded,
+			commandInputMode: this.commandInputMode,
+			commandInput: this.commandInput,
+			commandStatus: this.commandStatus,
+		};
+
+		lines.push(...renderTaskNavigator(navState, th, width));
 		lines.push(...this.renderHelpLine(width));
 
 		return lines;
@@ -672,8 +837,9 @@ export class CoordinationDashboard implements Component {
 	private renderHelpLine(width: number): string[] {
 		const th = this.theme;
 		const help = [
-			`${th.fg("accent", "[j/k]")} select`,
-			`${th.fg("accent", "[Enter]")} details`,
+			`${th.fg("accent", "[↑↓]")} select`,
+			`${th.fg("accent", "[Enter]")} expand`,
+			`${th.fg("accent", "[Tab]")} view`,
 			`${th.fg("accent", "[w]")}rap up`,
 			`${th.fg("accent", "[R]")}estart`,
 			`${th.fg("accent", "[A]")}bort`,
@@ -976,12 +1142,20 @@ export class CoordinationDashboard implements Component {
 				events,
 				tasks,
 				startedAt,
+				meshMessages: readJsonlSync<MeshMessage>(path.join(this.coordDir, "mesh.jsonl")),
+				escalations: getPendingEscalations(this.coordDir),
 			};
 
 			if (workers.length === 0) {
 				this.selectedWorkerIndex = 0;
 			} else if (this.selectedWorkerIndex >= workers.length) {
 				this.selectedWorkerIndex = workers.length - 1;
+			}
+
+			if (tasks.length === 0) {
+				this.selectedTaskIndex = 0;
+			} else if (this.selectedTaskIndex >= tasks.length) {
+				this.selectedTaskIndex = tasks.length - 1;
 			}
 
 			this.lastPollError = null;
@@ -991,14 +1165,26 @@ export class CoordinationDashboard implements Component {
 	}
 
 	private selectNext(): void {
-		if (this.state && this.state.workers.length > 0) {
-			this.selectedWorkerIndex = (this.selectedWorkerIndex + 1) % this.state.workers.length;
+		if (this.activeView === "tasks" || this.activeView === "mesh") {
+			if (this.state && this.state.tasks.length > 0) {
+				this.selectedTaskIndex = (this.selectedTaskIndex + 1) % this.state.tasks.length;
+			}
+		} else if (this.activeView === "agent") {
+			if (this.state && this.state.workers.length > 0) {
+				this.selectedWorkerIndex = (this.selectedWorkerIndex + 1) % this.state.workers.length;
+			}
 		}
 	}
 
 	private selectPrev(): void {
-		if (this.state && this.state.workers.length > 0) {
-			this.selectedWorkerIndex = (this.selectedWorkerIndex - 1 + this.state.workers.length) % this.state.workers.length;
+		if (this.activeView === "tasks" || this.activeView === "mesh") {
+			if (this.state && this.state.tasks.length > 0) {
+				this.selectedTaskIndex = (this.selectedTaskIndex - 1 + this.state.tasks.length) % this.state.tasks.length;
+			}
+		} else if (this.activeView === "agent") {
+			if (this.state && this.state.workers.length > 0) {
+				this.selectedWorkerIndex = (this.selectedWorkerIndex - 1 + this.state.workers.length) % this.state.workers.length;
+			}
 		}
 	}
 
@@ -1083,8 +1269,259 @@ export class CoordinationDashboard implements Component {
 		this.tui.requestRender();
 	}
 
-	private showSteerStatus(status: string): void {
-		this.steerStatus = status;
+	// ─── Escalation helpers ───────────────────────────────────────────────────
+
+	/** Returns the active escalation relevant to the current TUI context. */
+	private getActiveEscalationForContext(): EscalationRequest | null {
+		if (!this.state || this.state.escalations.length === 0) return null;
+		// Return the oldest pending escalation
+		return this.state.escalations[0] ?? null;
+	}
+
+	/** Answer an escalation by writing the response file. */
+	private answerEscalation(id: string, choice: string): void {
+		try {
+			writeEscalationResponseFile(this.coordDir, id, choice, false);
+			this.showEscalationStatus(`[answered: ${choice}]`);
+			// Refresh escalations immediately
+			if (this.state) {
+				this.state = {
+					...this.state,
+					escalations: getPendingEscalations(this.coordDir),
+				};
+			}
+		} catch (err) {
+			this.showEscalationStatus(`[error: ${err instanceof Error ? err.message : "unknown"}]`);
+		}
+		this.tui.requestRender();
+	}
+
+	private showEscalationStatus(status: string): void {
+		this.escalationStatus = status;
+		if (this.escalationStatusTimeout) clearTimeout(this.escalationStatusTimeout);
+		this.escalationStatusTimeout = setTimeout(() => {
+			this.escalationStatus = null;
+			this.tui.requestRender();
+		}, 3000);
+		this.tui.requestRender();
+	}
+
+	private async handleEscalationAnswerSubmit(value: string): Promise<void> {
+		this.escalationInputMode = false;
+		const trimmed = value.trim();
+
+		// :logs command — toggle raw logs for current expanded task
+		if (trimmed === "logs" || trimmed === ":logs") {
+			this.rawLogsExpanded = !this.rawLogsExpanded;
+			if (this.rawLogsExpanded) {
+				this.deviationExpanded = true; // auto-expand deviation section
+			}
+			this.tui.requestRender();
+			return;
+		}
+
+		const choice = trimmed.startsWith("answer ")
+			? trimmed.slice("answer ".length).trim()
+			: trimmed;
+
+		if (!choice) {
+			this.tui.requestRender();
+			return;
+		}
+
+		const escalation = this.getActiveEscalationForContext();
+		if (!escalation) {
+			this.showEscalationStatus("[no active escalation]");
+			return;
+		}
+
+		this.answerEscalation(escalation.id, choice);
+	}
+
+	// ─── Intervention Command Handlers ────────────────────────────────────────
+
+	private showCommandStatus(status: string): void {
+		this.commandStatus = status;
+		if (this.commandStatusTimeout) clearTimeout(this.commandStatusTimeout);
+		this.commandStatusTimeout = setTimeout(() => {
+			this.commandStatus = null;
+			this.tui.requestRender();
+		}, 3000);
+		this.tui.requestRender();
+	}
+
+	private async handleCommandSubmit(value: string): Promise<void> {
+		this.commandInputMode = false;
+		const trimmed = value.trim();
+
+		if (!trimmed) {
+			this.tui.requestRender();
+			return;
+		}
+
+		const selectedTask = this.state?.tasks[this.selectedTaskIndex];
+		if (!selectedTask) {
+			this.showCommandStatus("[no task selected]");
+			return;
+		}
+
+		// Parse command
+		const spaceIdx = trimmed.indexOf(" ");
+		const cmd = spaceIdx === -1 ? trimmed.toLowerCase() : trimmed.slice(0, spaceIdx).toLowerCase();
+		const arg = spaceIdx === -1 ? "" : trimmed.slice(spaceIdx + 1).trim();
+
+		switch (cmd) {
+			case "send": {
+				if (!arg) {
+					this.showCommandStatus("[send requires a message: :send <message>]");
+					return;
+				}
+				const worker = this.state?.workers.find(w => w.id === selectedTask.claimedBy);
+				if (!worker) {
+					this.showCommandStatus("[no active worker for this task]");
+					return;
+				}
+				// Try SDK steer first
+				const steer = getSteer(worker.id);
+				if (steer) {
+					try {
+						await steer(arg);
+						this.showCommandStatus(`[sent ✓]`);
+					} catch (err) {
+						this.showCommandStatus(`[steer error: ${err instanceof Error ? err.message : "unknown"}]`);
+					}
+				} else {
+					// Fallback: write nudge file with user_message type
+					try {
+						await sendNudge(this.coordDir, worker.id, {
+							type: "user_message",
+							message: arg,
+							timestamp: Date.now(),
+						});
+						this.showCommandStatus("[message sent ✓]");
+					} catch (err) {
+						this.showCommandStatus(`[nudge error: ${err instanceof Error ? err.message : "unknown"}]`);
+					}
+				}
+				break;
+			}
+
+			case "retry": {
+				const worker = this.state?.workers.find(w => w.id === selectedTask.claimedBy);
+				if (!worker) {
+					this.showCommandStatus("[no active worker for this task]");
+					return;
+				}
+				try {
+					await sendNudge(this.coordDir, worker.id, {
+						type: "restart",
+						message: "User requested retry from dashboard",
+						timestamp: Date.now(),
+					});
+					this.showCommandStatus("[retry nudge sent ✓]");
+				} catch (err) {
+					this.showCommandStatus(`[retry error: ${err instanceof Error ? err.message : "unknown"}]`);
+				}
+				break;
+			}
+
+			case "skip": {
+				try {
+					const queuePath = path.join(this.coordDir, "tasks.json");
+					const queue = JSON.parse(fs.readFileSync(queuePath, "utf-8")) as { tasks: Task[] };
+					const taskObj = queue.tasks.find(t => t.id === selectedTask.id);
+					if (!taskObj) {
+						this.showCommandStatus("[task not found in queue]");
+						return;
+					}
+					taskObj.status = "skipped";
+					taskObj.deviationLog = [
+						...(taskObj.deviationLog ?? []),
+						{
+							timestamp: Date.now(),
+							what: `Task skipped by user intervention`,
+							why: "User executed :skip command from dashboard",
+							decision: "skip",
+							impact: "Dependents unblocked if deps satisfied",
+						},
+					];
+					// Unblock dependents: if a task depends on this one and all its deps are now satisfied
+					const completedOrSkipped = new Set(
+						queue.tasks
+							.filter(t => t.status === "complete" || t.status === "skipped")
+							.map(t => t.id),
+					);
+					completedOrSkipped.add(selectedTask.id);
+					for (const t of queue.tasks) {
+						if (t.status !== "blocked") continue;
+						const deps = t.dependsOn ?? [];
+						if (deps.every(dep => completedOrSkipped.has(dep))) {
+							t.status = "pending";
+						}
+					}
+					fs.writeFileSync(queuePath, JSON.stringify(queue, null, 2));
+					this.showCommandStatus(`[${selectedTask.id} skipped ✓]`);
+				} catch (err) {
+					this.showCommandStatus(`[skip error: ${err instanceof Error ? err.message : "unknown"}]`);
+				}
+				break;
+			}
+
+			case "pause": {
+				const worker = this.state?.workers.find(w => w.id === selectedTask.claimedBy);
+				if (!worker) {
+					this.showCommandStatus("[no active worker for this task]");
+					return;
+				}
+				try {
+					await sendNudge(this.coordDir, worker.id, {
+						type: "wrap_up",
+						message: "User requested pause from dashboard",
+						timestamp: Date.now(),
+					});
+					this.showCommandStatus("[pause nudge sent ✓]");
+				} catch (err) {
+					this.showCommandStatus(`[pause error: ${err instanceof Error ? err.message : "unknown"}]`);
+				}
+				break;
+			}
+
+			case "logs": {
+				this.rawLogsExpanded = !this.rawLogsExpanded;
+				if (this.rawLogsExpanded) {
+					this.deviationExpanded = true;
+				}
+				this.showCommandStatus(this.rawLogsExpanded ? "[logs expanded]" : "[logs collapsed]");
+				break;
+			}
+
+			default: {
+				this.showCommandStatus(`[unknown command: ${cmd} — use :send :retry :skip :pause :logs]`);
+				break;
+			}
+		}
+	}
+
+	private startCountdownInterval(): void {
+		this.countdownInterval = setInterval(() => {
+			if (this.disposed) return;
+			const escalations = this.state?.escalations ?? [];
+			let changed = false;
+			for (const e of escalations) {
+				const remaining = Math.max(
+					0,
+					Math.round((e.createdAt + e.timeout * 1000 - Date.now()) / 1000),
+				);
+				if (this.escalationCountdowns.get(e.id) !== remaining) {
+					this.escalationCountdowns.set(e.id, remaining);
+					changed = true;
+				}
+			}
+			if (changed) this.tui.requestRender();
+		}, 1000);
+	}
+
+	private showSteerStatus(status: string): void {		this.steerStatus = status;
 		if (this.steerStatusTimeout) clearTimeout(this.steerStatusTimeout);
 		this.steerStatusTimeout = setTimeout(() => {
 			this.steerStatus = null;
@@ -1108,35 +1545,52 @@ export class MiniFooter implements Component {
 		if (!state) return [this.theme.fg("dim", "[coord] --")];
 
 		const th = this.theme;
-		let statusIcon: string;
-		let hint: string;
 
-		if (state.isFailed) {
-			statusIcon = th.fg("error", "\u2717");
-			hint = th.fg("error", "failed");
-		} else if (state.isComplete) {
-			statusIcon = th.fg("success", "\u2713");
-			hint = th.fg("success", "done");
-		} else {
-			statusIcon = th.fg("warning", "\u25cf");
-			hint = th.fg("muted", "/jobs to open");
-		}
+		// TASK-06: task-centric footer when tasks.json exists
+		const footerState: MiniFooterRenderState = {
+			hasTasks: state.hasTasks,
+			completed: state.taskCompleted,
+			total: state.taskTotal,
+			activeTaskId: state.activeTaskId,
+			pendingQuestions: state.pendingQuestions,
+			cost: state.cost,
+			costLimit: state.costLimit,
+			elapsedMs: state.elapsedMs,
+			// Fallback fields
+			phase: state.phase,
+			workerCompleted: state.workerCompleted,
+			workerTotal: state.workerTotal,
+			isComplete: state.isComplete,
+			isFailed: state.isFailed,
+		};
 
-		const status = `[coord] ${state.phase} ${statusIcon} ${state.workers}`;
-		const cost = formatCost(state.cost);
-		const time = th.fg("dim", state.elapsed);
-
-		return [truncateToWidth(`${status} | ${cost} | ${time} | ${hint}`, width)];
+		return renderMiniFooterCompact(footerState, th, width);
 	}
 
 	invalidate(): void {}
 
-	private readState(): { phase: string; workers: string; cost: number; elapsed: string; isComplete: boolean; isFailed: boolean } | null {
+	private readState(): {
+		hasTasks: boolean;
+		phase: string;
+		workerCompleted: number;
+		workerTotal: number;
+		taskCompleted: number;
+		taskTotal: number;
+		activeTaskId?: string;
+		pendingQuestions: number;
+		cost: number;
+		costLimit: number;
+		elapsedMs: number;
+		isComplete: boolean;
+		isFailed: boolean;
+	} | null {
 		try {
 			if (!fs.existsSync(this.coordDir)) return null;
 
 			const workers = readWorkerStatesSync(this.coordDir);
 			const costState = readJsonSync<CostState>(path.join(this.coordDir, "cost.json"));
+			const taskQueue = readJsonSync<TaskQueue>(path.join(this.coordDir, "tasks.json"));
+			const tasks = taskQueue?.tasks || [];
 
 			let currentPhase = "unknown";
 			let startedAt = Date.now();
@@ -1161,14 +1615,32 @@ export class MiniFooter implements Component {
 				}
 			}
 
-			const completed = workers.filter((w) => w.status === "complete").length;
-			const total = workers.length;
+			const workerCompleted = workers.filter((w) => w.status === "complete").length;
+			const workerTotal = workers.length;
+			const taskCompleted = tasks.filter(t => t.status === "complete").length;
+			const taskTotal = tasks.length;
+			const hasTasks = taskTotal > 0;
+
+			// Find active task ID (first claimed task)
+			const activeClaimed = tasks.find(t => t.status === "claimed");
+			const activeTaskId = activeClaimed?.id;
+
+			// Count pending questions from mesh
+			const meshMessages = readJsonlSync<MeshMessage>(path.join(this.coordDir, "mesh.jsonl"));
+			const pendingQuestions = meshMessages.filter(m => m.type === "question").length;
 
 			return {
+				hasTasks,
 				phase: currentPhase,
-				workers: `${completed}/${total}`,
+				workerCompleted,
+				workerTotal,
+				taskCompleted,
+				taskTotal,
+				activeTaskId,
+				pendingQuestions,
 				cost: costState?.total || 0,
-				elapsed: formatDuration(Date.now() - startedAt),
+				costLimit: costState?.limit || 40,
+				elapsedMs: Date.now() - startedAt,
 				isComplete,
 				isFailed,
 			};
@@ -1219,37 +1691,38 @@ export class MiniDashboard implements Component {
 
 		const th = this.theme;
 		const state = this.readState();
-		const lines: string[] = [];
 		const innerWidth = width - 4;
 
 		if (!state) {
-			lines.push(this.border("top", innerWidth, "Coordination"));
-			lines.push(this.boxLine(th.fg("dim", "Loading..."), innerWidth));
-			lines.push(this.border("bottom", innerWidth));
-			this.cachedLines = lines;
+			const loadingLines = [
+				this.border("top", innerWidth, "Coordination"),
+				this.boxLine(th.fg("dim", "Loading..."), innerWidth),
+				this.border("bottom", innerWidth),
+			];
+			this.cachedLines = loadingLines;
 			this.cachedWidth = width;
 			this.cachedVersion = this.version;
-			return lines;
+			return loadingLines;
 		}
 
-		// Top border with title
-		lines.push(this.border("top", innerWidth, "Coordination"));
+		// TASK-06: use task-centric view when tasks exist (1s poll, same state source)
+		const renderState: MiniDashboardRenderState = {
+			hasTasks: state.hasTasks,
+			planName: state.planName,
+			completed: state.tasks.filter(t => t.status === "complete").length,
+			total: state.tasks.length,
+			cost: state.cost,
+			costLimit: state.costLimit,
+			elapsedMs: Date.now() - state.startedAt,
+			tasks: state.tasks,
+			latestDeviation: state.latestDeviation,
+			pendingQuestions: state.pendingQuestions,
+			// Fallback fields for worker-centric view
+			currentPhase: state.currentPhase,
+			workers: state.workers.map(w => ({ id: w.id, status: w.status })),
+		};
 
-		// Phase pipeline
-		lines.push(this.boxLine(this.renderPhasePipeline(state, innerWidth - 2), innerWidth));
-
-		// Tasks rows (can be multiple lines for active tasks)
-		for (const line of this.renderTasksRow(state, innerWidth - 2)) {
-			lines.push(this.boxLine(line, innerWidth));
-		}
-
-		// Workers rows (can be multiple lines for active workers)
-		for (const line of this.renderWorkersRow(state, innerWidth - 2)) {
-			lines.push(this.boxLine(line, innerWidth));
-		}
-
-		// Bottom border
-		lines.push(this.border("bottom", innerWidth));
+		const lines = renderMiniDashboardCompact(renderState, th, width);
 
 		this.cachedLines = lines;
 		this.cachedWidth = width;
@@ -1474,10 +1947,40 @@ export class MiniDashboard implements Component {
 			// Default context window (Claude Sonnet = 200k)
 			const defaultContextWindow = 200000;
 
+			// TASK-06: compute plan-relative progress fields
+			const planName = pipelineState?.planPath
+				? path.basename(pipelineState.planPath, ".md")
+				: "";
+			const costLimit = costState?.limit || 40;
+			const hasTasks = tasks.length > 0;
+
+			// Find latest deviation across all tasks
+			let latestDeviation: { taskId: string; what: string } | undefined;
+			let latestDevTs = 0;
+			for (const task of tasks) {
+				if (task.deviationLog && task.deviationLog.length > 0) {
+					const last = task.deviationLog[task.deviationLog.length - 1];
+					if (last.timestamp > latestDevTs) {
+						latestDevTs = last.timestamp;
+						latestDeviation = { taskId: task.id, what: last.what };
+					}
+				}
+			}
+
+			// Count pending questions from mesh messages
+			const meshMessages = readJsonlSync<MeshMessage>(path.join(this.coordDir, "mesh.jsonl"));
+			const pendingQuestions = meshMessages.filter(m => m.type === "question").length;
+
 			return {
 				currentPhase,
 				cost: costState?.total || 0,
 				elapsed: formatDuration(Date.now() - startedAt),
+				startedAt,
+				hasTasks,
+				planName,
+				costLimit,
+				latestDeviation,
+				pendingQuestions,
 				workers: workers.map(w => {
 					const tokens = w.tokens ?? (w.usage ? w.usage.input + w.usage.output + (w.usage.cacheRead || 0) + (w.usage.cacheWrite || 0) : undefined);
 					const contextWindow = defaultContextWindow;
@@ -1498,6 +2001,7 @@ export class MiniDashboard implements Component {
 					id: t.id,
 					status: t.status,
 					description: t.description,
+					deviationLog: t.deviationLog?.map(d => ({ what: d.what })),
 				})),
 			};
 		} catch {
@@ -1510,6 +2014,7 @@ interface MiniDashboardState {
 	currentPhase: PipelinePhase;
 	cost: number;
 	elapsed: string;
+	startedAt: number;
 	workers: { 
 		id: string; 
 		status: string; 
@@ -1520,5 +2025,278 @@ interface MiniDashboardState {
 		cost?: number; 
 		durationMs?: number;
 	}[];
-	tasks: { id: string; status: string; description: string }[];
+	tasks: { id: string; status: string; description: string; deviationLog?: Array<{ what: string }> }[];
+	// TASK-06: plan-relative progress fields
+	hasTasks: boolean;
+	planName: string;
+	costLimit: number;
+	latestDeviation?: { taskId: string; what: string };
+	pendingQuestions: number;
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// TASK-06: Exported render state types and pure render functions
+// ─────────────────────────────────────────────────────────────────────────────
+
+export interface MiniDashboardRenderState {
+	hasTasks: boolean;
+	planName: string;
+	completed: number;
+	total: number;
+	cost: number;
+	costLimit: number;
+	elapsedMs: number;
+	tasks: { id: string; status: string; description: string; deviationLog?: Array<{ what: string }> }[];
+	latestDeviation?: { taskId: string; what: string };
+	pendingQuestions: number;
+	// Fallback: worker-centric state (used when hasTasks=false)
+	currentPhase?: string;
+	workers?: { id: string; status: string }[];
+}
+
+export interface MiniFooterRenderState {
+	hasTasks: boolean;
+	completed: number;
+	total: number;
+	activeTaskId?: string;
+	pendingQuestions: number;
+	cost: number;
+	costLimit: number;
+	elapsedMs: number;
+	// Fallback: worker-centric state (used when hasTasks=false)
+	phase?: string;
+	workerCompleted?: number;
+	workerTotal?: number;
+	isComplete?: boolean;
+	isFailed?: boolean;
+}
+
+function _miniFormatDuration(ms: number): string {
+	const totalSeconds = Math.floor(ms / 1000);
+	const minutes = Math.floor(totalSeconds / 60);
+	const seconds = totalSeconds % 60;
+	if (minutes === 0) return `${seconds}s`;
+	return `${minutes}m${seconds.toString().padStart(2, "0")}s`;
+}
+
+function _miniBoxLine(content: string, innerWidth: number, theme: Theme): string {
+	const contentWidth = visibleWidth(content);
+	const padding = Math.max(0, innerWidth - contentWidth - 1);
+	return theme.fg("borderMuted", " │") + content + " ".repeat(padding) + theme.fg("borderMuted", "│");
+}
+
+function _miniTaskGlyphRow(
+	tasks: MiniDashboardRenderState["tasks"],
+	theme: Theme,
+	maxWidth: number,
+): string {
+	const th = theme;
+	const parts: string[] = [];
+
+	for (const task of tasks) {
+		let glyph: string;
+		let color: "success" | "warning" | "error" | "muted" | "dim";
+
+		switch (task.status) {
+			case "complete":
+				glyph = "✓";
+				color = "success";
+				break;
+			case "claimed":
+				glyph = "⯈";
+				color = "accent" as "warning"; // accent maps to warning for compat
+				break;
+			case "failed":
+			case "blocked":
+				glyph = "✗";
+				color = "error";
+				break;
+			default:
+				glyph = "○";
+				color = "dim";
+		}
+
+		const isActive = task.status === "claimed";
+		const idStr = task.id;
+		let token: string;
+
+		if (isActive) {
+			// Show description in parens: ⯈T-03(serve-coding-matrix)
+			const descPart = task.description ? `(${task.description.split("\n")[0].trim().slice(0, 24)})` : "";
+			token = th.fg("warning", glyph) + th.fg("accent", idStr) + th.fg("dim", descPart);
+		} else if (color === "success") {
+			token = th.fg("success", glyph) + th.fg("dim", idStr);
+		} else {
+			token = th.fg(color, glyph) + th.fg("dim", idStr);
+		}
+
+		parts.push(token);
+	}
+
+	const row = parts.join(" ");
+	// Truncate to maxWidth (strip ANSI for width check via visibleWidth)
+	if (visibleWidth(row) <= maxWidth) return row;
+	// If too wide, omit task descriptions for active tasks
+	const compactParts: string[] = [];
+	for (const task of tasks) {
+		let glyph: string;
+		switch (task.status) {
+			case "complete": glyph = th.fg("success", "✓"); break;
+			case "claimed": glyph = th.fg("warning", "⯈"); break;
+			case "failed":
+			case "blocked": glyph = th.fg("error", "✗"); break;
+			default: glyph = th.fg("dim", "○");
+		}
+		compactParts.push(glyph + th.fg("dim", task.id));
+	}
+	const compactRow = compactParts.join(" ");
+	if (visibleWidth(compactRow) <= maxWidth) return compactRow;
+	// Still too wide: truncate
+	return compactRow; // truncation handled by boxLine caller
+}
+
+function _miniDeviationRow(state: MiniDashboardRenderState, theme: Theme): string {
+	const th = theme;
+	const parts: string[] = [];
+
+	if (state.latestDeviation) {
+		const { taskId, what } = state.latestDeviation;
+		parts.push(`${th.fg("warning", "⚠")} ${th.fg("accent", taskId)}: ${th.fg("dim", what)}`);
+	}
+
+	if (state.pendingQuestions > 0) {
+		parts.push(`${th.fg("warning", "❓")} ${th.fg("dim", "awaiting input")}`);
+	}
+
+	return parts.join("  ");
+}
+
+/**
+ * Pure render function for MiniDashboard compact view.
+ * When state.hasTasks is true, renders the task-centric 3-line layout (5 lines total with borders).
+ * When false, renders a simple fallback indicator.
+ *
+ * @param state  Pre-computed render state
+ * @param theme  Pi theme for ANSI coloring
+ * @param width  Full terminal width
+ * @returns Array of rendered lines
+ */
+export function renderMiniDashboardCompact(
+	state: MiniDashboardRenderState,
+	theme: Theme,
+	width: number,
+): string[] {
+	const th = theme;
+	const innerWidth = width - 4;
+	const lines: string[] = [];
+
+	if (!state.hasTasks || state.tasks.length === 0) {
+		// Fallback: worker-centric view
+		const phase = state.currentPhase || "unknown";
+		const workerStr = state.workers ? `${state.workers.filter(w => w.status === "complete").length}/${state.workers.length} workers` : "—";
+		const content = `${th.fg("dim", phase)} · ${th.fg("muted", workerStr)}`;
+
+		const titlePart = " Coordination ";
+		const lineLen = innerWidth - visibleWidth(titlePart);
+		lines.push(
+			th.fg("borderMuted", " ╭") +
+			th.fg("dim", "─") +
+			th.fg("accent", titlePart) +
+			th.fg("dim", "─".repeat(Math.max(0, lineLen - 2))) +
+			th.fg("borderMuted", "╮"),
+		);
+		lines.push(_miniBoxLine(content, innerWidth, th));
+		lines.push(th.fg("borderMuted", " ╰") + th.fg("dim", "─".repeat(innerWidth - 1)) + th.fg("borderMuted", "╯"));
+		return lines;
+	}
+
+	// ── Border top (plan name as title) ──
+	const titleStr = state.planName || "Coordination";
+	const titlePart = ` ${titleStr} `;
+	const lineLen = innerWidth - visibleWidth(titlePart);
+	lines.push(
+		th.fg("borderMuted", " ╭") +
+		th.fg("dim", "─") +
+		th.fg("accent", titlePart) +
+		th.fg("dim", "─".repeat(Math.max(0, lineLen - 2))) +
+		th.fg("borderMuted", "╮"),
+	);
+
+	// ── Line 1: plan name, task count, budget, elapsed ──
+	const taskCount = `${state.completed}/${state.total} tasks`;
+	const budget = `$${state.cost.toFixed(2)}/$${state.costLimit.toFixed(0)}`;
+	const elapsed = _miniFormatDuration(state.elapsedMs);
+	const headerLine = `${th.fg("muted", titleStr)}  ${th.fg("success", taskCount)}  ${th.fg("muted", budget)}  ${th.fg("dim", elapsed)}`;
+	lines.push(_miniBoxLine(headerLine, innerWidth, th));
+
+	// ── Line 2: task IDs with status glyphs ──
+	const taskRow = _miniTaskGlyphRow(state.tasks, th, innerWidth - 2);
+	lines.push(_miniBoxLine(taskRow, innerWidth, th));
+
+	// ── Line 3: deviation/question row ──
+	const devRow = _miniDeviationRow(state, th);
+	lines.push(_miniBoxLine(devRow, innerWidth, th));
+
+	// ── Border bottom ──
+	lines.push(th.fg("borderMuted", " ╰") + th.fg("dim", "─".repeat(innerWidth - 1)) + th.fg("borderMuted", "╯"));
+
+	return lines;
+}
+
+/**
+ * Pure render function for MiniFooter compact view.
+ * When state.hasTasks is true, renders: [coord] 3/4 tasks · ⯈T-03 · ❓1 pending · $3.21/$25 · /jobs
+ * When false, renders the legacy worker-centric footer.
+ *
+ * @param state  Pre-computed render state
+ * @param theme  Pi theme for ANSI coloring
+ * @param width  Full terminal width
+ * @returns Array containing exactly 1 line
+ */
+export function renderMiniFooterCompact(
+	state: MiniFooterRenderState,
+	theme: Theme,
+	width: number,
+): string[] {
+	const th = theme;
+
+	if (!state.hasTasks) {
+		// Fallback: legacy worker-centric footer
+		const phase = state.phase || "unknown";
+		const workerStr = `${state.workerCompleted ?? 0}/${state.workerTotal ?? 0}`;
+		let statusIcon: string;
+		let hint: string;
+		if (state.isFailed) {
+			statusIcon = th.fg("error", "✗");
+			hint = th.fg("error", "failed");
+		} else if (state.isComplete) {
+			statusIcon = th.fg("success", "✓");
+			hint = th.fg("success", "done");
+		} else {
+			statusIcon = th.fg("warning", "●");
+			hint = th.fg("muted", "/jobs to open");
+		}
+		const line = `[coord] ${phase} ${statusIcon} ${workerStr} | ${formatCost(state.cost)} | ${_miniFormatDuration(state.elapsedMs)} | ${hint}`;
+		return [truncateToWidth(line, width)];
+	}
+
+	// Task-centric footer
+	const parts: string[] = [];
+	parts.push(th.fg("accent", "[coord]"));
+	parts.push(`${th.fg("success", String(state.completed))}${th.fg("dim", "/")}${th.fg("muted", String(state.total))} ${th.fg("muted", "tasks")}`);
+
+	if (state.activeTaskId) {
+		parts.push(`${th.fg("warning", "⯈")}${th.fg("accent", state.activeTaskId)}`);
+	}
+
+	if (state.pendingQuestions > 0) {
+		parts.push(`${th.fg("warning", "❓")}${state.pendingQuestions} ${th.fg("dim", "pending")}`);
+	}
+
+	parts.push(`${th.fg("muted", "$" + state.cost.toFixed(2))}${th.fg("dim", "/$")}${th.fg("muted", state.costLimit.toFixed(0))}`);
+	parts.push(th.fg("dim", "/jobs"));
+
+	const separator = th.fg("dim", " · ");
+	const line = parts.join(separator);
+	return [truncateToWidth(line, width)];
 }

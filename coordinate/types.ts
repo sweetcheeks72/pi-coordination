@@ -26,11 +26,25 @@ export interface CoordinationMessage {
 	inReplyTo?: string;
 }
 
+export interface EscalationOption {
+	label: string;
+	description?: string;
+}
+
 export interface EscalationRequest {
 	id: string;
 	from: string;
 	question: string;
+	/** Legacy: plain string options */
 	options: string[];
+	/** Enhanced: options with labels and descriptions */
+	richOptions?: EscalationOption[];
+	/** Additional context shown in HTML interview context card */
+	context?: string;
+	/** What the agent assumes if no answer is given */
+	agentAssumption?: string;
+	/** Agent's confidence in the assumption (0–1) */
+	confidence?: number;
 	timeout: number;
 	defaultOption?: number;
 	createdAt: number;
@@ -297,6 +311,7 @@ export type TaskStatus =
 	| "complete"
 	| "failed"
 	| "rejected"
+	| "skipped"
 	| "discovered"; // Runtime discovered task
 
 export type TaskPriority = "P0" | "P1" | "P2" | "P3";
@@ -372,7 +387,7 @@ export type A2APayload =
 	| { type: "status_update"; taskId: string; progress: number; eta?: number }
 	| { type: "completion_notice"; taskId: string; filesModified: string[] };
 
-export type NudgeType = "wrap_up" | "restart" | "abort";
+export type NudgeType = "wrap_up" | "restart" | "abort" | "user_message";
 
 export interface NudgePayload {
 	type: NudgeType;

@@ -129,8 +129,8 @@ export default function registerWorkerExtension(pi: ExtensionAPI): void {
 	});
 
 	pi.on("turn_start", async () => {
-		const nudge = consumeNudgeSync(coordDir, workerId);
-		if (nudge) {
+		const nudges = consumeNudgeSync(coordDir, workerId);
+		for (const nudge of nudges) {
 			emitEvent("worker_nudged", { nudgeType: nudge.type });
 
 			switch (nudge.type) {

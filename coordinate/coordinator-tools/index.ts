@@ -11,6 +11,15 @@ import { discoverAgents } from "../../subagent/agents.js";
 import { FileBasedStorage } from "../state.js";
 import type { WorkerStateFile, IdentityMapping, PreAssignment } from "../types.js";
 import { createWorkerObservability, type ObservabilityContext } from "../observability/index.js";
+import {
+	writeEscalationHTML,
+	writeEscalationResponseFile,
+	startEscalationServer,
+	openInBrowser,
+	logAutoResolutionDeviation,
+	DEFAULT_ESCALATION_TIMEOUT_SECS,
+	DEFAULT_ESCALATION_PORT,
+} from "../escalation.js";
 import { createArtifactPaths } from "../../subagent/artifacts.js";
 import {
 	createContextUpdater,
@@ -39,6 +48,12 @@ import {
 	releaseWorktree,
 	type WorktreeAllocation,
 } from "../worktree-manager.js";
+import {
+	parseAssumptions,
+	extractThinkingSnippet,
+	detectToolFailure,
+	buildDeviationEntry,
+} from "../worker-state-utils.js";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
@@ -105,6 +120,8 @@ export interface WorkerConfig {
 	logicalName: string;
 	workerId: string;
 	identity: string;
+	/** Human-readable description of what this task should do (from tasks.json). */
+	planIntent?: string;
 }
 
 export function spawnWorkerProcess(
@@ -238,6 +255,7 @@ export function spawnWorkerProcess(
 		blockers: [],
 		errorType: null,
 		errorMessage: null,
+		...(config.planIntent ? { planIntent: config.planIntent } : {}),
 	};
 
 	try {
@@ -275,6 +293,10 @@ export function spawnWorkerProcess(
 	let lastOutput = "";
 	let rawOutput = "";
 	let stdoutBuffer = "";
+	// Enriched state tracking
+	let currentProblem: string | null = null;
+	let failedToolName: string | null = null;
+	let localAssumptions: Array<{ text: string; status: "verified" | "unverified"; confidence: "high" | "med" | "low" }> = [];
 
 	const extractFileFromArgs = (toolName: string, args: any): string | null => {
 		if (!args) return null;
@@ -361,6 +383,56 @@ export function spawnWorkerProcess(
 						errorMessage: event.error || event.errorMessage,
 					});
 				}
+
+				// --- currentProblem tracking ---
+				const toolFailure = detectToolFailure({
+					toolName: currentTool,
+					isError: event.isError,
+					success: event.success,
+					error: event.error,
+					errorMessage: event.errorMessage,
+					exitCode: event.exitCode,
+					output: event.output,
+					result: event.result,
+				});
+
+				if (toolFailure) {
+					currentProblem = toolFailure;
+					failedToolName = currentTool;
+					storage.updateWorkerState(workerId, (s) => ({
+						...s,
+						currentProblem: toolFailure,
+					})).catch(() => {});
+				} else if (currentProblem) {
+					// Success after a failure: clear problem, log deviation on associated task
+					const prevProblem = currentProblem;
+					const prevFailedTool = failedToolName;
+					currentProblem = null;
+					failedToolName = null;
+					storage.updateWorkerState(workerId, (s) => {
+						const { currentProblem: _cp, ...rest } = s as WorkerStateFile & { currentProblem?: string };
+						return rest as WorkerStateFile;
+					}).catch(() => {});
+					// Append deviation entry to task queue asynchronously
+					if (taskId) {
+						(async () => {
+							try {
+								const { TaskQueueManager } = await import("../task-queue.js");
+								const tq = new TaskQueueManager(coordDir);
+								const queue = await tq.getQueue();
+								const queueTask = queue.tasks.find((t) => t.id === taskId);
+								if (queueTask) {
+									const entry = buildDeviationEntry(prevProblem, prevFailedTool);
+									const existing = queueTask.deviationLog ?? [];
+									await tq.updateTask(taskId, { deviationLog: [...existing, entry] });
+								}
+							} catch {
+								// Non-fatal: deviation logging is best-effort
+							}
+						})();
+					}
+				}
+				// --- end currentProblem tracking ---
 			}
 			currentTool = null;
 			currentToolArgs = null;
@@ -397,8 +469,31 @@ export function spawnWorkerProcess(
 					tokens = tokenTotals.input + tokenTotals.output + tokenTotals.cacheRead + tokenTotals.cacheWrite;
 					costTotal += usage.cost?.total || 0;
 				}
-				for (const block of msg.content || []) {
+				const contentBlocks: Array<{ type: string; text?: string }> = msg.content || [];
+				for (const block of contentBlocks) {
 					if (block.type === "text" && block.text) rawOutput += block.text;
+				}
+
+				// --- Thinking stream (last 200 chars of this message's text) ---
+				const snippet = extractThinkingSnippet(contentBlocks, 200);
+				if (snippet) {
+					storage.updateWorkerThinking(workerId, snippet).catch(() => {});
+				}
+
+				// --- Assumption parsing ---
+				const fullText = contentBlocks
+					.filter((b) => b.type === "text" && b.text)
+					.map((b) => b.text!)
+					.join("\n");
+				if (fullText) {
+					const newAssumptions = parseAssumptions(fullText, localAssumptions);
+					if (newAssumptions.length > 0) {
+						localAssumptions.push(...newAssumptions);
+						storage.updateWorkerState(workerId, (s) => ({
+							...s,
+							assumptions: [...(s.assumptions ?? []), ...newAssumptions],
+						})).catch(() => {});
+					}
 				}
 			}
 			updateWorkerProgress(true);
@@ -1014,27 +1109,60 @@ ${planContent ? `## Full Plan\n\`\`\`markdown\n${planContent}\n\`\`\`` : ""}
 		{
 			name: "escalate_to_user",
 			label: "Escalate to User",
-			description: "Ask the user a question with timed auto-decision",
+			description: "Ask the user a question with timed auto-decision. Opens HTML interview in browser and shows in TUI QUESTION panel. Both surfaces write to the same response file.",
 			parameters: Type.Object({
-				question: Type.String({ description: "Question to ask" }),
-				options: Type.Array(Type.String(), { description: "Available options" }),
-				timeout: Type.Optional(Type.Number({ description: "Timeout in seconds (default: 60)" })),
-				defaultOption: Type.Optional(Type.Number({ description: "Index of default option (0-based)" })),
+				question: Type.String({ description: "Question to ask the user" }),
+				options: Type.Array(
+					Type.Object({
+						label: Type.String({ description: "Short option label (shown as button text)" }),
+						description: Type.Optional(Type.String({ description: "Tradeoffs / explanation for this option" })),
+					}),
+					{ description: "Available options with optional tradeoff descriptions" },
+				),
+				context: Type.Optional(Type.String({ description: "Additional context shown in HTML interview context card (plan intent, current state, assumptions)" })),
+				agentAssumption: Type.Optional(Type.String({ description: "What the agent will do if no answer is received before timeout" })),
+				confidence: Type.Optional(Type.Number({ description: "Agent's confidence in its assumption (0–1)" })),
+				timeout: Type.Optional(Type.Number({ description: `Timeout in seconds before auto-proceeding (default: ${DEFAULT_ESCALATION_TIMEOUT_SECS})` })),
+				defaultOption: Type.Optional(Type.Number({ description: "Index of default option to use on timeout (0-based)" })),
 			}),
 			async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
 				const obs = getObs(ctx);
 				const id = randomUUID();
-				const timeout = params.timeout || 60;
+				const timeout = params.timeout ?? DEFAULT_ESCALATION_TIMEOUT_SECS;
 
-				await storage.appendEscalation({
+				// Build rich escalation request
+				const richOptions = params.options;
+				const plainOptions = richOptions.map((o) => o.label);
+				const agentAssumption =
+					params.agentAssumption ||
+					(plainOptions[params.defaultOption ?? 0] ?? plainOptions[0] ?? "proceed with default");
+
+				const req = {
 					id,
 					from: identity,
 					question: params.question,
-					options: params.options,
+					options: plainOptions,
+					richOptions,
+					context: params.context,
+					agentAssumption,
+					confidence: params.confidence,
 					timeout,
 					defaultOption: params.defaultOption,
 					createdAt: Date.now(),
-				});
+				};
+
+				// Persist to escalations.jsonl
+				await storage.appendEscalation(req);
+
+				// Generate HTML interview and open in browser
+				let htmlPath: string | null = null;
+				try {
+					const serverState = startEscalationServer(coordDir, DEFAULT_ESCALATION_PORT);
+					htmlPath = writeEscalationHTML(coordDir, req, serverState.port);
+					openInBrowser(htmlPath);
+				} catch {
+					// best-effort — TUI still works
+				}
 
 				// Write structured questions file for Pi's interview tool (HANDRaiser → interview wiring)
 				try {
@@ -1070,10 +1198,11 @@ ${planContent ? `## Full Plan\n\`\`\`markdown\n${planContent}\n\`\`\`` : ""}
 					type: "escalation_created",
 					escalationId: id,
 					question: params.question,
-					options: params.options,
+					options: plainOptions,
 					timeout,
 				});
 
+				// Poll for response
 				const deadline = Date.now() + timeout * 1000;
 				while (Date.now() < deadline) {
 					const response = await storage.getEscalationResponse(id);
@@ -1084,22 +1213,24 @@ ${planContent ? `## Full Plan\n\`\`\`markdown\n${planContent}\n\`\`\`` : ""}
 							choice: response.choice,
 							wasTimeout: false,
 						});
-
 						return {
-							content: [{ type: "text", text: `User chose: ${response.choice}${response.wasTimeout ? " (auto-selected)" : ""}` }],
+							content: [{ type: "text", text: `User chose: ${response.choice}` }],
 							details: response,
 						};
 					}
 					await sleep(1000);
 				}
 
-				const choice = params.options[params.defaultOption || 0];
-				await storage.writeEscalationResponse({
+				// Timeout — auto-proceed with assumption
+				const choice = agentAssumption;
+				const timeoutResponse = {
 					id,
 					choice,
 					wasTimeout: true,
 					respondedAt: Date.now(),
-				});
+				};
+				await storage.writeEscalationResponse(timeoutResponse);
+				logAutoResolutionDeviation(coordDir, req, choice);
 
 				await obs?.events.emit({
 					type: "escalation_responded",
@@ -1109,8 +1240,8 @@ ${planContent ? `## Full Plan\n\`\`\`markdown\n${planContent}\n\`\`\`` : ""}
 				});
 
 				return {
-					content: [{ type: "text", text: `Timeout - using default: ${choice}` }],
-					details: { id, choice, wasTimeout: true, respondedAt: Date.now() },
+					content: [{ type: "text", text: `Timeout — auto-proceeding with assumption: ${choice}` }],
+					details: { id, choice, wasTimeout: true, respondedAt: Date.now(), htmlPath },
 				};
 			},
 		},
@@ -1371,6 +1502,7 @@ ${planContent ? `### Full Plan\n\`\`\`markdown\n${planContent}\n\`\`\`` : ""}
 							logicalName: task.id,
 							workerId,
 							identity: workerIdentity,
+							planIntent: task.description,
 						},
 						coordDir,
 						workerCwd,
@@ -1478,6 +1610,7 @@ ${planContent ? `### Full Plan\n\`\`\`markdown\n${planContent}\n\`\`\`` : ""}
 												logicalName: task.id,
 												workerId: newWorkerId,
 												identity: workerIdentity,
+												planIntent: task.description,
 											},
 											coordDir,
 											await allocateWorktreeForTask(task.id),
@@ -1593,6 +1726,7 @@ ${planContent ? `### Full Plan\n\`\`\`markdown\n${planContent}\n\`\`\`` : ""}
 								logicalName: task.id,
 								workerId: newWorkerId,
 								identity: workerIdentity,
+								planIntent: task.description,
 							},
 							coordDir,
 							await allocateWorktreeForTask(task.id),

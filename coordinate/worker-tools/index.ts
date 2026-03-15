@@ -357,6 +357,19 @@ export function registerWorkerTools(pi: ExtensionAPI, ctx?: WorkerToolsContext):
 					timestamp: Date.now(),
 				});
 
+				// Route worker→coordinator and worker→worker messages through the mesh log
+				await storage.appendMeshMessage({
+					id: msgId,
+					from: workerId,
+					to: params.to,
+					message: params.content,
+					timestamp: Date.now(),
+					taskId: process.env.PI_TASK_ID,
+					type: (msgType === "handover" ? "handoff" :
+					       msgType === "status" ? "coordination" :
+					       "coordination") as "coordination" | "handoff" | "deviation" | "question",
+				}).catch((err: unknown) => { console.warn("[worker-tools] appendMeshMessage failed:", err instanceof Error ? err.message : err); });
+
 				await obs?.events.emit({
 					type: "message_sent",
 					messageId: msgId,
