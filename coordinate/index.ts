@@ -1245,6 +1245,14 @@ See: pi-coordination README for spec format documentation.`,
 			costState.byPhase.workers = workerCost;
 			costState.total += coordinatorResult.usage.cost + workerCost;
 
+			// Budget guard: warn if coordinator spent >$1 before dispatching workers
+			if (coordinatorResult.usage.cost > 1.0 && workerStatesAfterCoord.length === 0) {
+				console.warn(
+					`[coord-budget] ⚠️  Coordinator spent $${coordinatorResult.usage.cost.toFixed(2)} ` +
+					`without dispatching workers. Check coordinator.md budget discipline rules.`
+				);
+			}
+
 			await obs.events.emit({
 				type: "cost_updated",
 				delta: coordinatorResult.usage.cost + workerCost,

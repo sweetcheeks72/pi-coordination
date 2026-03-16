@@ -451,8 +451,8 @@ export class CoordinationDashboard implements Component {
 			activeView: this.activeView,
 			expandedTaskId: this.expandedTaskId,
 			planName: pipelineState?.planPath ? path.basename(pipelineState.planPath, ".md") : undefined,
-			cost: state.costState.total,
-			costLimit: state.costState.limit,
+			cost: state.costState?.total,
+			costLimit: state.costState?.limit,
 			elapsedMs: Date.now() - state.startedAt,
 			currentPhase: pipelineState?.currentPhase,
 			phases: pipelineState?.phases as Partial<Record<PipelinePhase, PhaseResult | undefined>> | undefined,
@@ -479,8 +479,8 @@ export class CoordinationDashboard implements Component {
 		const state = this.state!;
 
 		const elapsed = formatDuration(Date.now() - state.startedAt);
-		const cost = formatCost(state.costState.total);
-		const limit = formatCost(state.costState.limit);
+		const cost = formatCost(state.costState?.total);
+		const limit = formatCost(state.costState?.limit);
 
 		const left = ` ${th.fg("dim", "Cost:")} ${cost} / ${limit} limit`;
 		const right = `${th.fg("dim", "Elapsed:")} ${elapsed}`;
@@ -1588,7 +1588,7 @@ export class MiniFooter implements Component {
 			if (!fs.existsSync(this.coordDir)) return null;
 
 			const workers = readWorkerStatesSync(this.coordDir);
-			const costState = readJsonSync<CostState>(path.join(this.coordDir, "cost.json"));
+			const costState = readJsonSync<CostState>(path.join(this.coordDir, "cost.json")) || { total: 0, limit: 0, byPhase: {}, byWorker: {} };
 			const taskQueue = readJsonSync<TaskQueue>(path.join(this.coordDir, "tasks.json"));
 			const tasks = taskQueue?.tasks || [];
 
@@ -1915,7 +1915,7 @@ export class MiniDashboard implements Component {
 			if (!fs.existsSync(this.coordDir)) return null;
 
 			const workers = readWorkerStatesSync(this.coordDir);
-			const costState = readJsonSync<CostState>(path.join(this.coordDir, "cost.json"));
+			const costState = readJsonSync<CostState>(path.join(this.coordDir, "cost.json")) || { total: 0, limit: 0, byPhase: {}, byWorker: {} };
 			const taskQueue = readJsonSync<TaskQueue>(path.join(this.coordDir, "tasks.json"));
 			const tasks = taskQueue?.tasks || [];
 
