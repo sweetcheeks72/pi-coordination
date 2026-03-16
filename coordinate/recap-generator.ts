@@ -150,8 +150,9 @@ interface AgentActivity {
 
 function buildAgentActivity(workers: WorkerStateFile[], tasks: Task[]): AgentActivity[] {
 	return workers.map((w) => {
-		const durationMs = w.completedAt && w.startedAt ? w.completedAt - w.startedAt : 
-			w.startedAt ? Date.now() - w.startedAt : 0;
+		const durationMs = w.completedAt && w.startedAt 
+			? (typeof w.completedAt === 'number' ? w.completedAt : Date.now()) - w.startedAt 
+			: w.startedAt ? Date.now() - w.startedAt : 0;
 
 		// Find tasks claimed/completed by this worker
 		const completedTasks = tasks
