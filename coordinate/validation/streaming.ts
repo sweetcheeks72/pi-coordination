@@ -99,9 +99,9 @@ export class StreamingValidator {
 
 			case "cost_threshold_crossed":
 				if (event.threshold === "warn") {
-					this.emitWarning("Cost", `Cost threshold warning: $${event.total.toFixed(2)}`);
+					this.emitWarning("Cost", `Cost threshold warning: $${(event.total ?? 0).toFixed(2)}`);
 				} else if (event.threshold === "pause") {
-					this.emitError("Cost", `Cost threshold pause triggered: $${event.total.toFixed(2)}`);
+					this.emitError("Cost", `Cost threshold pause triggered: $${(event.total ?? 0).toFixed(2)}`);
 				}
 				break;
 		}

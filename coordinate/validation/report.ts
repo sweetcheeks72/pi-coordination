@@ -28,7 +28,7 @@ function buildReportContent(
 	lines.push("");
 	lines.push(`**Coordination Session:** ${sessionId}`);
 	lines.push(`**Validated:** ${new Date(result.timestamp).toISOString()}`);
-	lines.push(`**Duration:** ${(result.duration / 1000).toFixed(2)}s`);
+	lines.push(`**Duration:** ${((result.duration ?? 0) / 1000).toFixed(2)}s`);
 	lines.push(`**Result:** ${result.status.toUpperCase()}`);
 	lines.push("");
 	lines.push("---");
@@ -113,8 +113,8 @@ function buildReportContent(
 	if (sessionCompleted?.summary) {
 		const s = sessionCompleted.summary;
 		lines.push(`- **Status:** ${s.status}`);
-		lines.push(`- **Duration:** ${(s.duration / 1000).toFixed(1)}s`);
-		lines.push(`- **Total Cost:** $${s.totalCost.toFixed(4)}`);
+		lines.push(`- **Duration:** ${((s.duration ?? 0) / 1000).toFixed(1)}s`);
+		lines.push(`- **Total Cost:** $${(s.totalCost ?? 0).toFixed(4)}`);
 		lines.push(`- **Workers:** ${s.workersCompleted}/${s.workersSpawned} completed, ${s.workersFailed} failed`);
 		lines.push(`- **Files Modified:** ${s.filesModified.length}`);
 		lines.push(`- **Review Cycles:** ${s.reviewCycles}`);

@@ -111,7 +111,7 @@ export function formatDuration(ms: number): string {
 }
 
 export function formatCost(cost: number): string {
-	return `$${cost.toFixed(2)}`;
+	return `$${(cost ?? 0).toFixed(2)}`;
 }
 
 export function formatContextUsage(tokens: number, maxTokens = 200000): string {
@@ -1254,7 +1254,7 @@ export function renderPlanProgress(
 	const bar = theme.fg("success", "▰".repeat(filled)) + theme.fg("dim", "▱".repeat(empty));
 
 	const countStr = `${done}/${total} done`;
-	const costStr = `$${cost.toFixed(2)}/$${costLimit.toFixed(0)}`;
+	const costStr = `$${(cost ?? 0).toFixed(2)}/$${(costLimit ?? 0).toFixed(0)}`;
 	const timeStr = formatDuration(elapsedMs);
 
 	const summary = `${bar} ${countStr} · ${costStr} · ${timeStr}`;

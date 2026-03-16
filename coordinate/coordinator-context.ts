@@ -600,7 +600,7 @@ export function renderCoordinatorContextMd(context: CoordinatorContext): string 
 		lines.push("|--------|-----------|--------|--------------|--------------|");
 		for (const [, perf] of context.workerPerformance) {
 			const rate = `${(perf.successRate * 100).toFixed(0)}%`;
-			const avg = `${(perf.avgDurationMs / 1000).toFixed(1)}s`;
+			const avg = `${((perf.avgDurationMs ?? 0) / 1000).toFixed(1)}s`;
 			lines.push(
 				`| ${perf.identity.slice(0, 20)} | ${perf.tasksCompleted} | ${perf.tasksFailed} | ${rate} | ${avg} |`,
 			);

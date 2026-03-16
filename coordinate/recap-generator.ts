@@ -64,7 +64,7 @@ function formatDurationMs(ms: number): string {
 
 function formatCostNum(cost: number | undefined): string {
 	const safe = Number.isFinite(cost) ? cost! : 0;
-	return `$${safe.toFixed(4)}`;
+	return `$${(safe ?? 0).toFixed(4)}`;
 }
 
 function esc(s: string): string {

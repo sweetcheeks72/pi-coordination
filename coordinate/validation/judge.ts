@@ -24,8 +24,8 @@ function buildObservabilitySummary(data: ObservabilityData): string {
 	if (sessionCompleted?.summary) {
 		const s = sessionCompleted.summary;
 		lines.push(`Session Status: ${s.status}`);
-		lines.push(`Duration: ${(s.duration / 1000).toFixed(1)}s`);
-		lines.push(`Total Cost: $${s.totalCost.toFixed(4)}`);
+		lines.push(`Duration: ${((s.duration ?? 0) / 1000).toFixed(1)}s`);
+		lines.push(`Total Cost: $${(s.totalCost ?? 0).toFixed(4)}`);
 		lines.push(`Workers: ${s.workersCompleted}/${s.workersSpawned} completed`);
 		if (s.workersFailed > 0) {
 			lines.push(`Workers Failed: ${s.workersFailed}`);

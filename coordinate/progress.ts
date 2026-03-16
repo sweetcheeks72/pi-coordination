@@ -78,7 +78,7 @@ export function generateProgressDoc(
 				lines.push(`- **All Passing:** ${review.allPassing}`);
 				lines.push(`- **Summary:** ${review.summary}`);
 				lines.push(`- **Issues Found:** ${review.issues.length}`);
-				lines.push(`- **Duration:** ${(review.duration / 1000).toFixed(1)}s`);
+				lines.push(`- **Duration:** ${((review.duration ?? 0) / 1000).toFixed(1)}s`);
 				lines.push(`- **Cost:** $${(review.cost ?? 0).toFixed(4)}`);
 				lines.push(``);
 			}
