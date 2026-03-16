@@ -600,12 +600,17 @@ const WorkerSpec = Type.Object({
 	model: Type.Optional(Type.String({ description: "Model override for this worker" })),
 });
 
+/** Escape all regex metacharacters in a string */
+function escapeRegExp(s: string): string {
+  return s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+}
+
 /** Extract only the relevant task section from a full plan */
 function slicePlanForTask(planContent: string, taskId: string): string {
 	if (!planContent || !taskId) return "";
 	// Match the task section: from "## TASK-XX" or "### TASK-XX" to the next task header or end
 	const taskPattern = new RegExp(
-		`(^#{2,3}\\s+${taskId.replace(/[-]/g, '[-]')}[^\\n]*\\n)([\\s\\S]*?)(?=^#{2,3}\\s+TASK-|$)`,
+		`(^#{2,3}\\s+${escapeRegExp(taskId)}[^\\n]*\\n)([\\s\\S]*?)(?=^#{2,3}\\s+TASK-|$)`,
 		'm'
 	);
 	const match = planContent.match(taskPattern);
@@ -1362,9 +1367,7 @@ ${planContent ? `## Full Plan\n\`\`\`markdown\n${planContent}\n\`\`\`` : ""}
 					const allTasksDone = taskStates.every(
 						(t: any) => t.status === "complete" || t.status === "failed" || t.status === "skipped"
 					);
-					const allProcessesExited = true; // activeHandles is scoped to spawn_from_queue; trust allTasksDone
-
-					if (allTasksDone && allProcessesExited) {
+					if (allTasksDone) {
 						// Force-sync worker states before completing
 						for (const w of incompleteWorkers) {
 							await storage.updateWorkerState(w.id, (ws) => ({
@@ -1378,7 +1381,7 @@ ${planContent ? `## Full Plan\n\`\`\`markdown\n${planContent}\n\`\`\`` : ""}
 						return {
 							content: [{
 								type: "text",
-								text: `ERROR: Cannot complete - ${incompleteWorkers.length} worker(s) not finished. Identities: ${incompleteWorkers.map((w) => w.identity || w.id).join(", ")}. All tasks done: ${allTasksDone}, processes exited: ${allProcessesExited}`,
+								text: `ERROR: Cannot complete - ${incompleteWorkers.length} worker(s) not finished. Identities: ${incompleteWorkers.map((w) => w.identity || w.id).join(", ")}. All tasks done: ${allTasksDone}`,
 							}],
 							isError: true,
 							details: undefined,
