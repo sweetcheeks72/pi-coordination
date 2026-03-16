@@ -197,7 +197,7 @@ export async function checkCostLimit(ctx: PipelineContext): Promise<boolean> {
 		ctx.costState.limitReached = true;
 		await ctx.storage.appendEvent({ type: "cost_limit_reached", total, limit, timestamp: Date.now() });
 		await ctx.obs?.events.emit({ type: "cost_limit_reached", total, limit });
-		console.warn(`[COST LIMIT] Reached $${total.toFixed(2)} / $${limit.toFixed(2)} - ending coordination gracefully`);
+		console.warn(`[COST LIMIT] Reached $${(total ?? 0).toFixed(2)} / $${(limit ?? 0).toFixed(2)} - ending coordination gracefully`);
 		ctx.pipelineState.exitReason = "cost_limit";
 		return true;
 	}

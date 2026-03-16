@@ -1390,7 +1390,7 @@ See: pi-coordination README for spec format documentation.`,
 		} else if (pipelineState.exitReason === "max_cycles") {
 			summary = `Coordination completed - max fix cycles (${pipelineState.maxFixCycles}) reached`;
 		} else if (pipelineState.exitReason === "cost_limit") {
-			summary = `Coordination ended - cost limit reached ($${costState.total.toFixed(2)} / $${costState.limit.toFixed(2)})`;
+			summary = `Coordination ended - cost limit reached ($${(costState.total ?? 0).toFixed(2)} / $${(costState.limit ?? 0).toFixed(2)})`;
 		} else {
 			summary = getResultOutput(coordinatorResult) ||
 				(finalState.status === "complete" ? "Coordination completed" : `Coordination ended: ${finalState.status}`);
