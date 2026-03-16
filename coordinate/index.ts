@@ -1901,9 +1901,9 @@ export function createCoordinateTool(events: EventBus): ToolDefinition<typeof Co
 				if (output) {
 					container.addChild(new Text("", 0, 0));
 					container.addChild(new Text(theme.fg("muted", "─── Summary ───"), 0, 0));
-					const lines = output.split("\n").slice(0, 10);
+					const lines = output.split("\n").slice(0, 40);
 					for (const line of lines) {
-						container.addChild(new Text(theme.fg("dim", line.slice(0, 100)), 0, 0));
+						container.addChild(new Text(theme.fg("dim", line.slice(0, 180)), 0, 0));
 					}
 				}
 
@@ -1986,8 +1986,8 @@ export function createCoordinateTool(events: EventBus): ToolDefinition<typeof Co
 			// Events section (outside box for live streaming feel)
 			if (events.length > 0) {
 				container.addChild(new Text("", 0, 0));
-				// Expanded: show 25 events with full paths; Normal: 8 events truncated
-				const eventCount = expanded ? 25 : 8;
+				// Expanded: show 50 events with full paths; Normal: 20 events truncated
+			const eventCount = expanded ? 50 : 20;
 				const recentEvents = events.slice(-eventCount);
 				const firstTs = events[0]?.timestamp || Date.now();
 

@@ -460,10 +460,10 @@ export function renderWorkersCompact(
 			const preview = w.lastOutput
 				.split('\n')
 				.filter(l => l.trim())
-				.slice(-2) // last 2 non-empty lines
+				.slice(-8) // last 8 non-empty lines
 				.join(' │ ');
 			if (preview.length > 0) {
-				const truncated = preview.length > 120 ? preview.slice(0, 117) + '…' : preview;
+				const truncated = preview.length > 170 ? preview.slice(0, 167) + '…' : preview;
 				lines.push(`      ${theme.fg("dim", truncated)}`);
 			}
 		}
