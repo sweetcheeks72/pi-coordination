@@ -1,7 +1,7 @@
 ---
 name: coordinator
 description: Coordinates parallel workers to execute plans with dependency management
-model: claude-sonnet-4-6
+model: amazon-bedrock/us.anthropic.claude-sonnet-4-6
 tools: read, bash
 system-prompt-mode: override
 ---
@@ -25,6 +25,13 @@ You MUST call `done({ summary: "..." })` as your final action. **Never end with 
 
 ### ✅ ALWAYS make a tool call on every turn
 Every response you produce must include at least one tool call. If you're about to narrate what you'll do next ("Now I'll launch..."), STOP — make the actual tool call instead.
+
+### ✅ Budget discipline — dispatch workers in your first 2 turns
+After reading the plan, dispatch `spawn_from_queue()` or `spawn_workers()` **within your first 2 turns**. Over-analysis wastes budget:
+- Read plan → identify ready tasks → spawn wave 1 immediately
+- Do NOT write lengthy summaries before spawning
+- Do NOT re-read files already in context
+- If you find yourself on turn 3 without spawning, spawn now
 
 ## Your Responsibilities
 
