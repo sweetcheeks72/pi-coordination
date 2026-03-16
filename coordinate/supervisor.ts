@@ -286,13 +286,14 @@ export class SupervisorLoop {
 			this.config.maxRestarts,
 		);
 
-		// Also update worker state file so done() doesn't see "working" zombie
+		// Also update worker state file so done() doesn't see "working" zombie.
+		// Race guard: if the worker completed just before abandonment, preserve "complete" status.
 		try {
 			await this.storage.updateWorkerState(workerId, (s) => ({
 				...s,
-				status: "failed",
-				completedAt: Date.now(),
-				errorMessage: `Abandoned after max restart attempts`,
+				status: s.status === "complete" ? "complete" : "failed",
+				completedAt: s.completedAt || Date.now(),
+				errorMessage: s.status === "complete" ? s.errorMessage : `Abandoned after max restart attempts`,
 			}));
 		} catch (_) { /* Non-fatal */ }
 
