@@ -1281,6 +1281,25 @@ See: pi-coordination README for spec format documentation.`,
 			coordExitError = coordinatorResult.exitCode !== 0 || coordinatorResult.stopReason === "error" || coordinatorResult.stopReason === "aborted";
 		}
 
+		// Safety net: ensure CoordinationState.status is never left as "analyzing"
+		try {
+			const stateAfterCoord = await storage.getState();
+			if (stateAfterCoord.status === "analyzing") {
+				const workerStatesForStatus = await storage.listWorkerStates();
+				const anyComplete = workerStatesForStatus.some(w => w.status === "complete");
+				await storage.updateState({
+					status: anyComplete ? "complete" : "failed",
+					completedAt: Date.now(),
+				});
+				console.warn(
+					`[coordination] state.status was still "analyzing" after coordinator exit — ` +
+					`updated to "${anyComplete ? 'complete' : 'failed'}" (fallback path)`
+				);
+			}
+		} catch (err) {
+			console.warn(`[coordination] Failed to update analyzing state fallback: ${err}`);
+		}
+
 		// ── Context Compaction: distill session state at workers→review boundary ──
 		if (!coordExitError && shouldRunPhase("review")) {
 			try {

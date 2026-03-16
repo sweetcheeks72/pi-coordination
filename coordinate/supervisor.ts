@@ -286,6 +286,16 @@ export class SupervisorLoop {
 			this.config.maxRestarts,
 		);
 
+		// Also update worker state file so done() doesn't see "working" zombie
+		try {
+			await this.storage.updateWorkerState(workerId, (s) => ({
+				...s,
+				status: "failed",
+				completedAt: Date.now(),
+				errorMessage: `Abandoned after max restart attempts`,
+			}));
+		} catch (_) { /* Non-fatal */ }
+
 		this.workers.delete(workerId);
 	}
 
