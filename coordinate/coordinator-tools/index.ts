@@ -450,7 +450,7 @@ export function spawnWorkerProcess(
 					}
 				}
 				if (lines.length) {
-					lastOutput = lines.slice(-8).join("\n");
+					lastOutput = lines.slice(-20).join("\n");
 					updateWorkerProgress();
 				}
 			}

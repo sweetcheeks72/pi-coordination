@@ -6,7 +6,7 @@ import { Container, Markdown, Spacer, Text } from "@mariozechner/pi-tui";
 import type { AgentScope } from "./agents.js";
 import type { DisplayItem, SingleResult, SubagentDetails, UsageStats } from "./types.js";
 
-const COLLAPSED_ITEM_COUNT = 10;
+const COLLAPSED_ITEM_COUNT = 20;
 
 function formatTokens(count: number): string {
 	if (count < 1000) return count.toString();
@@ -54,7 +54,7 @@ function formatToolCall(
 	switch (toolName) {
 		case "bash": {
 			const command = (args.command as string) || "...";
-			const preview = command.length > 60 ? `${command.slice(0, 60)}...` : command;
+			const preview = command.length > 150 ? `${command.slice(0, 150)}...` : command;
 			return themeFg("muted", "$ ") + themeFg("toolOutput", preview);
 		}
 		case "read": {
@@ -103,7 +103,7 @@ function formatToolCall(
 		}
 		default: {
 			const argsStr = JSON.stringify(args);
-			const preview = argsStr.length > 50 ? `${argsStr.slice(0, 50)}...` : argsStr;
+			const preview = argsStr.length > 120 ? `${argsStr.slice(0, 120)}...` : argsStr;
 			return themeFg("accent", toolName) + themeFg("dim", ` ${preview}`);
 		}
 	}
@@ -226,7 +226,7 @@ export function renderResult(
 		if (skipped > 0) text += theme.fg("muted", `... ${skipped} earlier items\n`);
 		for (const item of toShow) {
 			if (item.type === "text") {
-				const preview = expanded ? item.text : item.text.split("\n").slice(0, 3).join("\n");
+				const preview = expanded ? item.text : item.text.split("\n").slice(0, 15).join("\n");
 				text += `${theme.fg("toolOutput", preview)}\n`;
 			} else {
 				text += `${theme.fg("muted", "→ ") + formatToolCall(item.name, item.args, theme.fg.bind(theme))}\n`;
@@ -451,3 +451,5 @@ export function renderResult(
 	const text = result.content[0];
 	return new Text(text?.type === "text" ? text.text : "(no output)", 0, 0);
 }
+
+
