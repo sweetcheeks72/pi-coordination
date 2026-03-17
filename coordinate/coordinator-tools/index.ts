@@ -600,6 +600,31 @@ const WorkerSpec = Type.Object({
 	model: Type.Optional(Type.String({ description: "Model override for this worker" })),
 });
 
+/** Escape all regex metacharacters in a string */
+function escapeRegExp(s: string): string {
+  return s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+}
+
+/** Extract only the relevant task section from a full plan */
+function slicePlanForTask(planContent: string, taskId: string): string {
+	if (!planContent || !taskId) return "";
+	// Match the task section: from "## TASK-XX" or "### TASK-XX" to the next task header or end
+	const taskPattern = new RegExp(
+		`(^#{2,3}\\s+${escapeRegExp(taskId)}[^\\n]*\\n)([\\s\\S]*?)(?=^#{2,3}\\s+TASK-|$)`,
+		'm'
+	);
+	const match = planContent.match(taskPattern);
+	if (match) {
+		return match[0].trim();
+	}
+	// Fallback: if can't slice, return a truncated version with a note
+	const maxChars = 3000;
+	if (planContent.length > maxChars) {
+		return planContent.slice(0, maxChars) + "\n\n[Plan truncated — see full spec for details]";
+	}
+	return planContent;
+}
+
 export function createCoordinatorTools(): ToolDefinition<any, any>[] {
 	const coordDir = process.env.PI_COORDINATION_DIR;
 	const identity = process.env.PI_AGENT_IDENTITY;
@@ -1331,17 +1356,37 @@ ${planContent ? `## Full Plan\n\`\`\`markdown\n${planContent}\n\`\`\`` : ""}
 					};
 				}
 
-				const incompleteWorkers = workerStates.filter((w) => w.status !== "complete");
+				const incompleteWorkers = workerStates.filter(
+					(w) => w.status !== "complete" && w.status !== "failed"
+				);
 				if (incompleteWorkers.length > 0) {
-					const workerStatus = workerStates.map((w) => `- ${w.identity}: ${w.status}`).join("\n");
-					return {
-						content: [{
-							type: "text",
-							text: `ERROR: Cannot complete - ${incompleteWorkers.length} worker(s) not finished.\n\nWorker status:\n${workerStatus}\n\nCall check_status() to monitor progress and wait for all workers to complete.`,
-						}],
-						isError: true,
-						details: undefined,
-					};
+					// Exit-latch: if all tasks are complete/failed but worker states lag, allow completion
+					const { TaskQueueManager } = await import("../task-queue.js");
+					const taskQueue = new TaskQueueManager(coordDir);
+					const taskStates = await taskQueue.getAllTasks();
+					const allTasksDone = taskStates.every(
+						(t: any) => t.status === "complete" || t.status === "failed" || t.status === "skipped"
+					);
+					if (allTasksDone) {
+						// Force-sync worker states before completing
+						for (const w of incompleteWorkers) {
+							await storage.updateWorkerState(w.id, (ws) => ({
+								...ws,
+								status: "complete" as const,
+								completedAt: ws.completedAt ?? Date.now(),
+								durationMs: ws.startedAt ? (ws.completedAt ?? Date.now()) - ws.startedAt : ws.durationMs,
+							}));
+						}
+					} else {
+						return {
+							content: [{
+								type: "text",
+								text: `ERROR: Cannot complete - ${incompleteWorkers.length} worker(s) not finished. Identities: ${incompleteWorkers.map((w) => w.identity || w.id).join(", ")}. All tasks done: ${allTasksDone}`,
+							}],
+							isError: true,
+							details: undefined,
+						};
+					}
 				}
 
 				await storage.sendMessage({
@@ -1490,7 +1535,7 @@ ${taskFiles.map(f => `- ${f}`).join("\n") || "No specific files assigned"}
 ### Acceptance Criteria
 ${task.acceptanceCriteria?.map(c => `- ${c}`).join("\n") || "- Complete the task as described"}
 
-${planContent ? `### Full Plan\n\`\`\`markdown\n${planContent}\n\`\`\`` : ""}
+${planContent ? `### Relevant Plan Context\n\`\`\`markdown\n${slicePlanForTask(planContent, task.id)}\n\`\`\`` : ""}
 `;
 
 					const workerCwd = await allocateWorktreeForTask(task.id);
@@ -1547,6 +1592,13 @@ ${planContent ? `### Full Plan\n\`\`\`markdown\n${planContent}\n\`\`\`` : ""}
 						if (exitCode === 0) {
 							await releaseWorktreeForTask(handle.taskId, true);
 							await taskQueue.markTaskComplete(handle.taskId, handle.identity);
+							// Fix: Sync worker state file on successful exit (prevents split-brain deadlock)
+							await storage.updateWorkerState(handle.workerId, (ws) => ({
+								...ws,
+								status: "complete" as const,
+								completedAt: Date.now(),
+								durationMs: ws.startedAt ? Date.now() - ws.startedAt : ws.durationMs,
+							}));
 							// Update coordinator context with success
 							updateAssignmentOutcome(coordContext!, handle.taskId, "success");
 							await saveCoordinatorContext(coordDir, coordContext!);
@@ -1715,7 +1767,7 @@ ${taskFiles2.map(f => `- ${f}`).join("\n") || "No specific files assigned"}
 ### Acceptance Criteria
 ${task.acceptanceCriteria?.map(c => `- ${c}`).join("\n") || "- Complete the task as described"}
 
-${planContent ? `### Full Plan\n\`\`\`markdown\n${planContent}\n\`\`\`` : ""}
+${planContent ? `### Relevant Plan Context\n\`\`\`markdown\n${slicePlanForTask(planContent, task.id)}\n\`\`\`` : ""}
 `;
 
 						const newHandle = spawnWorkerProcess(

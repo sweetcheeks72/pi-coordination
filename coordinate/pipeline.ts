@@ -799,16 +799,25 @@ export async function runReviewFixLoop(
 			cost: integrationResult.cost,
 		});
 
-		// Fix integration issues first — use a separate counter so we don't burn
-		// from the regular review-fix budget (fixes the off-by-one in cycle budget).
+		// Fix integration issues in a loop — use a separate counter so we don't burn
+		// from the regular review-fix budget.
 		// Cap at 3 iterations to prevent infinite loops on persistent integration failures.
 		const maxIntegrationFixes = 3;
 		let integrationFixCycle = 0;
-		integrationFixCycle++;
-		if (integrationFixCycle <= maxIntegrationFixes) {
-			await runFixPhaseWrapper(ctx, config, integrationResult.issues);
+		let currentIntegrationIssues = integrationResult.issues;
+		while (integrationFixCycle < maxIntegrationFixes && currentIntegrationIssues.length > 0) {
+			integrationFixCycle++;
+			await runFixPhaseWrapper(ctx, config, currentIntegrationIssues);
 			if (ctx.pipelineState.exitReason === "max_cycles") {
 				return;
+			}
+			// Re-run integration review to check if issues are resolved
+			if (integrationFixCycle < maxIntegrationFixes) {
+				const recheck = await runIntegrationReviewWrapper(ctx, config);
+				if (recheck.allPassing || recheck.issues.length === 0) {
+					break; // Integration issues resolved
+				}
+				currentIntegrationIssues = recheck.issues;
 			}
 		}
 	}

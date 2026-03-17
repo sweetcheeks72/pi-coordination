@@ -286,11 +286,24 @@ export function buildContinuationPrompt(opts: {
 	sections.push(`4. Call agent_work({ action: 'complete' }) when done`);
 	sections.push("");
 
-	// Include plan if provided
+	// Include plan if provided (sliced to the relevant task section to reduce context noise)
 	if (planContent) {
-		sections.push(`### Full Plan`);
+		const sliced = (() => {
+			if (!task.id) return planContent;
+			const taskPattern = new RegExp(
+				`(^#{2,3}\\s+${task.id.replace(/[-]/g, '[-]')}[^\\n]*\\n)([\\s\\S]*?)(?=^#{2,3}\\s+TASK-|$)`,
+				'm'
+			);
+			const match = planContent.match(taskPattern);
+			if (match) return match[0].trim();
+			const maxChars = 3000;
+			return planContent.length > maxChars
+				? planContent.slice(0, maxChars) + "\n\n[Plan truncated — see full spec for details]"
+				: planContent;
+		})();
+		sections.push(`### Relevant Plan Context`);
 		sections.push("```markdown");
-		sections.push(planContent);
+		sections.push(sliced);
 		sections.push("```");
 	}
 

@@ -561,7 +561,9 @@ ${planContent ? `## Full Plan\n\`\`\`markdown\n${planContent}\n\`\`\`` : ""}
 					};
 				}
 
-				const incompleteWorkers = workerStates.filter((w) => w.status !== "complete");
+				const incompleteWorkers = workerStates.filter(
+					(w) => w.status !== "complete" && w.status !== "failed"
+				);
 				if (incompleteWorkers.length > 0) {
 					const workerStatus = workerStates.map((w) => `- ${w.identity}: ${w.status}`).join("\n");
 					return {

@@ -268,7 +268,7 @@ const CoordinateParams = Type.Object({
 		Type.Boolean({ description: "true = resume from last checkpoint for this spec (task-level resume)" }),
 		Type.String({ description: "Checkpoint ID to resume from (phase-level pipeline checkpoint)" }),
 	], { description: "Resume from checkpoint: pass true for task-level resume (skip already-completed tasks) or a checkpoint ID string for phase-level resume" })),
-	maxFixCycles: Type.Optional(Type.Number({ description: "Maximum review/fix cycles (default: 5)" })),
+	maxFixCycles: Type.Optional(Type.Number({ description: "Maximum review/fix cycles (default: 3)" })),
 	sameIssueLimit: Type.Optional(Type.Number({ description: "Times same issue can recur before giving up (default: 2)" })),
 	checkTests: Type.Optional(Type.Boolean({ description: "Whether reviewer should check for tests (default: true)" })),
 	async: Type.Optional(Type.Boolean({ description: "Run coordination in background (default: false)" })),
@@ -710,12 +710,13 @@ See: pi-coordination README for spec format documentation.`,
 		coordSessionId,
 		planPath,
 		hash(planContent),
-		params.maxFixCycles ?? 5,
+		params.maxFixCycles ?? 3,
 	);
 	const settings = loadCoordinationSettings();
 	const costLimit = params.costLimit ?? settings.costLimit ?? 40;
 	let costState = initializeCostState(costLimit);
 	let reviewHistory: ReviewResult[] = [];
+
 	let resumeFromPhase: PipelinePhase | null = null;
 
 	if (params.resume && typeof params.resume === "string") {
@@ -789,7 +790,7 @@ See: pi-coordination README for spec format documentation.`,
 		coordDir,
 		sessionId: coordSessionId,
 		agents: normalizeAgents(params.agents) ?? settings.agents ?? ["worker", "worker", "worker", "worker"],
-		maxFixCycles: params.maxFixCycles ?? settings.maxFixCycles ?? 5,
+		maxFixCycles: params.maxFixCycles ?? settings.maxFixCycles ?? 3,
 		sameIssueLimit: params.sameIssueLimit ?? 2,
 		checkTests: params.checkTests ?? settings.checkTests ?? true,
 		costLimit,
@@ -862,7 +863,7 @@ See: pi-coordination README for spec format documentation.`,
 		config: {
 			planPath,
 			agents: params.agents,
-			maxFixCycles: params.maxFixCycles ?? 5,
+			maxFixCycles: params.maxFixCycles ?? 3,
 			sameIssueLimit: params.sameIssueLimit ?? 2,
 			costLimit,
 			taskCount: parsedSpec.tasks.length,
@@ -1279,6 +1280,25 @@ See: pi-coordination README for spec format documentation.`,
 			updatePhaseStatus("workers", "complete", pipelineContext);
 
 			coordExitError = coordinatorResult.exitCode !== 0 || coordinatorResult.stopReason === "error" || coordinatorResult.stopReason === "aborted";
+		}
+
+		// Safety net: ensure CoordinationState.status is never left as "analyzing"
+		try {
+			const stateAfterCoord = await storage.getState();
+			if (stateAfterCoord.status === "analyzing") {
+				const workerStatesForStatus = await storage.listWorkerStates();
+				const anyComplete = workerStatesForStatus.some(w => w.status === "complete");
+				await storage.updateState({
+					status: anyComplete ? "complete" : "failed",
+					completedAt: Date.now(),
+				});
+				console.warn(
+					`[coordination] state.status was still "analyzing" after coordinator exit — ` +
+					`updated to "${anyComplete ? 'complete' : 'failed'}" (fallback path)`
+				);
+			}
+		} catch (err) {
+			console.warn(`[coordination] Failed to update analyzing state fallback: ${err}`);
 		}
 
 		// ── Context Compaction: distill session state at workers→review boundary ──

@@ -56,7 +56,7 @@ export function generateCoordinationLog(data: LogData): string {
 		costState,
 	} = data;
 
-	const duration = completedAt - startedAt;
+	const duration = (completedAt || Date.now()) - (startedAt || Date.now());
 	const totalCost = workerStates.reduce((sum, w) => sum + w.usage.cost, 0);
 	const totalTurns = workerStates.reduce((sum, w) => sum + w.usage.turns, 0);
 	const successCount = workerStates.filter(w => w.status === "complete").length;
