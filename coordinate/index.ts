@@ -129,7 +129,7 @@ import {
 	getQALoopSummary,
 } from "./qa-feedback.js";
 import { TaskQueueManager } from "./task-queue.js";
-import { scoreAndCollect, logAudit, checkGate, type HITLMode, type RiskLevel, type ApprovalRequest } from "./hitl-gate.js";
+import { scoreAndCollect, logAudit, checkGate, RISK_TIMEOUTS, RISK_ORDER, type HITLMode, type RiskLevel, type ApprovalRequest } from "./hitl-gate.js";
 import type { SpecTask } from "./spec-parser.js";
 import {
 	shouldUseWorktrees,
@@ -1242,14 +1242,7 @@ See: pi-coordination README for spec format documentation.`,
 
 				// ── TASK-05: Poll for batch approval response ─────────────────────────
 				// Determine the maximum wait timeout from the highest-risk pending task.
-				const RISK_TIMEOUTS: Record<string, number> = {
-					critical: 5 * 60_000,
-					high:     3 * 60_000,
-					medium:   2 * 60_000,
-					low:      0,
-				};
-				const RISK_ORDER = ["low", "medium", "high", "critical"] as const;
-				const maxRisk = pendingApprovals.reduce<string>((max, pa) => {
+				const maxRisk = pendingApprovals.reduce<RiskLevel>((max, pa) => {
 					return RISK_ORDER.indexOf(pa.risk as (typeof RISK_ORDER)[number]) >
 						RISK_ORDER.indexOf(max as (typeof RISK_ORDER)[number])
 						? pa.risk
@@ -1284,6 +1277,7 @@ See: pi-coordination README for spec format documentation.`,
 					);
 					for (const pa of pendingApprovals) {
 						console.warn(`  DENIED (timeout) ${pa.taskId} [${pa.risk}]: ${pa.summary.slice(0, 60)}`);
+						await logAudit(coordDir, pa.taskId, 'coordinator', pa.summary, 'timeout', pa.risk);
 						await taskQueueManager.updateTask(pa.taskId, {
 							status: "skipped",
 							failureReason: `[hitl-gate] HITL approval timed out after ${totalTimeout / 1000}s (risk: ${pa.risk})`,
@@ -1299,7 +1293,7 @@ See: pi-coordination README for spec format documentation.`,
 					console.log(`  Rejected: ${batchResponse.rejected?.length > 0 ? batchResponse.rejected.join(", ") : "(none)"}`);
 
 					// default-deny: build the approved set; anything absent is implicitly rejected.
-					const approvedIds = new Set(batchResponse.approved);
+					const approvedIds = new Set(batchResponse?.approved ?? []);
 					for (const pa of pendingApprovals) {
 						if (!approvedIds.has(pa.taskId)) {
 							// default-deny: not in approved list → rejected (covers explicit rejected[] AND omitted tasks)
