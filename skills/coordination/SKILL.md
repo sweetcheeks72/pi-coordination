@@ -1,133 +1,168 @@
 ---
 name: coordination
-description: Multi-agent coordination for parallel plan execution with the coordinate and coord_output tools.
+description: Multi-agent coordination using pi_messenger/Crew for task orchestration and parallel subagent for bounded execution.
 ---
 
 # Coordination Skill
 
-Multi-agent coordination for parallel task execution using the **two-track architecture**:
-- `plan` tool: Create specs from prose/PRDs (interview → scout → elaborate → structure)
-- `coordinate` tool: Execute TASK-XX format specs (validate → dispatch → execute → review)
+Multi-agent coordination for parallel task execution. Two primary approaches:
 
-**NOTE: The `coordinate` and `plan` tools are only available if the pi-coordination extension is installed.
-If these tools are not available in your session, run `install.sh` from your pi-coordination clone
-and restart Pi.**
+1. **pi_messenger / Crew** — Full orchestration with durable task graphs, file reservations, progress tracking, and worker coordination
+2. **Parallel subagent** — Lightweight parallel dispatch for bounded independent tasks
 
-## Two-Track Architecture
+## Recommended: pi_messenger / Crew
 
-```
-┌─────────────────────────────────────────────────────────────────┐
-│  PLAN TOOL (create specs)          COORDINATE TOOL (execute)    │
-│  ─────────────────────────         ───────────────────────────  │
-│  prose/PRD → interview             TASK-XX spec → validate      │
-│           → scout                              → dispatch       │
-│           → elaborate                          → workers        │
-│           → structure                          → review         │
-│           → spec.md ─────────────────────────→                  │
-└─────────────────────────────────────────────────────────────────┘
-```
+Use **pi_messenger** with Crew for durable multi-agent coordination. Crew provides:
+- Task dependency graphs with automatic sequencing
+- File reservation system to prevent conflicts
+- Real-time progress tracking and heartbeats
+- Worker escalation and error handling
+- Cross-session state persistence
 
-## When to Use Each Tool
-
-### Use `plan` when:
-- User has prose, PRD, or requirements to convert into a spec
-- User says "plan", "create a spec", "help me design"
-- Input is NOT already in TASK-XX format
-
-### Use `coordinate` when:
-- User has a **valid TASK-XX format spec**
-- User says "implement", "execute", "run", "coordinate"
-- The file already contains `## TASK-XX:` sections
-
-## Coordinate Tool
-
-**IMPORTANT:** The `coordinate` tool now requires a valid TASK-XX format spec. It will NOT auto-convert prose or PRDs.
+### Typical Workflow
 
 ```typescript
-// Execute a valid spec
-coordinate({ plan: "./spec.md" })
+// 1. Create a plan from requirements
+plan({ input: "./requirements.md" })
+// → Creates specs/requirements-spec.md
 
-// If validation fails, the error will tell you to use the plan tool first
+// 2. Load the plan into Crew
+pi_messenger({ action: 'plan', prd: './specs/requirements-spec.md' })
+// → Creates task graph in Crew state
+
+// 3. Execute tasks autonomously
+pi_messenger({ action: 'work', autonomous: true })
+// → Workers execute tasks in parallel, respecting dependencies
 ```
 
-### Parameters
+### Core Operations
 
 ```typescript
-coordinate({
-  // Required
-  plan: string,                    // Path to TASK-XX format spec file
+// Join the mesh (first step)
+pi_messenger({ action: 'join' })
 
-  // Common options (all optional)
-  agents: number | string[],       // Worker count or array (default: 4)
-  reviewCycles: number | false,    // Worker self-review cycles (default: 5, false to disable)
-  supervisor: boolean | object,    // Monitor stuck workers (default: true)
-  costLimit: number,               // End gracefully at limit (default: $40)
-  
-  // Async mode
-  async: boolean,                  // Run in background (default: false)
-  
-  // Advanced
-  maxFixCycles: number,            // Review/fix iterations (default: 3)
-  validate: boolean,               // Run validation after (default: false)
-  checkTests: boolean,             // Reviewer checks tests (default: true)
-  
-  // Model overrides (string sets model, object for full config)
-  coordinator: string | { model: string },
-  worker: string | { model: string },
-  reviewer: string | { model: string },
+// Plan from a PRD or spec
+pi_messenger({ action: 'plan', prd: './path/to/spec.md' })
+
+// Execute tasks (autonomous mode runs until done/blocked)
+pi_messenger({ action: 'work' })
+pi_messenger({ action: 'work', autonomous: true })
+
+// Check status
+pi_messenger({ action: 'status' })
+pi_messenger({ action: 'task.list' })
+
+// Manual task control
+pi_messenger({ action: 'task.start', id: 'task-1' })
+pi_messenger({ action: 'task.done', id: 'task-1', summary: '...' })
+
+// File reservations (workers do this automatically)
+pi_messenger({ action: 'reserve', paths: ['src/auth.ts'] })
+pi_messenger({ action: 'release', paths: ['src/auth.ts'] })
+
+// Direct messaging
+pi_messenger({ action: 'send', to: 'worker-name', message: 'Status?' })
+```
+
+### When to Use Crew
+
+- **Multi-file features** with dependencies between tasks
+- **Long-running work** that spans multiple sessions
+- **Parallel workers** that might touch overlapping files
+- **Progress tracking** requirements (dashboards, status updates)
+- **Escalation handling** (blocked workers need coordination)
+
+### Example: Feature Implementation
+
+```typescript
+// Create spec from PRD
+plan({ input: './docs/auth-feature.md', output: './specs/auth-spec.md' })
+
+// Load into Crew
+pi_messenger({ action: 'plan', prd: './specs/auth-spec.md' })
+
+// Review planned tasks
+pi_messenger({ action: 'task.list' })
+
+// Execute autonomously
+pi_messenger({ action: 'work', autonomous: true, concurrency: 4 })
+```
+
+## Alternative: Parallel Subagent
+
+Use **parallel subagent dispatch** for bounded independent tasks without coordination overhead.
+
+```typescript
+// 2-4 independent tasks with no file overlap
+subagent({ 
+  tasks: [
+    { agent: 'worker', task: 'Fix typo in README.md' },
+    { agent: 'worker', task: 'Update changelog' },
+    { agent: 'worker', task: 'Add test for auth.ts' }
+  ]
 })
 ```
+
+### When to Use Parallel Subagent
+
+- **2-4 independent tasks** with no dependencies
+- **No file overlap** between tasks
+- **Bounded work** (each task <30 min)
+- **No progress tracking** needed
+- **Single-session** execution
 
 ### Examples
 
 ```typescript
-// Basic - 4 workers
-coordinate({ plan: "./spec.md" })
+// Simple parallel execution
+subagent({
+  tasks: [
+    { agent: 'worker', task: 'Create types.ts with User interface', model: 'anthropic/claude-sonnet-4-5' },
+    { agent: 'worker', task: 'Create utils.ts with hash function', model: 'anthropic/claude-sonnet-4-5' },
+    { agent: 'worker', task: 'Update README with setup steps', model: 'anthropic/claude-haiku-4-5' }
+  ]
+})
 
-// More workers
-coordinate({ plan: "./spec.md", agents: 8 })
-
-// Async mode - returns immediately, use /jobs to monitor
-coordinate({ plan: "./spec.md", async: true })
-
-// Disable self-review for speed
-coordinate({ plan: "./spec.md", reviewCycles: false })
-
-// Custom models
-coordinate({ 
-  plan: "./spec.md",
-  worker: "claude-sonnet-4-20250514"
+// Research + implementation
+subagent({
+  tasks: [
+    { agent: 'researcher', task: 'Research JWT best practices for Node.js' },
+    { agent: 'scout', task: 'Map current auth implementation' }
+  ]
 })
 ```
 
-### Pipeline Phases (coordinate)
+## Decision Table
 
-1. **Validate** — Checks spec is valid TASK-XX format
-2. **Dispatch** — Assigns tasks to workers respecting dependencies
-3. **Workers** — Execute tasks in parallel with self-review
-4. **Review** — Code reviewer checks all changes
-5. **Fixes** — Workers fix any issues found
-6. **Complete** — Final summary
+| Need | Use | Why |
+|------|-----|-----|
+| Durable task graph with dependencies | **pi_messenger/Crew** | Full orchestration, state persistence |
+| File reservations / conflict prevention | **pi_messenger/Crew** | Prevents parallel write conflicts |
+| Progress tracking / worker monitoring | **pi_messenger/Crew** | Real-time heartbeats, escalations |
+| Multi-session work (resume later) | **pi_messenger/Crew** | Crew state persists across sessions |
+| 2-4 independent bounded tasks | **parallel subagent** | Simple, no coordination overhead |
+| Single-file tasks in parallel | **parallel subagent** | Lightweight, fast dispatch |
+| Legacy specs in TASK-XX format | **coordinate()** (deprecated) | Backward compatibility only |
 
-## Plan Tool
+## Creating Specs with `plan` Tool
 
-Creates TASK-XX specs from prose, PRDs, or requirements through an interactive flow.
+Both Crew and coordinate() require structured specs. Use the `plan` tool to create them:
 
 ```typescript
-// Create spec from a file
+// Create spec from prose/PRD
 plan({ input: "./requirements.md" })
 
 // Create spec from inline text
 plan({ input: "Add user authentication with JWT tokens" })
 
-// Refine an existing spec
+// Refine existing spec
 plan({ continue: "./spec.md" })
 
-// Skip interview (use defaults)
+// Skip interview for speed
 plan({ input: "./prd.md", skipInterview: true })
 ```
 
-### Parameters
+### Plan Parameters
 
 ```typescript
 plan({
@@ -150,84 +185,9 @@ plan({
 })
 ```
 
-### Pipeline Phases (plan)
-
-1. **Interview** — Gather requirements interactively (can skip with Ctrl+D or timeout)
-2. **Scout** — Analyze codebase structure and patterns
-3. **Elaborate** — Expand requirements with codebase context
-4. **Structure** — Convert to TASK-XX format spec
-5. **Output** — Save spec to file
-
-## Required Spec Format (TASK-XX)
-
-The `coordinate` tool requires this format:
-
-```markdown
-# Project Title
-
-Description of what we're building.
-
-## TASK-01: Create auth types
-Priority: P1
-Files: src/types.ts (create)
-Depends on: none
-Acceptance: AuthCredentials and User interfaces exported
-
-## TASK-02: Implement login endpoint
-Priority: P1
-Files: src/routes/auth.ts (create)
-Depends on: TASK-01
-Acceptance: POST /login returns JWT, tests pass
-```
-
-**Required fields per task:**
-- `## TASK-XX: Title` — Task ID and title
-- `Priority: P0|P1|P2|P3` — Execution priority
-- `Files:` — Files to create/modify
-- `Depends on:` — Dependencies (or "none")
-- `Acceptance:` — Testable completion criteria
-
-## Typical Workflow
-
-```typescript
-// 1. User has prose requirements
-plan({ input: "./requirements.md" })
-// → Creates specs/requirements-spec.md
-
-// 2. Execute the generated spec
-coordinate({ plan: "./specs/requirements-spec.md" })
-```
-
-Or if user already has a valid spec:
-
-```typescript
-// Execute directly
-coordinate({ plan: "./valid-spec.md" })
-```
-
-## Monitoring
-
-**During execution:** TUI shows live progress with pipeline status, workers, events.
-
-**Async mode:** Use `/jobs` command to open full dashboard:
-- Pipeline status
-- Task queue with dependencies  
-- Worker status with cost/duration
-- Event stream
-
-## Output Retrieval
-
-When worker output is truncated, use `coord_output`:
-
-```typescript
-coord_output({ ids: ["worker-04ea"] })
-coord_output({ ids: ["scout", "planner", "review"] })
-coord_output({ ids: ["worker-04ea"], format: "stripped" })  // No ANSI codes
-```
-
 ## HITL Gate — Approval Handling During Coordination
 
-During active coordination sessions, Helios must monitor for pending HITL approval requests and respond promptly.
+During active coordination sessions (Crew or coordinate), Helios must monitor for pending HITL approval requests and respond promptly.
 
 ### Detecting Pending Approvals
 
@@ -303,13 +263,132 @@ When `coord_output()` or `check_status()` shows a coordination session is runnin
 - `scopeConfirmed: true` in the request means scope was pre-confirmed via interview; show this context to the user but do NOT use it to auto-approve
 - The hitl/ directory is cleaned up by coordinate after resolution
 
-## DO NOT
+---
 
-- **Don't pass prose to coordinate** — Use `plan` tool first to create a spec
-- **Don't manually write TASK-XX specs** — Let `plan` tool generate them
-- **Don't skip validation errors** — Fix the spec or use `plan` to create a valid one
+## Legacy: coordinate() Tool (Deprecated)
 
-## Error Handling
+> ⚠️ **DEPRECATED**: The `coordinate()` tool is deprecated. Use **pi_messenger/Crew** for new multi-agent work or **parallel subagent** for bounded tasks.
+>
+> This section is preserved for backward compatibility with existing TASK-XX format specs.
+
+**IMPORTANT:** The `coordinate` tool now requires a valid TASK-XX format spec. It will NOT auto-convert prose or PRDs.
+
+```typescript
+// Execute a valid spec
+coordinate({ plan: "./spec.md" })
+
+// If validation fails, the error will tell you to use the plan tool first
+```
+
+### Parameters
+
+```typescript
+coordinate({
+  // Required
+  plan: string,                    // Path to TASK-XX format spec file
+
+  // Common options (all optional)
+  agents: number | string[],       // Worker count or array (default: 4)
+  reviewCycles: number | false,    // Worker self-review cycles (default: 5, false to disable)
+  supervisor: boolean | object,    // Monitor stuck workers (default: true)
+  costLimit: number,               // End gracefully at limit (default: $40)
+  
+  // Async mode
+  async: boolean,                  // Run in background (default: false)
+  
+  // Advanced
+  maxFixCycles: number,            // Review/fix iterations (default: 3)
+  validate: boolean,               // Run validation after (default: false)
+  checkTests: boolean,             // Reviewer checks tests (default: true)
+  
+  // Model overrides (string sets model, object for full config)
+  coordinator: string | { model: string },
+  worker: string | { model: string },
+  reviewer: string | { model: string },
+})
+```
+
+### Examples
+
+```typescript
+// Basic - 4 workers
+coordinate({ plan: "./spec.md" })
+
+// More workers
+coordinate({ plan: "./spec.md", agents: 8 })
+
+// Async mode - returns immediately, use /jobs to monitor
+coordinate({ plan: "./spec.md", async: true })
+
+// Disable self-review for speed
+coordinate({ plan: "./spec.md", reviewCycles: false })
+
+// Custom models
+coordinate({ 
+  plan: "./spec.md",
+  worker: "claude-sonnet-4-20250514"
+})
+```
+
+### Pipeline Phases (coordinate)
+
+1. **Validate** — Checks spec is valid TASK-XX format
+2. **Dispatch** — Assigns tasks to workers respecting dependencies
+3. **Workers** — Execute tasks in parallel with self-review
+4. **Review** — Code reviewer checks all changes
+5. **Fixes** — Workers fix any issues found
+6. **Complete** — Final summary
+
+### Required Spec Format (TASK-XX)
+
+The `coordinate` tool requires this format:
+
+```markdown
+# Project Title
+
+Description of what we're building.
+
+## TASK-01: Create auth types
+Priority: P1
+Files: src/types.ts (create)
+Depends on: none
+Acceptance: AuthCredentials and User interfaces exported
+
+## TASK-02: Implement login endpoint
+Priority: P1
+Files: src/routes/auth.ts (create)
+Depends on: TASK-01
+Acceptance: POST /login returns JWT, tests pass
+```
+
+**Required fields per task:**
+- `## TASK-XX: Title` — Task ID and title
+- `Priority: P0|P1|P2|P3` — Execution priority
+- `Files:` — Files to create/modify
+- `Depends on:` — Dependencies (or "none")
+- `Acceptance:` — Testable completion criteria
+
+### Monitoring
+
+**During execution:** TUI shows live progress with pipeline status, workers, events.
+
+**Async mode:** Use `/jobs` command to open full dashboard:
+- Pipeline status
+- Task queue with dependencies  
+- Worker status with cost/duration
+- Event stream
+
+### Output Retrieval
+
+When worker output is truncated, use `coord_output`:
+
+```typescript
+coord_output({ ids: ["worker-04ea"] })
+coord_output({ ids: ["scout", "planner", "review"] })
+coord_output({ ids: ["worker-04ea"], format: "stripped" })  // No ANSI codes
+```
+
+### Error Handling
 
 If `coordinate` returns a validation error like:
 
