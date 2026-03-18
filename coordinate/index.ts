@@ -129,7 +129,7 @@ import {
 	getQALoopSummary,
 } from "./qa-feedback.js";
 import { TaskQueueManager } from "./task-queue.js";
-import { checkGate, type HITLMode } from "./hitl-gate.js";
+import { scoreAndCollect, logAudit, checkGate, type HITLMode, type RiskLevel, type ApprovalRequest } from "./hitl-gate.js";
 import type { SpecTask } from "./spec-parser.js";
 import {
 	shouldUseWorktrees,
@@ -258,6 +258,7 @@ const CoordinateParams = Type.Object({
 		Type.Literal("permissive"),
 		Type.Literal("off"),
 	], { description: "HITL (Human-in-the-Loop) permission gate mode. 'strict' = require approval for critical AND high severity actions. 'permissive' = require approval for critical-only actions. 'off' = disabled (default: 'permissive')" })),
+	scopeConfirmed: Type.Optional(Type.Boolean({ description: "Informs HITL approval UX only (does NOT bypass the gate). When true, surfaces 'scope was pre-confirmed via interview' in batch approval requests." })),
 	agents: Type.Optional(Type.Union([
 		Type.Array(Type.String()),
 		Type.Number(),
@@ -1169,32 +1170,163 @@ See: pi-coordination README for spec format documentation.`,
 			const taskQueueManager = new TaskQueueManager(coordDir);
 			await taskQueueManager.createFromPlan(planPath, hash(planContent), enrichedEntries);
 
-			// ── HITL Gate: scan tasks for high-stakes patterns before dispatch ──
+			// ── HITL Gate: batch-collect gated tasks before dispatch ──────────────
+			// v2: Uses risk-based routing from scoreTaskRisk() + batch approval request.
+			// LOW risk tasks are auto-approved (audit-only). MEDIUM/HIGH/CRITICAL tasks
+			// are collected and written as a single batch-approval-request.json so the
+			// orchestrator (Helios) can surface them via interview/TUI in one shot.
 			const hitlMode: HITLMode = (params.hitl as HITLMode) ?? "permissive";
+			const pendingApprovals: Array<{ taskId: string; summary: string; risk: RiskLevel }> = [];
+
 			if (hitlMode !== "off") {
-				const heldTaskIds: string[] = [];
+				// BUG-01 fix: score ALL tasks first (non-blocking) then assemble the
+				// batch in one pass.  The old pattern called checkGate() per-task which
+				// blocked on human approval before the batch file was ever written.
 				for (const task of enrichedEntries) {
-					const gateResult = await checkGate(
-						task.id,
-						"coordinator",
-						task.description,
-						coordDir,
-						hitlMode,
-					);
-					if (gateResult.held) {
-						heldTaskIds.push(task.id);
+					const scored = scoreAndCollect(task.id, task.description ?? task.id);
+
+					// LOW risk: auto-approved — audit and skip.
+					if (!scored.shouldGate) {
+						await logAudit(coordDir, task.id, "coordinator", task.description ?? task.id, "auto-approved", scored.risk);
+						continue;
+					}
+
+					// Determine whether this risk level gates under the selected mode.
+					const shouldGate =
+						hitlMode === "strict"
+							? true // strict: medium + high + critical all gate
+							: scored.risk === "high" || scored.risk === "critical"; // permissive
+
+					if (!shouldGate) {
+						// e.g. medium risk in permissive mode — auto-approve with audit.
+						await logAudit(coordDir, task.id, "coordinator", task.description ?? task.id, "auto-approved", scored.risk);
+						continue;
+					}
+
+					pendingApprovals.push({
+						taskId: task.id,
+						summary: task.description || task.id,
+						risk: scored.risk,
+					});
+				}
+			}
+
+			if (pendingApprovals.length > 0) {
+				// Write batch approval request — the orchestrator monitors for this file
+				// and surfaces approvals to the user via interview / TUI (TASK-05).
+				const hitlDir = path.join(coordDir, "hitl");
+				await fs.mkdir(hitlDir, { recursive: true });
+
+				const batchRequestFile = path.join(hitlDir, "batch-approval-request.json");
+				const batchRequest = {
+					tasks: pendingApprovals,
+					requestedAt: Date.now(),
+					scopeConfirmed: (params as any).scopeConfirmed ?? false,
+				};
+				await fs.writeFile(batchRequestFile, JSON.stringify(batchRequest, null, 2), "utf-8");
+
+				console.log(`\n[hitl-gate] ${pendingApprovals.length} task(s) pending approval:`);
+				for (const pa of pendingApprovals) {
+					console.log(`  ${pa.taskId} [${pa.risk}]: ${pa.summary.slice(0, 80)}`);
+				}
+				console.log(`\n  Batch approval request written to: ${batchRequestFile}`);
+				console.log(`  HITL mode: ${hitlMode} | scopeConfirmed: ${batchRequest.scopeConfirmed}\n`);
+
+				// Emit structured status for orchestrator detection (TASK-05 polling hook).
+				if (typeof onUpdate === "function") {
+					onUpdate({
+						content: [{ type: "text", text: `[hitl_approval_pending] ${pendingApprovals.length} task(s) need approval. See ${batchRequestFile}` }],
+						details: undefined as any,
+					});
+				}
+
+				// ── TASK-05: Poll for batch approval response ─────────────────────────
+				// Determine the maximum wait timeout from the highest-risk pending task.
+				const RISK_TIMEOUTS: Record<string, number> = {
+					critical: 5 * 60_000,
+					high:     3 * 60_000,
+					medium:   2 * 60_000,
+					low:      0,
+				};
+				const RISK_ORDER = ["low", "medium", "high", "critical"] as const;
+				const maxRisk = pendingApprovals.reduce<string>((max, pa) => {
+					return RISK_ORDER.indexOf(pa.risk as (typeof RISK_ORDER)[number]) >
+						RISK_ORDER.indexOf(max as (typeof RISK_ORDER)[number])
+						? pa.risk
+						: max;
+				}, "low");
+				const totalTimeout = RISK_TIMEOUTS[maxRisk] ?? (2 * 60_000);
+
+				console.log(`[hitl-gate] Waiting for batch approval (max ${totalTimeout / 1000}s, highest risk: ${maxRisk})...`);
+
+				// Poll every 2 s for the orchestrator's response file.
+				const batchResponseFile = path.join(hitlDir, "batch-approval-response.json");
+				const POLL_INTERVAL = 2_000;
+				const startTime = Date.now();
+				let batchResponse: { approved: string[]; rejected: string[]; respondedAt: number } | null = null;
+
+				while (Date.now() - startTime < totalTimeout) {
+					await new Promise<void>((r) => setTimeout(r, POLL_INTERVAL));
+					try {
+						const raw = await fs.readFile(batchResponseFile, "utf-8");
+						batchResponse = JSON.parse(raw);
+						break;
+					} catch {
+						// File not written yet — keep polling.
 					}
 				}
-				if (heldTaskIds.length > 0) {
-					const bar = "═".repeat(62);
-					console.log(`\n╔${bar}╗`);
-					console.log(`║  ⛔ HITL gates triggered for ${heldTaskIds.length} task(s) — awaiting approval  ║`);
-					console.log(`╚${bar}╝`);
-					for (const id of heldTaskIds) {
-						const gateFile = path.join(coordDir, `hitl-gate-${id}.json`);
-						console.log(`  ${id}  gate file: ${gateFile}`);
+
+				if (!batchResponse) {
+					// Timeout: deny all pending tasks with a clear diagnostic.
+					console.warn(
+						`[hitl-gate] Approval timeout after ${totalTimeout / 1000}s. ` +
+						`Denying all ${pendingApprovals.length} pending task(s).`
+					);
+					for (const pa of pendingApprovals) {
+						console.warn(`  DENIED (timeout) ${pa.taskId} [${pa.risk}]: ${pa.summary.slice(0, 60)}`);
+						await taskQueueManager.updateTask(pa.taskId, {
+							status: "skipped",
+							failureReason: `[hitl-gate] HITL approval timed out after ${totalTimeout / 1000}s (risk: ${pa.risk})`,
+						});
 					}
-					console.log(`\n  HITL mode: ${hitlMode} | Approve or reject in gate files above\n`);
+				} else {
+					// Apply the orchestrator's decisions.
+					// BUG-03 fix: default-deny — tasks NOT present in approved[] are rejected,
+					// even if they are also absent from rejected[].  An incomplete/truncated
+					// response must never silently approve unreviewed tasks.
+					console.log(`[hitl-gate] Batch response received:`);
+					console.log(`  Approved: ${batchResponse.approved.length > 0 ? batchResponse.approved.join(", ") : "(none)"}`);
+					console.log(`  Rejected: ${batchResponse.rejected?.length > 0 ? batchResponse.rejected.join(", ") : "(none)"}`);
+
+					// default-deny: build the approved set; anything absent is implicitly rejected.
+					const approvedIds = new Set(batchResponse.approved);
+					for (const pa of pendingApprovals) {
+						if (!approvedIds.has(pa.taskId)) {
+							// default-deny: not in approved list → rejected (covers explicit rejected[] AND omitted tasks)
+							console.warn(`  REJECTED ${pa.taskId} [${pa.risk}]: ${pa.summary.slice(0, 60)}`);
+							await taskQueueManager.updateTask(pa.taskId, {
+								status: "skipped",
+								failureReason: `[hitl-gate] Rejected by orchestrator — default-deny (risk: ${pa.risk})`,
+							});
+						} else {
+							// Explicitly approved — task stays "pending" and will be picked up normally.
+							console.log(`  APPROVED ${pa.taskId} [${pa.risk}]`);
+						}
+					}
+				}
+
+				// Cleanup hitl/ directory after resolution.
+				try {
+					await fs.unlink(batchRequestFile);
+				} catch {
+					// Ignore cleanup errors — file may already be gone.
+				}
+				if (batchResponse) {
+					try {
+						await fs.unlink(batchResponseFile);
+					} catch {
+						// Ignore cleanup errors.
+					}
 				}
 			}
 		}
