@@ -305,6 +305,9 @@ export const RISK_TIMEOUTS: Record<RiskLevel, number> = {
   low:      0,           // auto-approve, audit only
 };
 
+/** Ordered risk levels from lowest to highest severity. */
+export const RISK_ORDER = ["low", "medium", "high", "critical"] as const;
+
 /**
  * Compatibility wrapper for the old checkGate API.
  * Called by coordinate/index.ts to gate high-stakes tasks.
