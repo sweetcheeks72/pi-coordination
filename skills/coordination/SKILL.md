@@ -225,6 +225,84 @@ coord_output({ ids: ["scout", "planner", "review"] })
 coord_output({ ids: ["worker-04ea"], format: "stripped" })  // No ANSI codes
 ```
 
+## HITL Gate — Approval Handling During Coordination
+
+During active coordination sessions, Helios must monitor for pending HITL approval requests and respond promptly.
+
+### Detecting Pending Approvals
+
+When `coordinate()` is running with `hitl: 'permissive'` or `hitl: 'strict'` mode, it may write an approval request to the coordination directory:
+
+```
+{coordDir}/hitl/batch-approval-request.json
+```
+
+This file contains tasks that require human approval before execution proceeds.
+
+**Format:**
+```json
+{
+  "tasks": [
+    { "taskId": "task-1", "summary": "Deploy to staging", "risk": "medium" },
+    { "taskId": "task-3", "summary": "Migrate schema to v2", "risk": "high" }
+  ],
+  "requestedAt": 1700000000000,
+  "scopeConfirmed": false
+}
+```
+
+### Risk Levels and Timeouts
+
+| Risk | Timeout | Auto-approve? |
+|------|---------|---------------|
+| `low` | n/a | Yes (audit only) |
+| `medium` | 2 minutes | No |
+| `high` | 3 minutes | No |
+| `critical` | 5 minutes | No |
+
+### How Helios Should Respond
+
+1. **Detect the request**: Check for `{coordDir}/hitl/batch-approval-request.json` during coordination status checks
+
+2. **Present via interview tool**:
+```json
+{
+  "title": "HITL Approval Required",
+  "description": "The following tasks need your approval before execution.",
+  "questions": [
+    {
+      "id": "approve_tasks",
+      "type": "multi",
+      "question": "Which tasks should proceed?",
+      "options": ["task-1: Deploy to staging [MEDIUM]", "task-3: Migrate schema to v2 [HIGH]"]
+    }
+  ]
+}
+```
+
+3. **Write the response** to `{coordDir}/hitl/batch-approval-response.json`:
+```json
+{
+  "approved": ["task-1"],
+  "rejected": ["task-3"],
+  "respondedAt": 1700000001000
+}
+```
+
+4. **Respond within the timeout** (max timeout is determined by the highest-risk task in the batch)
+
+### Polling During Coordination
+
+When `coord_output()` or `check_status()` shows a coordination session is running, Helios should:
+1. Check if `{coordDir}/hitl/batch-approval-request.json` exists
+2. If it does and is recent (within 5 minutes), immediately surface the approval UI
+3. Write the response before the timeout expires
+
+### Notes
+- `LOW` risk tasks are never included in approval requests (they auto-proceed with audit logging)
+- `scopeConfirmed: true` in the request means scope was pre-confirmed via interview; show this context to the user but do NOT use it to auto-approve
+- The hitl/ directory is cleaned up by coordinate after resolution
+
 ## DO NOT
 
 - **Don't pass prose to coordinate** — Use `plan` tool first to create a spec
