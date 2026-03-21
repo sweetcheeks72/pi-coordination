@@ -15,6 +15,19 @@ import { buildParentModelEnv, classifyProviderFailure, recordProviderOutcome, re
 const UPDATE_THROTTLE_MS = 250;
 const MAX_RECENT_TOOLS = 5;
 
+// --- Timeout constants ---
+const DEFAULT_SUBAGENT_TIMEOUT_MS = 5 * 60 * 1000; // 5 minutes default
+const STREAMING_IDLE_TIMEOUT_MS = 90 * 1000; // 90s without output → kill
+const ROLE_TIMEOUTS: Record<string, number> = {
+	'scout': 3 * 60 * 1000,      // 3 min
+	'reviewer': 5 * 60 * 1000,   // 5 min
+	'verifier': 3 * 60 * 1000,   // 3 min
+	'worker': 10 * 60 * 1000,    // 10 min
+	'planner': 5 * 60 * 1000,    // 5 min
+	'auditor': 3 * 60 * 1000,    // 3 min
+	'researcher': 5 * 60 * 1000, // 5 min
+};
+
 export interface AgentRuntime {
 	cwd: string;
 }
@@ -28,6 +41,19 @@ function extractToolArgsPreview(args: Record<string, unknown>): string | null {
 		}
 	}
 	return null;
+}
+
+function logTimeoutEvent(agent: string, timeoutMs: number): void {
+	const msg = `[subagent-timeout] ${agent} exceeded ${Math.round(timeoutMs / 1000)}s timeout`;
+	console.error(msg);
+	recordProviderOutcome({
+		provider: 'timeout',
+		model: undefined,
+		agent,
+		status: 'unknown',
+		exitCode: -1,
+		errorMessage: msg,
+	});
 }
 
 function writePromptToTempFile(agentName: string, prompt: string): { dir: string; filePath: string } {
@@ -196,12 +222,34 @@ export async function runSingleAgent(
 
 		args.push(`Task: ${task}`);
 		let wasAborted = false;
+		let wasTimedOut = false;
 		let rawOutput = "";
 
 		const exitCode = await new Promise<number>((resolve) => {
 			const childEnv = buildParentModelEnv(process.env, parentModel);
 			const proc = spawn("pi", args, { cwd: cwd ?? runtime.cwd, shell: false, stdio: ["ignore", "pipe", "pipe"], env: childEnv });
 			let buffer = "";
+
+			// Per-role wall-clock timeout
+			const roleTimeout = ROLE_TIMEOUTS[agentName] ?? DEFAULT_SUBAGENT_TIMEOUT_MS;
+			const timeoutTimer = setTimeout(() => {
+				if (!proc.killed) {
+					wasTimedOut = true;
+					logTimeoutEvent(agentName, roleTimeout);
+					proc.kill('SIGTERM');
+					setTimeout(() => { if (!proc.killed) proc.kill('SIGKILL'); }, 5000);
+				}
+			}, roleTimeout);
+
+			// Streaming idle timeout — reset on each stdout chunk
+			let idleTimer = setTimeout(() => {
+				if (!proc.killed) {
+					wasTimedOut = true;
+					logTimeoutEvent(agentName + '-idle', STREAMING_IDLE_TIMEOUT_MS);
+					proc.kill('SIGTERM');
+					setTimeout(() => { if (!proc.killed) proc.kill('SIGKILL'); }, 5000);
+				}
+			}, STREAMING_IDLE_TIMEOUT_MS);
 
 			const processLine = (line: string) => {
 				if (!line.trim()) return;
@@ -298,6 +346,17 @@ export async function runSingleAgent(
 			};
 
 			proc.stdout.on("data", (data) => {
+				// Reset streaming idle timeout on each chunk of output
+				clearTimeout(idleTimer);
+				idleTimer = setTimeout(() => {
+					if (!proc.killed) {
+						wasTimedOut = true;
+						logTimeoutEvent(agentName + '-idle', STREAMING_IDLE_TIMEOUT_MS);
+						proc.kill('SIGTERM');
+						setTimeout(() => { if (!proc.killed) proc.kill('SIGKILL'); }, 5000);
+					}
+				}, STREAMING_IDLE_TIMEOUT_MS);
+
 				buffer += data.toString();
 				const lines = buffer.split("\n");
 				buffer = lines.pop() || "";
@@ -309,6 +368,8 @@ export async function runSingleAgent(
 			});
 
 			proc.on("close", (code) => {
+				clearTimeout(timeoutTimer);
+				clearTimeout(idleTimer);
 				if (buffer.trim()) processLine(buffer);
 				try {
 					jsonlStream.end();
@@ -338,6 +399,7 @@ export async function runSingleAgent(
 
 		currentResult.exitCode = exitCode;
 		if (wasAborted) currentResult.stopReason = "aborted";
+		if (wasTimedOut) currentResult.stopReason = "timeout";
 		currentResult.durationMs = Date.now() - startTime;
 		const failureCategory = exitCode === 0 ? "success" : classifyProviderFailure(`${currentResult.stderr}
 ${rawOutput}
