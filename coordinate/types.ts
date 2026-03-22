@@ -133,6 +133,8 @@ export interface WorkerStateFile {
 	planIntent?: string;           // What the plan says this task should do
 	currentProblem?: string;       // What challenge/deviation the agent is working on
 	thinkingStream?: string;       // Last N chars of agent reasoning (rolling buffer)
+	lastHeartbeatAt?: number;      // Timestamp of last heartbeat/progress event (TASK-20)
+	feynmanRole?: string;          // Feynman scientist name: Dyson, Arline, Wheeler, Murray, etc.
 	assumptions?: Array<{
 		text: string;
 		status: 'verified' | 'unverified';
