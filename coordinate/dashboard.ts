@@ -612,9 +612,28 @@ export class CoordinationDashboard implements Component {
 			const cost = formatCost(w.usage?.cost || 0).padEnd(7);
 			const turns = `${w.usage?.turns || 0} turns`.padEnd(9);
 
+			// TASK-20: Stale heartbeat indicator — amber pulse after 60s of silence
+			const STALE_THRESHOLD_MS = 60_000;
+			const staleSinceMs = w.lastHeartbeatAt
+				? Date.now() - w.lastHeartbeatAt
+				: w.startedAt
+					? Date.now() - w.startedAt
+					: 0;
+			const isStale = w.status === "working" && staleSinceMs > STALE_THRESHOLD_MS;
+			const staleIndicator = isStale ? th.fg("warning", " ⚠") : "  ";
+
+			// TASK-20: Feynman role badge (shortName from agent identity)
+			const FEYNMAN_MAP: Record<string, string> = {
+				worker: "Dyson", scout: "Arline", planner: "Wheeler",
+				reviewer: "Murray", verifier: "Hans", auditor: "Dirac", researcher: "Tukey",
+			};
+			const agentType = (w.agent || "").toLowerCase().replace(/-.*/, "");
+			const feynman = w.feynmanRole || FEYNMAN_MAP[agentType] || "";
+			const roleTag = feynman ? th.fg("dim", `[${feynman}]`) : "";
+
 			const progress = this.renderProgressBar(w, 10);
 
-			const row = `${prefix}${padToWidth(id, 6)} ${file} ${statusStr} ${duration} ${cost} ${turns} ${progress}`;
+			const row = `${prefix}${padToWidth(id, 6)} ${file} ${statusStr}${staleIndicator} ${duration} ${cost} ${turns} ${roleTag} ${progress}`;
 			const truncatedRow = truncateToWidth(row, width - 1);
 			const paddedRow = truncatedRow + " ".repeat(Math.max(0, width - visibleWidth(truncatedRow) - 1));
 
@@ -1138,7 +1157,12 @@ export class CoordinationDashboard implements Component {
 			this.state = {
 				pipelineState,
 				costState,
-				workers,
+				// TASK-20: Derive lastHeartbeatAt from recentTools if not set
+				workers: workers.map(w => ({
+					...w,
+					lastHeartbeatAt: w.lastHeartbeatAt ??
+						(w.recentTools?.[0]?.endMs ? w.recentTools[0].endMs : w.startedAt),
+				})),
 				events,
 				tasks,
 				startedAt,
