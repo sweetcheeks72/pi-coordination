@@ -378,6 +378,8 @@ export async function runSingleAgent(
 			});
 
 			proc.on("error", () => {
+				clearTimeout(timeoutTimer);
+				clearTimeout(idleTimer);
 				try {
 					jsonlStream.end();
 				} catch {}

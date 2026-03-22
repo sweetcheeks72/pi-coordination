@@ -5,6 +5,7 @@ import { Input, matchesKey, truncateToWidth, visibleWidth } from "@mariozechner/
 import type { Theme } from "@mariozechner/pi-coding-agent";
 import { sendNudge } from "./nudge.js";
 import { getControls, hasControls, hasSteer, getSteer, getAbort } from "./worker-control-registry.js";
+import { getWorkerVisualState, FEYNMAN_MAP, type WorkerVisualState } from "./worker-health.js";
 import {
 	getPendingEscalations,
 	writeEscalationResponseFile,
@@ -580,60 +581,31 @@ export class CoordinationDashboard implements Component {
 			const prefix = isSelected ? th.fg("accent", " \u2192 ") : "   ";
 			const id = w.shortId || w.id.slice(0, 4);
 
-			let statusIcon: string;
-			let statusColor: "success" | "warning" | "error" | "muted";
-			switch (w.status) {
-				case "complete":
-					statusIcon = "\u2713";
-					statusColor = "success";
-					break;
-				case "working":
-					statusIcon = "\u25cf";
-					statusColor = "warning";
-					break;
-				case "waiting":
-				case "blocked":
-					statusIcon = "\u25cb";
-					statusColor = "muted";
-					break;
-				case "failed":
-					statusIcon = "\u2717";
-					statusColor = "error";
-					break;
-				default:
-					statusIcon = "\u25cb";
-					statusColor = "muted";
-			}
+			// TASK-20: Use worker-health.ts 4-state visual indicators
+			const health = getWorkerVisualState(w.status, w.lastHeartbeatAt, w.startedAt);
+			const colorMap: Record<string, "success" | "warning" | "error" | "muted" | "accent"> = {
+				green: "success", amber: "warning", red: "error", cyan: "accent", muted: "muted", dim: "muted",
+			};
+			const statusColor = colorMap[health.colorHint] ?? "muted";
+			const agentType = (w as any).agentType?.toLowerCase?.().replace(/-.*/, "") ?? "worker";
+			const feynman = FEYNMAN_MAP[agentType] ?? agentType;
+			const badge = `${feynman}`;
+			const statusLabel = health.state === "stale"
+				? `${health.icon} stale ${Math.round(health.staleSinceMs / 1000)}s`
+				: `${health.icon} ${padToWidth(health.label, 8)}`;
 
-			const statusStr = th.fg(statusColor, `${statusIcon} ${padToWidth(w.status, 8)}`);
+			const statusStr = th.fg(statusColor, statusLabel);
 			const fileName = w.currentFile ? path.basename(w.currentFile) : "----";
 			const file = padToWidth(truncateToWidth(fileName, 12), 12);
 			const duration = w.startedAt ? formatDuration(Date.now() - w.startedAt).padEnd(7) : "---".padEnd(7);
 			const cost = formatCost(w.usage?.cost || 0).padEnd(7);
 			const turns = `${w.usage?.turns || 0} turns`.padEnd(9);
 
-			// TASK-20: Stale heartbeat indicator — amber pulse after 60s of silence
-			const STALE_THRESHOLD_MS = 60_000;
-			const staleSinceMs = w.lastHeartbeatAt
-				? Date.now() - w.lastHeartbeatAt
-				: w.startedAt
-					? Date.now() - w.startedAt
-					: 0;
-			const isStale = w.status === "working" && staleSinceMs > STALE_THRESHOLD_MS;
-			const staleIndicator = isStale ? th.fg("warning", " ⚠") : "  ";
-
-			// TASK-20: Feynman role badge (shortName from agent identity)
-			const FEYNMAN_MAP: Record<string, string> = {
-				worker: "Dyson", scout: "Arline", planner: "Wheeler",
-				reviewer: "Murray", verifier: "Hans", auditor: "Dirac", researcher: "Tukey",
-			};
-			const agentType = (w.agent || "").toLowerCase().replace(/-.*/, "");
-			const feynman = w.feynmanRole || FEYNMAN_MAP[agentType] || "";
-			const roleTag = feynman ? th.fg("dim", `[${feynman}]`) : "";
-
+			// TASK-20: unified health + badge from worker-health.ts
+			const roleTag = badge ? th.fg("dim", `[${badge}]`) : "";
 			const progress = this.renderProgressBar(w, 10);
 
-			const row = `${prefix}${padToWidth(id, 6)} ${file} ${statusStr}${staleIndicator} ${duration} ${cost} ${turns} ${roleTag} ${progress}`;
+			const row = `${prefix}${padToWidth(id, 6)} ${file} ${statusStr} ${duration} ${cost} ${turns} ${roleTag} ${progress}`;
 			const truncatedRow = truncateToWidth(row, width - 1);
 			const paddedRow = truncatedRow + " ".repeat(Math.max(0, width - visibleWidth(truncatedRow) - 1));
 
