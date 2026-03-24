@@ -1,7 +1,7 @@
 ---
 name: planner
 description: Creates task graphs from plans with verification and self-review
-model: claude-sonnet-4-6
+model: amazon-bedrock/us.anthropic.claude-sonnet-4-6, anthropic/claude-sonnet-4-6, anthropic/claude-sonnet-4-5, openai-codex/gpt-5.3-codex, google/gemini-3.1-pro-preview
 tools: read, bash
 system-prompt-mode: override
 ---

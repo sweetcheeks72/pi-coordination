@@ -38,27 +38,59 @@ export type RiskLevel = 'low' | 'medium' | 'high' | 'critical';
 export function scoreTaskRisk(description: string): RiskLevel {
   const d = description.toLowerCase();
 
+  const DEBUG_RISK = process.env.HITL_DEBUG === '1';
+
+  // Helper: check if two patterns appear within `maxGap` chars of each other.
+  // Prevents false positives from matching words in unrelated paragraphs.
+  const nearMatch = (patternA: RegExp, patternB: RegExp, maxGap = 80): boolean => {
+    const matchesA = [...d.matchAll(new RegExp(patternA.source, 'gi'))];
+    const matchesB = [...d.matchAll(new RegExp(patternB.source, 'gi'))];
+    for (const a of matchesA) {
+      for (const b of matchesB) {
+        const aEnd = (a.index ?? 0) + a[0].length;
+        const bStart = b.index ?? 0;
+        const bEnd = bStart + b[0].length;
+        const aStart = a.index ?? 0;
+        // Check if they're within maxGap of each other (in either order)
+        if (Math.abs(aEnd - bStart) <= maxGap || Math.abs(bEnd - aStart) <= maxGap) {
+          return true;
+        }
+      }
+    }
+    return false;
+  };
+
   // ── CRITICAL ────────────────────────────────────────────────────
-  // Destructive verb + production/schema/data target (combined context)
+  // Destructive verb + production/schema/data target — must be NEAR each other
   if (
-    /\b(delete|drop|destroy|purge|wipe)\b.*\b(prod|production|schema|data|table|database)\b/i.test(d) ||
-    /\b(force[- ]push|rm\s+-rf)\b.*\b(main|master|prod)/i.test(d)
+    nearMatch(/\b(delete|drop|destroy|purge|wipe)\b/, /\b(prod|production|schema|data|table|database)\b/) ||
+    nearMatch(/\b(force[- ]push|rm\s+-rf)\b/, /\b(main|master|prod)\b/)
   ) {
     return 'critical';
   }
   // Phrase-level critical patterns
-  if (/\b(delete all|drop table|truncate|wipe.*data|purge.*schema)\b/i.test(d)) {
+  if (/\b(delete all|drop table|truncate\s+table|wipe.*data|purge.*schema)\b/i.test(d)) {
     return 'critical';
   }
 
   // ── HIGH ─────────────────────────────────────────────────────────
-  // Schema migrations, deploy-to-prod, bare force-push / rm -rf / truncate
+  // Schema migrations, deploy-to-prod, bare force-push / rm -rf
   if (
-    /\b(migrate\s+schema|deploy\s+(to\s+)?prod(uction)?|force[- ]push|rm\s+-rf|drop\s+table|truncate)\b/i.test(d)
+    /\b(migrate\s+schema|deploy\s+(to\s+)?prod(uction)?|force[- ]push|rm\s+-rf|drop\s+table)\b/i.test(d)
   ) {
     return 'high';
   }
-  // delete / force-push without a "safe" qualifier (read/scout/analyze/review/check/inspect)
+  // `truncate` is HIGH only when NEAR a DB context word (proximity-based).
+  // "Truncate tool output" in one paragraph + "No schema changes" in another = LOW.
+  // "Truncate the data table" = HIGH, but "Truncate tool output. No schema changes." = LOW.
+  // Sentence-level check: split on sentence boundaries, only flag if SAME segment has both words.
+  if (/\btruncate\b/i.test(d)) {
+    const segments = d.split(/[.\n|]+/);
+    const truncateNearDB = segments.some(seg =>
+      /\btruncate\b/i.test(seg) && /\b(table|data|schema|sql|query|rows|database|column)\b/i.test(seg)
+    );
+    if (truncateNearDB) return 'high';
+  }  // delete / force-push without a "safe" qualifier (read/scout/analyze/review/check/inspect)
   if (
     /\b(delete|force[- ]push)\b/i.test(d) &&
     !/\b(read|scout|analyze|review|check|inspect)\b/i.test(d)
@@ -74,6 +106,19 @@ export function scoreTaskRisk(description: string): RiskLevel {
     // Destructive override: safe qualifiers (review, inspect, etc.) do NOT neutralise
     // explicitly destructive operations. "review and delete schema" is still high-risk.
     if (/\b(delete|drop|destroy|purge|wipe|rm\s+-rf|force.push|migrate.*schema)\b/i.test(d)) {
+      // Don't escalate 'delete' alone when it appears in test/code/review context
+      const hasOnlyDelete = /\bdelete\b/i.test(d) && !/\b(drop|destroy|purge|wipe|rm\s+-rf|force.push|migrate)\b/i.test(d);
+      const isTestContext = /\b(test|tests|testing|spec|unit|mock|stub|coverage|vitest|jest)\b/i.test(d);
+      if (hasOnlyDelete && isTestContext) {
+        return 'low';
+      }
+      // For 'delete' alone in a review/analyze context, check if it's near a dangerous target
+      if (hasOnlyDelete) {
+        const nearDangerousTarget = nearMatch(/\bdelete\b/, /\b(prod|production|schema|data|table|database|server|cluster|bucket|volume)\b/);
+        if (!nearDangerousTarget) {
+          return 'low'; // "delete monitor" in code logic context, no dangerous target nearby
+        }
+      }
       return 'high';
     }
     return 'low';

@@ -1,7 +1,7 @@
 ---
 name: coordinator
 description: Coordinates parallel workers to execute plans with dependency management
-model: claude-sonnet-4-6
+model: amazon-bedrock/us.anthropic.claude-sonnet-4-6, anthropic/claude-sonnet-4-6, anthropic/claude-sonnet-4-5, openai-codex/gpt-5.3-codex, google/gemini-3.1-pro-preview
 tools: read, bash
 system-prompt-mode: override
 ---

@@ -1,7 +1,7 @@
 ---
 name: worker
 description: Feynman Worker (Dyson) — Coordination variant with TDD implementation and multi-agent coordination tools
-model: claude-sonnet-4-6
+model: amazon-bedrock/us.anthropic.claude-sonnet-4-6, anthropic/claude-sonnet-4-6, anthropic/claude-sonnet-4-5, openai-codex/gpt-5.3-codex, google/gemini-3.1-pro-preview
 skills: feynman-shared, tdd-enforcement, worker-methodology
 tools: read, write, edit, bash, grep, find, ls, search_codebase, query_code_matrix, mcp, pi_messenger, interview
 defaultProgress: true

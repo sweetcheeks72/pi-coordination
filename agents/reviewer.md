@@ -1,7 +1,7 @@
 ---
 name: reviewer
 description: Reviews code changes from coordination session, looking for bugs, errors, and issues
-model: claude-sonnet-4-6
+model: amazon-bedrock/us.anthropic.claude-sonnet-4-6, anthropic/claude-sonnet-4-6, anthropic/claude-sonnet-4-5, openai-codex/gpt-5.3-codex, google/gemini-3.1-pro-preview
 tools: read, bash
 extensions:
   - ../../extensions/coordination/hooks/enforce-json.ts
