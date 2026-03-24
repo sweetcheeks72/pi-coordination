@@ -218,6 +218,51 @@ async function main() {
 		assertEqual(risk, "low", "Code-level delete logic in review context should be low");
 	});
 
+	await runner.test("'truncate tool output' with 'no schema changes' 340 chars apart is LOW", async () => {
+		const risk = scoreTaskRisk(
+			"## Logic — Fix AgentExecutor State Machine\n" +
+			"### ERD\n- **Entities:** AgentSession (status field behavior change)\n- No schema changes\n" +
+			"### Backend Mapping\n" +
+			"| `src/services/agent/executor.ts` | 1) Guard complete() with timedOut flag. " +
+			"2) Capture lastResponseContent fallback. 3) On JSON parse fail, append error as tool result " +
+			"instead of empty args. 4) Truncate tool output to 4096 chars |"
+		);
+		assertEqual(risk, "low", "truncate + schema in distant paragraphs should be low");
+	});
+
+	await runner.test("'delete monitor' in code review context is LOW", async () => {
+		const risk = scoreTaskRisk(
+			"Review and analyze the triage action paths: fix_pr, tune_monitor, delete_monitor, escalate, none. " +
+			"Check each branch for correctness."
+		);
+		assertEqual(risk, "low", "delete_monitor in review context should be low");
+	});
+
+	await runner.test("'drop table users in production' is still CRITICAL (proximity)", async () => {
+		const risk = scoreTaskRisk("We need to drop table users in production to reset the schema");
+		assertEqual(risk, "critical", "drop + production nearby should be critical");
+	});
+
+	await runner.test("'delete' far from 'production' in long description is LOW", async () => {
+		const risk = scoreTaskRisk(
+			"## Task: Add unit tests for delete_monitor path in triage service.\n" +
+			"### ERD\n- No schema changes. No production impact.\n" +
+			"### Backend Mapping\n" +
+			"Review test coverage for all triage action branches."
+		);
+		assertEqual(risk, "low", "delete in test context + production far away = low");
+	});
+
+	await runner.test("'destroy the production database' is CRITICAL (words near each other)", async () => {
+		const risk = scoreTaskRisk("destroy the production database and all backups");
+		assertEqual(risk, "critical", "destroy + production nearby = critical");
+	});
+
+	await runner.test("'truncate data in staging' is HIGH (words near each other)", async () => {
+		const risk = scoreTaskRisk("truncate data in the staging environment");
+		assertEqual(risk, "high", "truncate + data nearby = high");
+	});
+
 	// ─────────────────────────────────────────────────────────────────────────
 	const { failed } = runner.summary();
 	if (failed > 0) process.exit(1);
