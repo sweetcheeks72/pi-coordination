@@ -38,6 +38,8 @@ export type RiskLevel = 'low' | 'medium' | 'high' | 'critical';
 export function scoreTaskRisk(description: string): RiskLevel {
   const d = description.toLowerCase();
 
+  const DEBUG_RISK = process.env.HITL_DEBUG === '1';
+
   // Helper: check if two patterns appear within `maxGap` chars of each other.
   // Prevents false positives from matching words in unrelated paragraphs.
   const nearMatch = (patternA: RegExp, patternB: RegExp, maxGap = 80): boolean => {
@@ -80,11 +82,15 @@ export function scoreTaskRisk(description: string): RiskLevel {
   }
   // `truncate` is HIGH only when NEAR a DB context word (proximity-based).
   // "Truncate tool output" in one paragraph + "No schema changes" in another = LOW.
-  // "Truncate the data table" = HIGH (words within 80 chars).
-  if (nearMatch(/\btruncate\b/, /\b(table|data|schema|sql|query|rows|database|column)\b/)) {
-    return 'high';
-  }
-  // delete / force-push without a "safe" qualifier (read/scout/analyze/review/check/inspect)
+  // "Truncate the data table" = HIGH, but "Truncate tool output. No schema changes." = LOW.
+  // Sentence-level check: split on sentence boundaries, only flag if SAME segment has both words.
+  if (/\btruncate\b/i.test(d)) {
+    const segments = d.split(/[.\n|]+/);
+    const truncateNearDB = segments.some(seg =>
+      /\btruncate\b/i.test(seg) && /\b(table|data|schema|sql|query|rows|database|column)\b/i.test(seg)
+    );
+    if (truncateNearDB) return 'high';
+  }  // delete / force-push without a "safe" qualifier (read/scout/analyze/review/check/inspect)
   if (
     /\b(delete|force[- ]push)\b/i.test(d) &&
     !/\b(read|scout|analyze|review|check|inspect)\b/i.test(d)
