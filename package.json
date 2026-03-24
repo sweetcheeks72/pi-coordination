@@ -10,7 +10,8 @@
     "test": "npx jiti tests/unit/sdk-runner-env-restore.test.ts && npx jiti tests/unit/spec-validator.test.ts && npx jiti tests/unit/spec-parser.test.ts && npx jiti tests/unit/new-features.test.ts && npx jiti tests/unit/background-runner.test.ts && npx jiti tests/unit/pr-history-loader.test.ts"
   },
   "devDependencies": {
-    "jiti": "^2.6.1"
+    "jiti": "^2.6.1",
+    "@mariozechner/pi-coding-agent": "*"
   },
   "pi": {
     "extensions": [
