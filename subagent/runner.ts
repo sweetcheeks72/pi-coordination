@@ -18,6 +18,7 @@ const MAX_RECENT_TOOLS = 5;
 // --- Timeout constants ---
 const DEFAULT_SUBAGENT_TIMEOUT_MS = 5 * 60 * 1000; // 5 minutes default
 const STREAMING_IDLE_TIMEOUT_MS = 90 * 1000; // 90s without output → kill
+const COORDINATOR_IDLE_TIMEOUT_MS = 30 * 60 * 1000; // 30 min — coordinator blocks on spawn_workers
 const ROLE_TIMEOUTS: Record<string, number> = {
 	'scout': 3 * 60 * 1000,      // 3 min
 	'reviewer': 5 * 60 * 1000,   // 5 min
@@ -26,6 +27,8 @@ const ROLE_TIMEOUTS: Record<string, number> = {
 	'planner': 5 * 60 * 1000,    // 5 min
 	'auditor': 3 * 60 * 1000,    // 3 min
 	'researcher': 5 * 60 * 1000, // 5 min
+	'coordination/coordinator': 30 * 60 * 1000, // 30 min (blocks on spawn_workers)
+	'coordinator': 30 * 60 * 1000,              // 30 min (alias)
 };
 
 export interface AgentRuntime {
@@ -242,14 +245,15 @@ export async function runSingleAgent(
 			}, roleTimeout);
 
 			// Streaming idle timeout — reset on each stdout chunk
+			const idleMs = agentName.includes('coordinator') ? COORDINATOR_IDLE_TIMEOUT_MS : STREAMING_IDLE_TIMEOUT_MS;
 			let idleTimer = setTimeout(() => {
 				if (!proc.killed) {
 					wasTimedOut = true;
-					logTimeoutEvent(agentName + '-idle', STREAMING_IDLE_TIMEOUT_MS);
+					logTimeoutEvent(agentName + '-idle', idleMs);
 					proc.kill('SIGTERM');
 					setTimeout(() => { if (!proc.killed) proc.kill('SIGKILL'); }, 5000);
 				}
-			}, STREAMING_IDLE_TIMEOUT_MS);
+			}, idleMs);
 
 			const processLine = (line: string) => {
 				if (!line.trim()) return;
