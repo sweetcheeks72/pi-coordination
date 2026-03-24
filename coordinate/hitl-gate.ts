@@ -47,14 +47,21 @@ export function scoreTaskRisk(description: string): RiskLevel {
     return 'critical';
   }
   // Phrase-level critical patterns
-  if (/\b(delete all|drop table|truncate|wipe.*data|purge.*schema)\b/i.test(d)) {
+  if (/\b(delete all|drop table|truncate\s+table|wipe.*data|purge.*schema)\b/i.test(d)) {
     return 'critical';
   }
 
   // ── HIGH ─────────────────────────────────────────────────────────
-  // Schema migrations, deploy-to-prod, bare force-push / rm -rf / truncate
+  // Schema migrations, deploy-to-prod, bare force-push / rm -rf
   if (
-    /\b(migrate\s+schema|deploy\s+(to\s+)?prod(uction)?|force[- ]push|rm\s+-rf|drop\s+table|truncate)\b/i.test(d)
+    /\b(migrate\s+schema|deploy\s+(to\s+)?prod(uction)?|force[- ]push|rm\s+-rf|drop\s+table)\b/i.test(d)
+  ) {
+    return 'high';
+  }
+  // `truncate` is HIGH only when paired with DB context (not "truncate string output")
+  if (
+    /\btruncate\b/i.test(d) &&
+    /\b(table|data|schema|sql|query|rows|database|column)\b/i.test(d)
   ) {
     return 'high';
   }
@@ -74,6 +81,12 @@ export function scoreTaskRisk(description: string): RiskLevel {
     // Destructive override: safe qualifiers (review, inspect, etc.) do NOT neutralise
     // explicitly destructive operations. "review and delete schema" is still high-risk.
     if (/\b(delete|drop|destroy|purge|wipe|rm\s+-rf|force.push|migrate.*schema)\b/i.test(d)) {
+      // Don't escalate 'delete' alone when it appears in test/code context
+      const hasOnlyDelete = /\bdelete\b/i.test(d) && !/\b(drop|destroy|purge|wipe|rm\s+-rf|force.push|migrate)\b/i.test(d);
+      const isTestContext = /\b(test|tests|testing|spec|unit|mock|stub|coverage|vitest|jest|review|check|inspect|analyze|analyse|audit)\b/i.test(d);
+      if (hasOnlyDelete && isTestContext) {
+        return 'low';
+      }
       return 'high';
     }
     return 'low';

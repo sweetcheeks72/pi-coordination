@@ -19,6 +19,7 @@ import * as os from "node:os";
 import { TestRunner, assertEqual, assert, assertExists } from "../test-utils.js";
 import {
 	requestApproval,
+	scoreTaskRisk,
 	type HitlGateOptions,
 	type ApprovalResponse,
 } from "../../coordinate/hitl-gate.js";
@@ -179,6 +180,42 @@ async function main() {
 		} finally {
 			await fs.rm(tmpDir, { recursive: true, force: true });
 		}
+	});
+
+	// ─────────────────────────────────────────────────────────────────────────
+	// scoreTaskRisk — false positive regression tests
+	// ─────────────────────────────────────────────────────────────────────────
+
+	runner.section("scoreTaskRisk — false positive regression");
+
+	await runner.test("'Truncate tool output to 4096 chars' is LOW, not HIGH", async () => {
+		const risk = scoreTaskRisk("Fix timeout status overwrite, empty finalOutput, tool JSON parse error handling. Truncate tool output to 4096 chars max.");
+		assertEqual(risk, "low", "Programming truncate should be low risk");
+	});
+
+	await runner.test("'TRUNCATE TABLE users' is still CRITICAL", async () => {
+		const risk = scoreTaskRisk("Run TRUNCATE TABLE users to clear test data");
+		assertEqual(risk, "critical", "SQL TRUNCATE TABLE should be critical");
+	});
+
+	await runner.test("'truncate the data' is still HIGH", async () => {
+		const risk = scoreTaskRisk("truncate the data in the staging schema");
+		assertEqual(risk, "high", "truncate + data context should be high");
+	});
+
+	await runner.test("test description with 'noise/delete' is LOW", async () => {
+		const risk = scoreTaskRisk("Add tests for noise/tune, noise/delete, escalate status, concurrent guard. Unit test coverage for review findings.");
+		assertEqual(risk, "low", "Test descriptions mentioning delete should be low risk");
+	});
+
+	await runner.test("'delete the production database' is still CRITICAL", async () => {
+		const risk = scoreTaskRisk("delete the production database");
+		assertEqual(risk, "critical", "Deleting production should be critical");
+	});
+
+	await runner.test("'delete monitor when noise confidence > 0.8' is LOW (code logic)", async () => {
+		const risk = scoreTaskRisk("Review and check delete monitor logic when noise confidence exceeds threshold");
+		assertEqual(risk, "low", "Code-level delete logic in review context should be low");
 	});
 
 	// ─────────────────────────────────────────────────────────────────────────
