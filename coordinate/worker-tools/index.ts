@@ -152,7 +152,10 @@ export function registerWorkerTools(pi: ExtensionAPI, ctx?: WorkerToolsContext):
 	const coordDir = ctx?.coordDir ?? process.env.PI_COORDINATION_DIR;
 	const identity = ctx?.identity ?? process.env.PI_AGENT_IDENTITY;
 	const workerId = ctx?.workerId ?? process.env.PI_WORKER_ID;
-	const freshEyesEnabled = process.env.PI_FRESH_EYES_ENABLED !== "false"; // Enabled by default
+	// Fresh Eyes disabled when sdk self-review is active (they're redundant)
+	// sdk-worker.ts handles adaptive self-review with file-awareness
+	const sdkReviewActive = process.env.PI_SELF_REVIEW_ENABLED !== "false";
+	const freshEyesEnabled = !sdkReviewActive && process.env.PI_FRESH_EYES_ENABLED !== "false";
 
 	if (!coordDir || !identity || !workerId) {
 		throw new Error("Worker tools require context or PI_COORDINATION_DIR, PI_AGENT_IDENTITY, and PI_WORKER_ID environment variables");
