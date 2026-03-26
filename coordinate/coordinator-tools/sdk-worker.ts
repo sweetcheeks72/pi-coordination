@@ -40,8 +40,98 @@ function isNoIssuesResponse(text: string): boolean {
 		/code\s+(is|looks)\s+(clean|correct|good)/i,
 		/nothing\s+to\s+(fix|report|change)/i,
 		/lgtm/i,
+		/implementation\s+(is|looks)\s+(correct|complete|solid)/i,
+		/changes?\s+(look|are)\s+(good|correct|clean)/i,
+		/meets?\s+(the|all)\s+(acceptance|criteria|requirements)/i,
+		/verified.*(?:works?|correct|passing)/i,
 	];
 	return noIssuePatterns.some(p => p.test(text));
+}
+
+/**
+ * Read the worker state file to get tracked filesModified.
+ * Falls back to empty array on any error.
+ */
+function readWorkerFilesModified(coordDir: string, workerId: string): string[] {
+	try {
+		const statePath = path.join(coordDir, `worker-${workerId}.json`);
+		const raw = fsSync.readFileSync(statePath, "utf-8");
+		const state = JSON.parse(raw);
+		return Array.isArray(state.filesModified) ? state.filesModified : [];
+	} catch {
+		return [];
+	}
+}
+
+/**
+ * Detect if the worker ran verification commands (tests, build, lint).
+ * Scans the last N assistant messages for verification signals.
+ */
+function detectVerificationRan(messages: unknown[]): boolean {
+	const verifyPatterns = [
+		/tests?\s+(pass|passing|passed|succeed|green)/i,
+		/build\s+(succeed|success|passed|complete)/i,
+		/lint.*pass/i,
+		/\b(npm|pnpm|yarn|bun)\s+(test|run\s+test)/i,
+		/vitest|jest|mocha|pytest|cargo\s+test/i,
+		/tsc\s+--noEmit/i,
+		/✅.*test/i,
+	];
+	// Check last 5 messages for verification signals
+	const recent = messages.slice(-5);
+	for (const msg of recent) {
+		const text = extractTextGlobal(msg);
+		if (verifyPatterns.some(p => p.test(text))) return true;
+	}
+	return false;
+}
+
+/** Extract text from any message (used by detectVerificationRan) */
+function extractTextGlobal(message: unknown): string {
+	const msg = message as { role?: string; content?: Array<{ type: string; text?: string }> | string };
+	if (!msg) return "";
+	if (typeof msg.content === "string") return msg.content;
+	if (!Array.isArray(msg.content)) return "";
+	return msg.content
+		.filter((block) => block.type === "text")
+		.map((block) => block.text || "")
+		.join("\n");
+}
+
+/**
+ * Adaptive cycle count — adjusts based on what actually happened.
+ * No files modified → 0 (auto-pass)
+ * Files modified + tests passed → 1 (quick sanity)
+ * Files modified, no tests, single file → 1
+ * Files modified, no tests, multi-file → 2
+ */
+function getAdaptiveMaxCycles(filesModified: string[], verificationRan: boolean, configMax: number): number {
+	if (!filesModified.length) return 0;
+	if (verificationRan) return Math.min(1, configMax);
+	if (filesModified.length > 3) return Math.min(2, configMax);
+	return Math.min(1, configMax);
+}
+
+/**
+ * Spec-aware review prompt — references actual files and acceptance criteria
+ * instead of generic "look for bugs".
+ */
+function getAdaptiveReviewPrompt(filesModified: string[], specPath?: string): string {
+	const fileList = filesModified.length > 0
+		? `\nFiles you modified:\n${filesModified.map(f => "- " + f).join("\n")}\n`
+		: "";
+	const specRef = specPath
+		? `\nRe-read the acceptance criteria in the spec: ${specPath}\n`
+		: "";
+
+	return `Do a focused review of your changes.${fileList}${specRef}
+Check specifically:
+1. Does your implementation match the acceptance criteria for this task?
+2. Any obvious bugs or logic errors in the code you changed?
+3. Missing error handling for the happy path?
+
+If your changes meet the acceptance criteria and have no obvious issues, respond with: "No issues found."
+If you find issues, fix them and then call agent_work({ action: 'complete' }) again.`;
 }
 
 /**
@@ -88,14 +178,7 @@ function createWorkerExtensionFactory(ctx: WorkerContext) {
 				.join("\n");
 		}
 
-		function getSelfReviewPrompt(): string {
-			const specInstruction = specPath
-				? `\n\nMake sure you re-read the spec before you review:\n${specPath}\n`
-				: "";
-
-			return `Great, now I want you to carefully read over all of the new code you just wrote and other existing code you just modified with "fresh eyes," looking super carefully for any obvious bugs, errors, problems, issues, confusion, etc.${specInstruction}
-If any issues are found, proceed to fix them without being asked to do so. If no issues are found then your response MUST contain these exact words: "No issues found."`;
-		}
+		// getSelfReviewPrompt replaced by getAdaptiveReviewPrompt (module-level function)
 
 		function emitEvent(type: string, data: Record<string, unknown>): void {
 			try {
@@ -110,7 +193,7 @@ If any issues are found, proceed to fix them without being asked to do so. If no
 			} catch {}
 		}
 
-		// Tool call handler for self-review blocking
+		// Tool call handler for adaptive self-review blocking
 		pi.on("tool_call", async (event) => {
 			if (event.toolName !== "agent_work") return;
 			if (event.input.action !== "complete") return;
@@ -118,9 +201,20 @@ If any issues are found, proceed to fix them without being asked to do so. If no
 			if (selfReview.passed) return;
 
 			const result = typeof event.input.result === "string" ? event.input.result : "Task finished";
-			const filesModified = Array.isArray(event.input.filesModified)
+			const explicitFiles = Array.isArray(event.input.filesModified)
 				? (event.input.filesModified as string[])
 				: undefined;
+
+			// Read tracked filesModified from worker state (more reliable than explicit param)
+			const trackedFiles = readWorkerFilesModified(coordDir, workerId);
+			const filesModified = explicitFiles?.length ? explicitFiles : trackedFiles;
+
+			// ADAPTIVE: Auto-pass if no files were modified (read-only/verification tasks)
+			if (!filesModified.length) {
+				selfReview.passed = true;
+				emitEvent("self_review_skipped", { reason: "no_files_modified" });
+				return; // Don't block — let completion through immediately
+			}
 
 			selfReview.pendingCompletion = { result, filesModified };
 
@@ -130,7 +224,7 @@ If any issues are found, proceed to fix them without being asked to do so. If no
 			};
 		});
 
-		// Agent end handler for self-review continuation
+		// Agent end handler for adaptive self-review continuation
 		pi.on("agent_end", async (event) => {
 			if (!selfReviewEnabled) return;
 			if (!selfReview.pendingCompletion) return;
@@ -157,14 +251,25 @@ If any issues are found, proceed to fix them without being asked to do so. If no
 				return;
 			}
 
-			if (selfReview.count >= maxSelfReviewCycles) {
+			// ADAPTIVE: Calculate max cycles based on what actually happened
+			const filesModified = selfReview.pendingCompletion.filesModified || [];
+			const verificationRan = detectVerificationRan(messages);
+			const adaptiveMax = getAdaptiveMaxCycles(filesModified, verificationRan, maxSelfReviewCycles);
+
+			if (selfReview.count >= adaptiveMax) {
 				selfReview.passed = true;
-				emitEvent("self_review_limit_reached", { maxCycles: maxSelfReviewCycles });
+				emitEvent("self_review_limit_reached", {
+					maxCycles: adaptiveMax,
+					configMax: maxSelfReviewCycles,
+					filesModified: filesModified.length,
+					verificationRan,
+					reason: adaptiveMax < maxSelfReviewCycles ? "adaptive_reduction" : "config_limit",
+				});
 
 				pi.sendMessage(
 					{
 						customType: "self-review-limit",
-						content: `Max self-review cycles (${maxSelfReviewCycles}) reached. Proceeding. Call agent_work({ action: 'complete', result: '${selfReview.pendingCompletion.result.replace(/'/g, "\\'")}' }) now.`,
+						content: `Self-review complete (${selfReview.count}/${adaptiveMax} cycles). Proceeding. Call agent_work({ action: 'complete', result: '${selfReview.pendingCompletion.result.replace(/'/g, "\\'")}' }) now.`,
 						display: true,
 					},
 					{ triggerTurn: true },
@@ -173,12 +278,16 @@ If any issues are found, proceed to fix them without being asked to do so. If no
 			}
 
 			selfReview.count++;
-			emitEvent("self_review_started", { cycleNumber: selfReview.count });
+			emitEvent("self_review_started", {
+				cycleNumber: selfReview.count,
+				adaptiveMax,
+				filesModified: filesModified.length,
+			});
 
 			pi.sendMessage(
 				{
 					customType: "self-review",
-					content: getSelfReviewPrompt(),
+					content: getAdaptiveReviewPrompt(filesModified, specPath),
 					display: true,
 				},
 				{ triggerTurn: true },

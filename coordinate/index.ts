@@ -778,7 +778,7 @@ See: pi-coordination README for spec format documentation.`,
 		reviewer: paramReviewer?.model || getAgentModel("coordination/reviewer") || defaultModel,
 	};
 
-	const reviewCycles = params.reviewCycles ?? settings.reviewCycles ?? 5;
+	const reviewCycles = params.reviewCycles ?? settings.reviewCycles ?? 2; // Reduced from 5: adaptive review makes cycles more effective
 	const selfReviewConfig = {
 		enabled: reviewCycles !== false,
 		maxCycles: reviewCycles === false ? 0 : reviewCycles,
